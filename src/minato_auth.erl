@@ -37,6 +37,19 @@ queries, which is exactly the outcome verifying the signature is meant to
 prevent. Only an exchange that reached `verified`, or one that never started
 because the server asked for no password, ends in `authenticated`.
 
+Changing method part way through is refused for the same reason. A server that
+opened with `AuthenticationSASL` and then asks for a cleartext password, or for
+MD5, is asking the client to hand over something weaker than the exchange it
+already began, which is what a man in the middle who cannot finish SCRAM would
+do next.
+
+That guard is worth having but it is not a policy. A server that asks for
+cleartext in its very first message is answered, because that is what
+supporting cleartext means, and minato has no way yet to be told which methods
+are acceptable. A `require_auth` style option belongs with the connection layer,
+along with TLS, since both are decisions about the transport rather than about
+the exchange.
+
 ## Methods
 
 | Server asks for | minato answers with |
@@ -148,15 +161,12 @@ step(authentication_ok, #state{sasl = verified}) ->
     authenticated;
 step(authentication_ok, #state{user = User}) ->
     bad(authentication_ok, sasl_exchange_unfinished, User);
-step(authentication_cleartext_password, State) ->
-    {send, {password, password(State, authentication_cleartext_password)}, State};
-step({authentication_md5_password, Salt}, #state{user = User} = State) ->
-    Password = password(State, authentication_md5_password),
-    {send, {password, md5(User, Password, Salt)}, State};
-step({authentication_sasl, Mechanisms}, #state{user = User} = State) ->
-    Mechanism = mechanism(Mechanisms, User),
-    {Message, Client} = minato_scram:client_first(User, State#state.scram_opts),
-    {send, {sasl_initial_response, Mechanism, Message}, State#state{sasl = {pending, Client}}};
+step(authentication_cleartext_password, #state{sasl = Sasl} = State) ->
+    cleartext(Sasl, State);
+step({authentication_md5_password, Salt}, #state{sasl = Sasl} = State) ->
+    md5(Sasl, Salt, State);
+step({authentication_sasl, Mechanisms}, #state{sasl = Sasl} = State) ->
+    sasl(Sasl, Mechanisms, State);
 step({authentication_sasl_continue, Data}, #state{sasl = Sasl} = State) ->
     sasl_continue(Sasl, Data, State);
 step({authentication_sasl_final, Data}, #state{sasl = Sasl} = State) ->
@@ -164,20 +174,41 @@ step({authentication_sasl_final, Data}, #state{sasl = Sasl} = State) ->
 step(Message, #state{user = User}) ->
     bad(Message, unsupported_method, User).
 
+-spec cleartext(sasl(), state()) -> step().
+cleartext({pending, _Client}, #state{user = User}) ->
+    bad(authentication_cleartext_password, method_changed_mid_exchange, User);
+cleartext(_Sasl, State) ->
+    {send, {password, password(State, authentication_cleartext_password)}, State}.
+
+-spec md5(sasl(), binary(), state()) -> step().
+md5({pending, _Client}, _Salt, #state{user = User}) ->
+    bad(authentication_md5_password, method_changed_mid_exchange, User);
+md5(_Sasl, Salt, #state{user = User} = State) ->
+    Password = password(State, authentication_md5_password),
+    {send, {password, md5_digest(User, Password, Salt)}, State}.
+
+-spec sasl(sasl(), [binary()], state()) -> step().
+sasl({pending, _Client}, _Mechanisms, #state{user = User}) ->
+    bad(authentication_sasl, method_changed_mid_exchange, User);
+sasl(_Sasl, Mechanisms, #state{user = User} = State) ->
+    Mechanism = mechanism(Mechanisms, User),
+    {Message, Client} = minato_scram:client_first(User, State#state.scram_opts),
+    {send, {sasl_initial_response, Mechanism, Message}, State#state{sasl = {pending, Client}}}.
+
 -spec sasl_continue(sasl(), binary(), state()) -> step().
 sasl_continue({pending, Client}, Data, State) ->
     Password = password(State, authentication_sasl_continue),
     {Message, Next} = minato_scram:client_final(Data, Password, Client),
     {send, {sasl_response, Message}, State#state{sasl = {pending, Next}}};
 sasl_continue(_Sasl, _Data, #state{user = User}) ->
-    bad(authentication_sasl_continue, sasl_exchange_not_started, User).
+    bad(authentication_sasl_continue, no_sasl_exchange_in_progress, User).
 
 -spec sasl_final(sasl(), binary(), state()) -> step().
 sasl_final({pending, Client}, Data, State) ->
     ok = minato_scram:server_final(Data, Client),
     {continue, State#state{sasl = verified}};
 sasl_final(_Sasl, _Data, #state{user = User}) ->
-    bad(authentication_sasl_final, sasl_exchange_not_started, User).
+    bad(authentication_sasl_final, no_sasl_exchange_in_progress, User).
 
 -spec mechanism([binary()], binary()) -> binary().
 mechanism(Mechanisms, User) ->
@@ -192,8 +223,8 @@ password(#state{password = undefined, user = User}, Message) ->
 password(#state{password = Password}, _Message) ->
     Password.
 
--spec md5(binary(), binary(), binary()) -> binary().
-md5(User, Password, Salt) ->
+-spec md5_digest(binary(), binary(), binary()) -> binary().
+md5_digest(User, Password, Salt) ->
     Inner = binary:encode_hex(crypto:hash(md5, <<Password/binary, User/binary>>), lowercase),
     Outer = binary:encode_hex(crypto:hash(md5, <<Inner/binary, Salt/binary>>), lowercase),
     <<"md5", Outer/binary>>.
