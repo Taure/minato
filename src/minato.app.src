@@ -2,7 +2,7 @@
     {description, "An independent Erlang Postgres client"},
     {vsn, "git"},
     {registered, []},
-    {applications, [kernel, stdlib]},
+    {applications, [kernel, stdlib, crypto, public_key, ssl]},
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
