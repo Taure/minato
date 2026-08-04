@@ -78,6 +78,7 @@ the server issued is the whole of the authorisation.
     next/2,
     parameters/1,
     parameter/2,
+    transaction_status/1,
     backend_key/1,
     timeout/1
 ]).
@@ -94,6 +95,7 @@ the server issued is the whole of the authorisation.
     buffer = ~"" :: binary(),
     pending = [] :: [minato_protocol:backend()],
     parameters = #{} :: #{binary() => binary()},
+    status = idle :: minato_protocol:transaction_status(),
     key :: key() | undefined,
     timeout :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
@@ -272,7 +274,7 @@ would be hiding the one thing the message exists to announce.
 """.
 -spec next(conn(), timeout()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
 next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
-    {ok, Message, Conn#conn{pending = Rest}};
+    {ok, Message, noted(Message, Conn#conn{pending = Rest})};
 next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
     case minato_protocol:frame(Buffer, FrameOpts) of
         {[], _Rest} ->
@@ -281,8 +283,13 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
                 {error, Reason} -> {error, Reason}
             end;
         {[Message | Rest], Remainder} ->
-            {ok, Message, Conn#conn{buffer = Remainder, pending = Rest}}
+            Read = Conn#conn{buffer = Remainder, pending = Rest},
+            {ok, Message, noted(Message, Read)}
     end.
+
+-spec noted(minato_protocol:backend(), conn()) -> conn().
+noted({ready_for_query, Status}, Conn) -> Conn#conn{status = Status};
+noted(_Message, Conn) -> Conn.
 
 -doc "Every parameter the server has reported, by name.".
 -spec parameters(conn()) -> #{binary() => binary()}.
@@ -298,6 +305,18 @@ them; which others a server volunteers is the server's choice.
 -spec parameter(conn(), binary()) -> binary() | undefined.
 parameter(#conn{parameters = Parameters}, Name) ->
     maps:get(Name, Parameters, undefined).
+
+-doc """
+What the server last said about the transaction on this connection.
+
+Taken from the status byte of every `ReadyForQuery` as it is read, so it is only
+as current as the last message the caller read. `failed` is a transaction in
+which a statement has already errored, and everything further is rejected until
+it is rolled back.
+""".
+-spec transaction_status(conn()) -> minato_protocol:transaction_status().
+transaction_status(#conn{status = Status}) ->
+    Status.
 
 -doc "The key `cancel/1` needs, for a caller that wants to cancel from elsewhere.".
 -spec backend_key(conn()) -> key() | undefined.

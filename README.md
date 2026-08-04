@@ -6,9 +6,9 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer, the protocol layer, authentication, the connection
-and the query paths exist; there is no pool, no published package and no stable
-API. Do not depend on it.
+Early. The type codec layer, the protocol layer, authentication, the connection,
+the query paths and transactions exist; there is no pool, no published package
+and no stable API. Do not depend on it.
 
 ## Codecs
 
@@ -221,6 +221,34 @@ connection.
   _}}` has no connection in it.
 - **`simple/2` has no parameters.** The simple query protocol has nowhere to put
   them, and a value pasted into SQL is an injection waiting to be found.
+
+## Transactions
+
+`minato_txn` runs a function inside `BEGIN` and `COMMIT`.
+
+```erlang
+{ok, Value, Conn1} = minato_txn:transaction(Conn, fun(Open) ->
+    {ok, _Result, Written} = minato_query:query(Open, ~"INSERT INTO t VALUES ($1)", [1]),
+    {ok, done, Written}
+end).
+```
+
+`{rollback, Reason, Conn}` rolls back and reports `Reason`; an exception rolls
+back and is re-raised, so nothing can leave the connection holding an open
+transaction. `savepoint/2` and `rollback_to/2` are the nested case, because SQL
+has no nested `BEGIN` and a client that pretended otherwise would report a
+rollback the server never did.
+
+The case the module exists for is a `COMMIT` the server turns into a `ROLLBACK`.
+PostgreSQL does that whenever the transaction had already failed: nothing is
+written, and a client that reads "the COMMIT completed" reports success for work
+the server threw away, which is how a job queue runs a job twice. `commit/1`
+compares the tag it got with the statement it sent and answers `{error,
+transaction_rolled_back, Conn}`.
+
+`status/1` reports what the server last said: `idle`, `transaction`, or `failed`
+for a transaction where a statement has already errored and everything further
+is rejected until it is rolled back.
 
 ## Testing
 
