@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.4
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      version-file: '.tool-versions'
+      otp-matrix: '["28", "29"]'
+      enable-ct: false
+      enable-ex-doc: true
+      enable-audit: true
+      enable-coverage: true
+      enable-elp-lint: true
+      enable-elp-eqwalize: false
+      enable-sbom: true
+      enable-sbom-scan: true
+      enable-dependency-submission: true
+      enable-summary: true
+
+  release:
+    needs: ci
+    if: ${{ github.event_name == 'push' }}
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.4
+    permissions:
+      contents: write
