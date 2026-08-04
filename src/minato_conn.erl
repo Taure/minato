@@ -73,6 +73,7 @@ the server issued is the whole of the authorisation.
     connect/1,
     close/1,
     cancel/1,
+    give_away/2,
     send/2,
     next/1,
     next/2,
@@ -254,6 +255,22 @@ send(#conn{transport = Transport, socket = Socket}, Messages) when is_list(Messa
     write(Transport, Socket, [minato_protocol:encode(Message) || Message <- Messages]);
 send(#conn{transport = Transport, socket = Socket}, Message) ->
     write(Transport, Socket, minato_protocol:encode(Message)).
+
+-doc """
+Hand the socket to another process.
+
+The connection term is data and can be sent anywhere; the socket underneath it
+cannot. It belongs to one process, and a process that is handed a connection
+without being handed the socket gets `{error, {socket, einval}}` on its first
+read. A pool checking a connection out has to call this, and so does the
+borrower checking it back in.
+""".
+-spec give_away(conn(), pid()) -> ok | {error, error()}.
+give_away(#conn{transport = Transport, socket = Socket}, Pid) ->
+    case Transport:controlling_process(Socket, Pid) of
+        ok -> ok;
+        {error, Reason} -> {error, {socket, Reason}}
+    end.
 
 -doc "`next/2` with the connection's own timeout.".
 -spec next(conn()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
