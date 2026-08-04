@@ -24,6 +24,13 @@ from server bytes because the tag vocabulary is compiled into the server: a
 tag is chosen from a fixed list by the command that ran, and no query can put a
 new word in it.
 
+That argument covers a server behaving as documented and nothing else, so it
+does not decide what happens to bytes that are not a tag. A word of more than
+255 bytes, or one that is not valid UTF-8, is refused as a malformed message.
+Left to `binary_to_atom/2` the first would raise `system_limit` and the second
+`badarg`, which would let whatever is on the far end of the socket choose an
+exception outside minato's own shape.
+
 ## Unrecognised messages
 
 A type byte minato does not model decodes to `{unsupported, Type, Payload}`.
@@ -34,6 +41,8 @@ what the protocol documentation asks of a client.
 """.
 
 -export([decode/2]).
+
+-define(LONGEST_TAG_WORD, 255).
 
 -doc "Decode one backend message from its type byte and its complete payload.".
 -spec decode(byte(), binary()) -> minato_protocol:backend().
@@ -249,9 +258,15 @@ count(Bin) ->
     end.
 
 -spec word(binary()) -> atom().
+word(Bin) when byte_size(Bin) =< ?LONGEST_TAG_WORD ->
+    try
+        % elp:ignore W0023 - the tag vocabulary is compiled into the server
+        binary_to_atom(lowercase(Bin), utf8)
+    catch
+        error:badarg -> minato_protocol:bad(command_complete, tag_word_not_utf8, Bin)
+    end;
 word(Bin) ->
-    % elp:ignore W0023 - the tag vocabulary is compiled into the server
-    binary_to_atom(lowercase(Bin), utf8).
+    minato_protocol:bad(command_complete, tag_word_too_long, byte_size(Bin)).
 
 -spec join([binary()]) -> binary().
 join([Word]) ->

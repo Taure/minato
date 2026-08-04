@@ -62,11 +62,20 @@ socket and no process.
 `frame/1` is the shape that matters. It takes whatever bytes have arrived,
 returns every complete message in them, and hands back the remainder to be
 prepended to the next read. Not a five byte header read followed by a payload
-read, which costs two system calls per row.
+read, which costs two reads per row: over a 5000 row result set that is 61 reads
+against 10,006, and 5.3 to 9.1 times less wall clock. `minato_framer_bench` runs
+both and prints the table.
 
 - `decode/1` answers `incomplete` for a buffer that stops anywhere short of a
   whole message, so carry-over is always safe. A message that is entirely
   present and still malformed raises, because the server contradicted itself.
+- Framing is total. Arbitrary bytes either frame or raise minato's own
+  exception, never something the far end chose, and a declared length above
+  `max_message_length` is refused at the header rather than accumulated.
+- The remainder is copied when it is a small slice of a large buffer, so a three
+  byte partial header does not hold a 64 KiB read alive across an idle
+  connection. Column bytes are not copied, because that is what makes framing a
+  large result set cheap; a value kept beyond the query is the caller's to copy.
 - `BackendKeyData` is kept. It is the whole of what `CancelRequest` needs, and a
   client that throws it away cannot cancel a query for the life of the
   connection.

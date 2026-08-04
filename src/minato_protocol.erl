@@ -21,12 +21,67 @@ That signature is the point. A backend message is a type byte, a 32 bit length
 and a payload, so it is tempting to read the five byte header, then read the
 payload, then repeat. That is two reads per message and it scales with the
 number of rows. Reading whatever the socket has and carrying the remainder
-forward reads a whole result set in a handful of calls instead, measured at
-5.23 times faster over 1000 rows and 12.78 times over 5000.
+forward reads a whole result set in a handful of calls instead.
+
+`minato_framer_bench` measures both against each other over a loopback socket.
+A 5000 row result set of eight columns takes 61 reads bulk against 10,006 reads
+header-then-payload, and 5.3 to 9.1 times less wall clock over repeated runs on
+OTP 28 and 29. The read counts are exact and the multiple is not: it moves with
+the machine, and on a real network it moves with the round trip too.
 
 Carry-over only works if a decoder can say "not yet" without failing, so
 `decode/1` answers `incomplete` for any buffer that stops short of a whole
 message, at any byte boundary, and `frame/1` hands those bytes back untouched.
+
+## Total over arbitrary bytes
+
+`frame/1` and `decode/1` never fail in any way other than
+`error({minato_protocol, t:report/0})`. Every other input, including bytes that
+are not a PostgreSQL stream at all, yields messages and a remainder. That
+matters because the bytes reaching the framer are whatever the far end sent, and
+a client that can be made to raise `badarg` from a length field has handed the
+far end a way to choose which exception the caller sees.
+
+## Bounds
+
+A declared length longer than `max_message_length` raises rather than asking for
+more bytes. Without that a five byte header claiming four gigabytes would put
+the framer into `incomplete`, and a reader loop doing as it is told would
+accumulate until the node died. Refusing the header ends the connection instead,
+which is the correct outcome for a server that cannot be believed.
+
+The default is 64 MiB. It is above any row an application selects on purpose and
+far below what would hurt a node, and the failure it guards against is not a
+large result set: a result set arrives as many messages, and only one message
+has to fit under the limit. Raise it for a single very large `bytea` or `text`
+column, since PostgreSQL caps one value, and therefore one message, at just
+under 1 GiB. A declared length above that ceiling cannot have come from
+PostgreSQL at all.
+
+## Binary retention
+
+The messages share the buffer's bytes. `{data_row, Columns}` hands back column
+sub-binaries rather than copies, which is what makes framing a large result set
+cheap: nothing in a five thousand row buffer is copied on the way out, and the
+columns are consumed by `row/3` and dropped a row later.
+
+The cost of that is the usual one. A sub-binary keeps the whole buffer it points
+into alive, so a column value the application keeps holds the megabyte it
+arrived in. `binary:copy/1` on a value being kept for longer than the query is
+the caller's fix, and it is the caller's because only the caller knows which
+values those are. Copying them all here would put a copy of the entire result
+set on the hot path to protect the few values that outlive it.
+
+The remainder is the one place where the framer copies, because it is the one
+sub-binary whose lifetime the framer knows. It is held until the next read
+completes, which on an idle pooled connection is unbounded, and it is by
+construction small while the buffer it points into is not: a three byte partial
+header retaining a 64 KiB read, across a hundred pooled connections, is
+megabytes of buffers kept alive by bytes nobody is waiting on. So a remainder is
+copied when it is at most a quarter of its buffer, which bounds the copy at a
+third of what it releases. A larger remainder is left alone, because copying it
+would cost more than it frees, and a half arrived multi-megabyte row would then
+be copied again on every read as it grew.
 
 ## Errors from the server are data
 
@@ -91,7 +146,10 @@ over without losing the stream.
 -export([
     encode/1,
     decode/1,
+    decode/2,
     frame/1,
+    frame/2,
+    max_message_length/1,
     ssl_response/1,
     row/3,
     rows/3,
@@ -99,6 +157,11 @@ over without losing the stream.
     server_error/1,
     bad/3
 ]).
+
+-define(DEFAULT_MAX_MESSAGE_LENGTH, 67108864).
+-define(SMALLEST_MESSAGE_LENGTH, 4).
+-define(HEAP_BINARY_LIMIT, 64).
+-define(RETENTION_RATIO, 4).
 
 -doc "A message a client sends to a server.".
 -type frontend() ::
@@ -234,6 +297,16 @@ table}`.
     datetime_format => datetime | microseconds
 }.
 
+-doc """
+Framing options.
+
+`max_message_length` is the longest message the framer will wait for, in bytes,
+and defaults to 64 MiB. See the module documentation for what it is for and when
+to raise it. There is no value that turns the bound off; a caller that wants the
+most PostgreSQL can send asks for `1073741823`.
+""".
+-type frame_opts() :: #{max_message_length => pos_integer()}.
+
 -doc "The map carried by an `error({minato_protocol, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
 
@@ -249,6 +322,7 @@ table}`.
     row_map/0,
     result/0,
     opts/0,
+    frame_opts/0,
     report/0
 ]).
 
@@ -277,30 +351,31 @@ encode(Message) ->
     minato_protocol_frontend:encode(Message).
 
 -doc """
+Decode the one backend message at the front of a buffer, under the default
+bound.
+""".
+-spec decode(binary()) -> {ok, backend(), binary()} | incomplete.
+decode(Buffer) ->
+    message(Buffer, ?DEFAULT_MAX_MESSAGE_LENGTH).
+
+-doc """
 Decode the one backend message at the front of a buffer.
 
 Returns `{ok, Message, Rest}` with the bytes that follow it, or `incomplete`
 when the buffer stops anywhere short of a whole message, header included.
 
 Raises `error({minato_protocol, t:report/0})` when a message that is entirely
-present does not fit its documented format.
+present does not fit its documented format, and when a header declares a length
+longer than `max_message_length` or shorter than the four bytes the length field
+itself occupies.
 """.
--spec decode(binary()) -> {ok, backend(), binary()} | incomplete.
-decode(<<Type, Length:32, Rest/binary>>) when Length >= 4 ->
-    Size = Length - 4,
-    case Rest of
-        <<Payload:Size/binary, Tail/binary>> ->
-            {ok, minato_protocol_backend:decode(Type, Payload), Tail};
-        _ ->
-            incomplete
-    end;
-decode(<<Type, Length:32, _/binary>>) ->
-    bad(header, length_below_minimum, {Type, Length});
-decode(Buffer) when is_binary(Buffer) ->
-    incomplete.
+-spec decode(binary(), frame_opts()) -> {ok, backend(), binary()} | incomplete.
+decode(Buffer, Opts) ->
+    message(Buffer, max_message_length(Opts)).
 
 -doc """
-Decode every complete message in a buffer and hand back the remainder.
+Decode every complete message in a buffer and hand back the remainder, under the
+default bound.
 
 ```erlang
 1> minato_protocol:frame(<<49, 0,0,0,4, 50, 0,0,0,4, 51, 0,0>>).
@@ -313,13 +388,35 @@ bytes one at a time is correct, just slow.
 """.
 -spec frame(binary()) -> {[backend()], binary()}.
 frame(Buffer) ->
-    case decode(Buffer) of
-        {ok, Message, Rest} ->
-            {Messages, Remaining} = frame(Rest),
-            {[Message | Messages], Remaining};
-        incomplete ->
-            {[], Buffer}
-    end.
+    framed(Buffer, ?DEFAULT_MAX_MESSAGE_LENGTH).
+
+-doc """
+Decode every complete message in a buffer and hand back the remainder.
+
+Where a message list is split across calls makes no difference to what comes
+out: framing a buffer, then framing its remainder prepended to the next read,
+gives the same messages in the same order as framing the whole stream at once,
+whatever byte boundaries the reads happened to fall on.
+""".
+-spec frame(binary(), frame_opts()) -> {[backend()], binary()}.
+frame(Buffer, Opts) ->
+    framed(Buffer, max_message_length(Opts)).
+
+-doc """
+The bound `frame/2` and `decode/2` will apply to these options.
+
+Exported so that a reader can size its own accumulation the same way the framer
+does, rather than keeping a second copy of the default.
+""".
+-spec max_message_length(frame_opts()) -> pos_integer().
+max_message_length(#{max_message_length := Max}) when
+    is_integer(Max), Max >= ?SMALLEST_MESSAGE_LENGTH
+->
+    Max;
+max_message_length(#{max_message_length := Max}) ->
+    bad(frame_opts, invalid_max_message_length, Max);
+max_message_length(_Opts) ->
+    ?DEFAULT_MAX_MESSAGE_LENGTH.
 
 -doc """
 Read the server's one byte answer to `SSLRequest`.
@@ -405,6 +502,45 @@ API a caller of minato uses.
 -spec bad(term(), term(), term()) -> no_return().
 bad(Message, Reason, Data) ->
     error({minato_protocol, #{message => Message, reason => Reason, data => Data}}).
+
+-spec framed(binary(), pos_integer()) -> {[backend()], binary()}.
+framed(Buffer, Max) ->
+    {Messages, Rest} = messages(Buffer, Max),
+    {Messages, remainder(Rest, byte_size(Buffer))}.
+
+-spec messages(binary(), pos_integer()) -> {[backend()], binary()}.
+messages(Buffer, Max) ->
+    case message(Buffer, Max) of
+        {ok, Message, Rest} ->
+            {Messages, Remaining} = messages(Rest, Max),
+            {[Message | Messages], Remaining};
+        incomplete ->
+            {[], Buffer}
+    end.
+
+-spec message(binary(), pos_integer()) -> {ok, backend(), binary()} | incomplete.
+message(<<Type, Length:32/signed, _/binary>>, Max) when Length > Max ->
+    bad(header, message_too_long, {Type, Length, Max});
+message(<<Type, Length:32/signed, _/binary>>, _Max) when Length < ?SMALLEST_MESSAGE_LENGTH ->
+    bad(header, length_below_minimum, {Type, Length});
+message(<<Type, Length:32/signed, Rest/binary>>, _Max) ->
+    Size = Length - ?SMALLEST_MESSAGE_LENGTH,
+    case Rest of
+        <<Payload:Size/binary, Tail/binary>> ->
+            {ok, minato_protocol_backend:decode(Type, Payload), Tail};
+        _ ->
+            incomplete
+    end;
+message(Buffer, _Max) when is_binary(Buffer) ->
+    incomplete.
+
+-spec remainder(binary(), non_neg_integer()) -> binary().
+remainder(Rest, BufferSize) when
+    BufferSize > ?HEAP_BINARY_LIMIT, byte_size(Rest) * ?RETENTION_RATIO =< BufferSize
+->
+    binary:copy(Rest);
+remainder(Rest, _BufferSize) ->
+    Rest.
 
 -spec row_tuple([field()], [binary() | null], minato_codec:opts()) -> [minato_codec:value()].
 row_tuple([], [], _CodecOpts) ->

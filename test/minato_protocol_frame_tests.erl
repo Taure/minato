@@ -8,9 +8,23 @@ The truncation tests cut every sample message at every byte and require
 `incomplete` for all of them. That is stronger than cutting at the field
 boundaries a reader would think of, because a buffer is cut where the network
 happened to stop and knows nothing about fields.
+
+Three things beyond framing are checked here because they are what makes the
+framer safe to point at a socket. The bound on a declared length is tested at
+the limit, one over it and before the payload arrives, since the point of it is
+to refuse a header rather than accumulate against it. The retention decisions
+are tested through `binary:referenced_byte_size/1`, which reports the binary a
+sub-binary points into, so the copy the framer makes and the copies it declines
+to make are observable. And totality is tested with random bytes, with random
+bytes behind every backend type byte, and with every single byte corruption of a
+known good stream.
 """.
 
 -include_lib("eunit/include/eunit.hrl").
+
+%% eqWAlizer: this one test passes a `max_message_length` the type forbids, on
+%% purpose, because what it checks is that the runtime refuses it too.
+-eqwalizer({nowarn_function, a_limit_that_is_not_a_length_is_refused_test/0}).
 
 %%----------------------------------------------------------------------
 %% Truncation
@@ -55,6 +69,160 @@ a_length_below_the_minimum_is_rejected_test() ->
         minato_protocol:decode(<<$C, 0, 0, 0, 3, 0, 0, 0, 0>>)
     ).
 
+a_negative_length_is_rejected_test() ->
+    ?assertError(
+        {minato_protocol, #{message := header, reason := length_below_minimum, data := {$D, -1}}},
+        minato_protocol:decode(<<$D, 255, 255, 255, 255, 1, 2, 3>>)
+    ).
+
+a_one_byte_buffer_is_incomplete_test() ->
+    ?assertEqual(incomplete, minato_protocol:decode(<<$C>>)),
+    ?assertEqual({[], <<$C>>}, minato_protocol:frame(<<$C>>)).
+
+%%----------------------------------------------------------------------
+%% Bounds
+%%
+%% A declared length is the one number in the stream that decides how much the
+%% reader will hold, so it is the one a corrupt or hostile server would choose.
+%%----------------------------------------------------------------------
+
+an_oversized_declared_length_is_rejected_test() ->
+    ?assertError(
+        {minato_protocol, #{message := header, reason := message_too_long}},
+        minato_protocol:frame(<<$D, 1073741824:32, 1, 2, 3>>)
+    ).
+
+an_oversized_declared_length_is_rejected_before_its_payload_arrives_test() ->
+    ?assertError(
+        {minato_protocol, #{message := header, reason := message_too_long}},
+        minato_protocol:frame(<<$D, 1000:32>>, #{max_message_length => 100})
+    ).
+
+a_length_at_the_limit_is_accepted_test() ->
+    ?assertEqual(
+        {[empty_query_response], ~""},
+        minato_protocol:frame(<<$I, 4:32>>, #{max_message_length => 4})
+    ).
+
+a_length_one_over_the_limit_is_rejected_test() ->
+    ?assertError(
+        {minato_protocol, #{message := header, reason := message_too_long, data := {$C, 5, 4}}},
+        minato_protocol:frame(<<$C, 5:32, 0>>, #{max_message_length => 4})
+    ).
+
+the_default_limit_is_reported_test() ->
+    ?assertEqual(67108864, minato_protocol:max_message_length(#{})),
+    ?assertEqual(99, minato_protocol:max_message_length(#{max_message_length => 99})).
+
+a_limit_that_is_not_a_length_is_refused_test() ->
+    ?assertError(
+        {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
+        minato_protocol:frame(~"", #{max_message_length => infinity})
+    ),
+    ?assertError(
+        {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
+        minato_protocol:frame(~"", #{max_message_length => 3})
+    ).
+
+a_message_under_the_limit_still_frames_test() ->
+    Bytes = minato_backend_writer:write({parameter_status, ~"a", ~"b"}),
+    ?assertEqual(
+        {[{parameter_status, ~"a", ~"b"}], ~""},
+        minato_protocol:frame(Bytes, #{max_message_length => byte_size(Bytes) - 1})
+    ).
+
+%%----------------------------------------------------------------------
+%% Binary retention
+%%
+%% `binary:referenced_byte_size/1` reports the binary a sub-binary points into,
+%% so the copy the framer makes, and the copies it declines to make, are
+%% observable rather than a claim in a comment.
+%%----------------------------------------------------------------------
+
+a_small_remainder_does_not_retain_a_large_buffer_test() ->
+    Buffer = <<(binary:copy(minato_backend_writer:write(parse_complete), 13107))/binary, 1, 2, 3>>,
+    {Messages, Rest} = minato_protocol:frame(Buffer),
+    ?assertEqual(13107, length(Messages)),
+    ?assertEqual(<<1, 2, 3>>, Rest),
+    ?assert(byte_size(Buffer) > 65536),
+    ?assertEqual(byte_size(Rest), binary:referenced_byte_size(Rest)).
+
+a_large_remainder_is_left_pointing_at_its_buffer_test() ->
+    Partial = binary:copy(<<9>>, 60000),
+    Buffer = <<
+        (minato_backend_writer:write(parse_complete))/binary, $D, 900000:32, Partial/binary
+    >>,
+    {[parse_complete], Rest} = minato_protocol:frame(Buffer),
+    ?assertEqual(60005, byte_size(Rest)),
+    ?assertEqual(byte_size(Buffer), binary:referenced_byte_size(Rest)).
+
+a_buffer_with_nothing_complete_comes_back_untouched_test() ->
+    Buffer = <<$D, 900000:32, (binary:copy(<<9>>, 60000))/binary>>,
+    ?assertEqual({[], Buffer}, minato_protocol:frame(Buffer)),
+    {[], Rest} = minato_protocol:frame(Buffer),
+    ?assertEqual(byte_size(Buffer), binary:referenced_byte_size(Rest)).
+
+%%----------------------------------------------------------------------
+%% Totality
+%%
+%% The bytes reaching the framer are whatever the far end sent. Any of them
+%% either frame or raise minato's own exception; none of them raise something
+%% the far end got to choose.
+%%----------------------------------------------------------------------
+
+random_bytes_never_crash_test_() ->
+    {timeout, 120, fun() ->
+        [total(rand_bytes(Size)) || Size <- lists:seq(0, 64), _ <- lists:seq(1, 40)]
+    end}.
+
+random_bytes_behind_a_plausible_header_never_crash_test_() ->
+    {timeout, 120, fun() ->
+        [
+            total(<<Type, Length:32, (rand_bytes(24))/binary>>)
+         || Type <- backend_type_bytes(), Length <- [0, 3, 4, 5, 12, 28, 29, 1 bsl 30]
+        ]
+    end}.
+
+a_corrupted_stream_never_crashes_test_() ->
+    {timeout, 120, fun() ->
+        Bytes = minato_backend_writer:write_all(samples()),
+        [
+            total(corrupt(Bytes, At, Byte))
+         || At <- lists:seq(0, byte_size(Bytes) - 1), Byte <- [0, 255]
+        ]
+    end}.
+
+a_command_tag_that_is_not_utf8_is_a_protocol_error_test() ->
+    ?assertError(
+        {minato_protocol, #{message := command_complete, reason := tag_word_not_utf8}},
+        minato_protocol:frame(<<$C, 7:32, 255, 255, 0>>)
+    ).
+
+a_command_tag_too_long_to_be_an_atom_is_a_protocol_error_test() ->
+    Tag = binary:copy(~"A", 300),
+    ?assertError(
+        {minato_protocol, #{message := command_complete, reason := tag_word_too_long}},
+        minato_protocol:frame(<<$C, (byte_size(Tag) + 5):32, Tag/binary, 0>>)
+    ).
+
+total(Bytes) ->
+    try minato_protocol:frame(Bytes) of
+        {Messages, Rest} when is_list(Messages), is_binary(Rest) -> ok
+    catch
+        error:{minato_protocol, #{message := _, reason := _, data := _}} -> ok;
+        Class:Reason -> ?assert({Class, Reason, Bytes} =:= no_other_failure)
+    end.
+
+rand_bytes(Size) ->
+    rand:bytes(Size).
+
+corrupt(Bytes, At, Byte) ->
+    <<Head:At/binary, _, Tail/binary>> = Bytes,
+    <<Head/binary, Byte, Tail/binary>>.
+
+backend_type_bytes() ->
+    [$R, $K, $S, $Z, $T, $D, $C, $I, $E, $N, $1, $2, $3, $n, $t, $s, $A, $?].
+
 %%----------------------------------------------------------------------
 %% Framing
 %%----------------------------------------------------------------------
@@ -94,6 +262,24 @@ carrying_the_remainder_forward_reads_the_message_test() ->
 a_stream_fed_one_byte_at_a_time_arrives_whole_test() ->
     Messages = result_set(),
     ?assertEqual(decoded(Messages), drip(minato_backend_writer:write_all(Messages))).
+
+a_buffer_ending_exactly_on_a_message_boundary_leaves_nothing_over_test() ->
+    Messages = result_set(),
+    {Decoded, Rest} = minato_protocol:frame(minato_backend_writer:write_all(Messages)),
+    ?assertEqual(decoded(Messages), Decoded),
+    ?assertEqual(~"", Rest).
+
+every_split_of_a_result_set_frames_the_same_test() ->
+    Messages = result_set(),
+    Bytes = minato_backend_writer:write_all(Messages),
+    Expected = {decoded(Messages), ~""},
+    [?assertEqual(Expected, feed_two(Bytes, At)) || At <- lists:seq(0, byte_size(Bytes))].
+
+feed_two(Bytes, At) ->
+    <<Head:At/binary, Tail/binary>> = Bytes,
+    {First, Carried} = minato_protocol:frame(Head),
+    {Second, Rest} = minato_protocol:frame(<<Carried/binary, Tail/binary>>),
+    {First ++ Second, Rest}.
 
 drip(Bytes) ->
     drip(Bytes, ~"", []).
