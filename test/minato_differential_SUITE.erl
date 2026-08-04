@@ -245,10 +245,14 @@ oracle_decode_check(Entry, Case, ServerBinary) ->
     #{opts := Opts} = Case,
     Mine = minato_codec:decode(Oid, ServerBinary, binary, Opts),
     case minato_oracle:decode(Entry, ServerBinary, Opts, minato_pg:type_info(Oid)) of
-        {ok, Mine} -> [];
-        {ok, Other} -> [finding(oracle_decode, Entry, Case, #{minato => Mine, oracle => Other})];
-        {unsupported, Reason} -> [finding(oracle_decode, Entry, Case, #{unsupported => Reason})];
-        {failed, Reason} -> [finding(oracle_decode, Entry, Case, #{raised => Reason})]
+        {ok, Mine} ->
+            [];
+        {ok, Other} ->
+            [finding(oracle_decode, Entry, Case, #{minato => Mine, oracle => Other})];
+        {unsupported, Reason} ->
+            [finding(oracle_decode, Entry, Case, #{unsupported => Reason})];
+        {failed, Reason} ->
+            [finding(oracle_decode, Entry, Case, #{minato => Mine, raised => Reason})]
     end.
 
 -spec finding(atom(), minato_corpus:entry(), minato_corpus:value_case(), #{atom() => term()}) ->
@@ -279,6 +283,16 @@ concat([Head | Rest]) -> Head ++ concat(Rest).
 The disagreements that are understood, with which implementation is right.
 
 Anything not on this list fails the run.
+
+Two entries cover the same finding in two shapes, because one disagreement is
+sensitive to the OTP version the suite runs on. `pg_types` reads the reserved
+`date` minimum as an ordinary calendar date roughly 5.8 million years BC, and
+`calendar:gregorian_days_to_date/1` only started answering for days before year
+zero in OTP 29. So the same `pg_types` code raises `function_clause` on OTP 28
+and answers a date on OTP 29, and the run records
+`oracle_cannot_decode_date_infinity` or `oracle_reads_date_infinity_as_a_date`
+accordingly. Neither is minato's defect and neither is a reason to stop testing
+the value: the reserved minimum is `-infinity`, not a date, on every version.
 """.
 -spec known(atom(), term(), #{atom() => term()}) -> {yes, atom()} | no.
 known(oracle_encode, Type, #{unsupported := no_null_encoding}) when
@@ -323,13 +337,21 @@ known(oracle_decode, {array, numeric}, #{minato := Minato, oracle := Oracle}) wh
         numeric_decode_difference(Mine, Theirs)
      || {Mine, Theirs} <- zip(Minato, Oracle), Mine =/= Theirs
     ]);
+known(oracle_decode, date, #{minato := Minato, raised := {error, function_clause}}) when
+    Minato =:= infinity; Minato =:= neg_infinity
+->
+    {yes, oracle_cannot_decode_date_infinity};
+known(oracle_decode, {array, date}, #{minato := Minato, raised := {error, function_clause}}) when
+    is_list(Minato)
+->
+    date_infinity_in_array(Minato, oracle_cannot_decode_date_infinity);
 known(oracle_decode, Type, #{minato := Minato}) when
     Type =:= date, Minato =:= infinity;
     Type =:= date, Minato =:= neg_infinity
 ->
     {yes, oracle_reads_date_infinity_as_a_date};
 known(oracle_decode, {array, date}, #{minato := Minato}) when is_list(Minato) ->
-    date_infinity_in_array(Minato);
+    date_infinity_in_array(Minato, oracle_reads_date_infinity_as_a_date);
 known(oracle_encode, Type, #{minato := Minato, oracle := Oracle}) when
     Type =:= numeric orelse Type =:= {array, numeric}, is_binary(Minato), is_binary(Oracle)
 ->
@@ -351,10 +373,10 @@ known(oracle_decode, Type, #{raised := {error, function_clause}}) when
 known(_Check, _Type, _Detail) ->
     no.
 
--spec date_infinity_in_array([term()]) -> {yes, atom()} | no.
-date_infinity_in_array(Values) ->
+-spec date_infinity_in_array([term()], atom()) -> {yes, atom()} | no.
+date_infinity_in_array(Values, Reason) ->
     case lists:member(infinity, Values) orelse lists:member(neg_infinity, Values) of
-        true -> {yes, oracle_reads_date_infinity_as_a_date};
+        true -> {yes, Reason};
         false -> no
     end.
 
@@ -614,17 +636,42 @@ pg_types_pads_numeric_with_a_zero_digit(_Config) ->
 -doc """
 `date` reserves the largest and smallest `int32` for infinity. `pg_types` reads
 them as ordinary dates five million years out, and cannot encode them at all.
+
+The reserved minimum lands before year zero, which `calendar` only started
+answering for in OTP 29, so on OTP 28 the same read raises `function_clause`
+instead. Both shapes are the same finding and both are recorded in `known/3`.
 """.
 -spec pg_types_reads_date_infinity_as_a_date(ct_suite:ct_config()) -> ok.
 pg_types_reads_date_infinity_as_a_date(_Config) ->
     Bytes = server_binary(~"date", ~"infinity"),
     ?assertEqual(<<2147483647:32>>, Bytes),
     ?assertEqual(infinity, minato_codec:decode(1082, Bytes, binary)),
-    Oracle = pg_types:decode(Bytes, minato_pg:type_info(1082)),
-    ?assertMatch({_Year, _Month, _Day}, Oracle),
+    Oracle = oracle_date(Bytes),
+    ?assertMatch({ok, {_Year, _Month, _Day}}, Oracle),
     ?assertEqual({unsupported, no_date_infinity}, minato_oracle:to_oracle(date, infinity)),
     ct:pal("date infinity decodes as ~p through pg_types", [Oracle]),
+    NegBytes = server_binary(~"date", ~"-infinity"),
+    ?assertEqual(<<-2147483648:32/signed>>, NegBytes),
+    ?assertEqual(neg_infinity, minato_codec:decode(1082, NegBytes, binary)),
+    ?assertEqual({unsupported, no_date_infinity}, minato_oracle:to_oracle(date, neg_infinity)),
+    NegOracle = oracle_date(NegBytes),
+    case NegOracle of
+        {raised, Raised} -> ?assertEqual({error, function_clause}, Raised);
+        {ok, Date} -> ?assertMatch({_Year, _Month, _Day}, Date)
+    end,
+    ct:pal("date -infinity decodes as ~p through pg_types on OTP ~s", [
+        NegOracle, erlang:system_info(otp_release)
+    ]),
     ok.
+
+-doc "What the oracle makes of `date` wire bytes, raise included.".
+-spec oracle_date(binary()) -> {ok, term()} | {raised, term()}.
+oracle_date(Bytes) ->
+    try pg_types:decode(Bytes, minato_pg:type_info(1082)) of
+        Decoded -> {ok, Decoded}
+    catch
+        Class:Reason -> {raised, {Class, Reason}}
+    end.
 
 -doc """
 Half a second before the 2000 epoch, `pg_types` answers a tuple whose seconds
