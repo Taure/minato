@@ -6,9 +6,9 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer, the protocol layer and authentication exist; there
-is no connection, no pool, no published package and no stable API. Do not depend
-on it.
+Early. The type codec layer, the protocol layer, authentication and the
+connection exist; there is no query API, no pool, no published package and no
+stable API. Do not depend on it.
 
 ## Codecs
 
@@ -149,6 +149,51 @@ the exchange open to a man in the middle holding a certificate the client will
 accept. Channel binding needs the server certificate from the TLS session, so it
 belongs with the connection layer. No Erlang client has it, which makes it a
 real differentiator rather than a box to tick.
+
+## Connection
+
+`minato_conn` opens a connection: TCP, optionally TLS, the startup message,
+authentication, and then the parameters and the `BackendKeyData` the server
+volunteers. It answers once `ReadyForQuery` has arrived, so a connection that is
+returned is one that can be used.
+
+```erlang
+{ok, Conn} = minato_conn:connect(#{host => "127.0.0.1", port => 5432,
+                                   user => ~"minato", password => ~"minato",
+                                   database => ~"minato_test"}),
+minato_conn:parameter(Conn, ~"server_version").
+```
+
+There is no connection process. The socket is `{active, false}` and belongs to
+the process that opened it, which is the caller ownership the design section
+describes: a query is a send and a read on the caller's own scheduler slot
+rather than a message to a `gen_server` that puts every caller behind the
+slowest one. `next/1` returns the next message and the connection to carry on
+from, because bytes that arrived but have not been read yet live in the
+connection.
+
+- **TLS has no `prefer` mode.** `ssl => true` refuses to continue when the
+  server answers that it will not do TLS. Continuing in the clear on being
+  declined is a downgrade an attacker on the connection can always ask for, since
+  declining is the one message they are able to produce. Verification is on by
+  default, against the OS trust store and with the hostname checked, and
+  `server_name_indication` is set, which OTP needs told explicitly on a socket
+  upgrade.
+- **A cleartext password is refused on a plain socket.** The password opens
+  every future connection too, so handing it to whoever is on the wire is worse
+  than failing to connect. `auth => [Method]` narrows what is acceptable
+  further, down to SCRAM alone.
+- **The password is never held.** It is read, used, and left out of the
+  connection, so a pool holding a thousand connections holds no copies of it. A
+  `fun(() -> binary())` is accepted and called once per attempt, which is what a
+  rotating credential needs.
+- **`CancelRequest` works**, because `BackendKeyData` is kept. Cancelling opens
+  a second connection, which is the only way the protocol offers to interrupt a
+  query: the connection running it is busy.
+- **Every read passes a timeout.** A read that times out leaves an unknown
+  number of bytes still to come, so the connection is finished rather than
+  retried: recovering would mean knowing how far through a message the far end
+  got, which is what the timeout says we do not know.
 
 ## Testing
 
