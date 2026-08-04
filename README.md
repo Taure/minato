@@ -6,9 +6,9 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer and the protocol layer exist; there is no
-connection, no pool, no published package and no stable API. Do not depend on
-it.
+Early. The type codec layer, the protocol layer and authentication exist; there
+is no connection, no pool, no published package and no stable API. Do not depend
+on it.
 
 ## Codecs
 
@@ -83,6 +83,64 @@ read, which costs two system calls per row.
   rather than raising, because every backend message is length prefixed and
   losing the stream is worse than not understanding one message.
 
+## Authentication
+
+`minato_auth` answers the server's `Authentication` messages, and `minato_scram`
+is SCRAM-SHA-256 (RFC 5802, RFC 7677) underneath it. Both are pure: the caller
+owns the socket here too.
+
+```erlang
+State = minato_auth:init(#{user => ~"minato", password => ~"pencil"}),
+{send, Reply, Next} = minato_auth:step(Message, State),
+```
+
+SCRAM-SHA-256 is the one that matters. It is what `password_encryption` has
+defaulted to since PostgreSQL 14 and the only thing CloudNativePG issues. MD5
+and cleartext are also answered, because a PostgreSQL is not always a recent
+one.
+
+- **The server is authenticated too.** `server-final-message` carries a
+  `ServerSignature` only a holder of `ServerKey` can produce, and minato
+  recomputes it and compares in constant time. A mismatch raises and there is no
+  option to turn the check off. Skipping it is a downgrade to no server
+  authentication at all.
+- **The server nonce must extend the client nonce.** A server that does not echo
+  the client's nonce as a prefix of its own has not seen the client's first
+  message, which is what a replay looks like, and is rejected.
+- **A started exchange has to finish.** `AuthenticationOk` is refused while SCRAM
+  is outstanding, and so is a demand for a cleartext or MD5 password part way
+  through one. Both are how a man in the middle who cannot produce a
+  `ServerSignature` would try to get round having to. Asking for cleartext in the
+  first message is still answered, because that is what supporting cleartext
+  means; choosing which methods are acceptable at all is a `require_auth` style
+  option that belongs with the connection layer next to TLS.
+- **The iteration count is bounded at both ends.** The floor is 4096, which is
+  what RFC 7677 says a server should announce and what `scram_iterations`
+  defaults to. The ceiling is 1,000,000, because `i` is an unbounded number
+  chosen by the far end and fed into a loop, and without one a server answering
+  `i=2000000000` costs minutes of CPU per connection attempt.
+- **Nonces come from `crypto:strong_rand_bytes`**, 24 bytes base64 encoded,
+  never from `rand`.
+- **The state holds no password.** Nothing derived from one survives the call
+  that uses it either: what is carried to the last step is the expected
+  `ServerSignature`, which the server is about to send in the clear anyway.
+
+SASLprep (RFC 4013) is applied to the password, as far as OTP goes. Mapping,
+NFKC and all ten prohibited output tables are implemented. The bidirectional
+check of RFC 3454 section 6 is not, because OTP publishes no bidirectional
+category table, and neither is the unassigned code point check, which is defined
+against Unicode 3.2 specifically. `minato_saslprep` documents both gaps and the
+tests assert the behaviour rather than omitting the cases. A password that
+cannot be prepared falls back to its raw bytes, which is what PostgreSQL
+documents itself as doing when it stores the verifier, so the two agree.
+
+`SCRAM-SHA-256-PLUS` is not implemented. The client advertises `n,,`: no channel
+binding. That is the honest flag for a client that cannot do it, and it leaves
+the exchange open to a man in the middle holding a certificate the client will
+accept. Channel binding needs the server certificate from the TLS session, so it
+belongs with the connection layer. No Erlang client has it, which makes it a
+real differentiator rather than a box to tick.
+
 ## Testing
 
 `rebar3 eunit` needs nothing installed: unit tests and PropEr round trips for
@@ -90,19 +148,33 @@ every type in both wire formats, byte for byte tests of every protocol message
 against the documented format, and framing properties that cut a stream at every
 byte and require it back whole.
 
+The RFC 7677 vectors are used verbatim, and the SCRAM properties run the client
+against a server half written from the same RFC, so agreement is between two
+readings rather than one implementation and itself. The properties that matter
+most are the tampering ones: changing any byte of any message in the exchange
+has to break it, stated over every byte position rather than as a few examples.
+
 The protocol round trips do not compare an encoder against itself. Frontend
 messages are read back by a separate reader written from the same documentation,
 and backend messages are built by a separate writer, so a length field only one
 of the two believes in fails the property rather than cancelling out.
 
-`rebar3 ct` runs the differential suite for the codecs, which needs a
-PostgreSQL:
+`rebar3 ct` runs the differential suite for the codecs and the authentication
+suite, both of which need a PostgreSQL:
 
 ```
 docker compose -f test/docker-compose.yml up -d
-rebar3 ct --suite test/minato_differential_SUITE
+rebar3 ct
 docker compose -f test/docker-compose.yml down -v
 ```
+
+The authentication suite completes the whole SASL exchange against the container
+over a real socket, then uses the session it opened. It also reads the verifier
+PostgreSQL stored in `pg_authid` and recomputes it, which checks `StoredKey` and
+`ServerKey` against the server's own PBKDF2 rather than against a second reading
+of the RFC, and it sets `scram_iterations` to 1 for one role so that the
+iteration count floor is proved against a server that really does announce a
+weak one.
 
 It compares every type against two independent references. `pg_types` is a
 black box oracle: minato's encoding must be byte identical to it, and the two
