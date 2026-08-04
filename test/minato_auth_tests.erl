@@ -154,6 +154,41 @@ a_forged_sasl_final_message_is_refused_test() ->
     ).
 
 %%----------------------------------------------------------------------
+%% A server that tries to skip proving itself
+%%----------------------------------------------------------------------
+
+authentication_ok_instead_of_the_sasl_final_message_is_refused_test() ->
+    {Check, _ServerFinal} = exchange_to_final(),
+    ?assertError(
+        {minato_auth, #{reason := sasl_exchange_unfinished}},
+        minato_auth:step(authentication_ok, Check)
+    ).
+
+authentication_ok_straight_after_the_challenge_is_refused_test() ->
+    {send, {sasl_initial_response, _Mechanism, _Data}, Started} = offer([~"SCRAM-SHA-256"]),
+    ?assertError(
+        {minato_auth, #{reason := sasl_exchange_unfinished}},
+        minato_auth:step(authentication_ok, Started)
+    ).
+
+authentication_ok_is_accepted_once_the_server_has_proved_itself_test() ->
+    {Check, ServerFinal} = exchange_to_final(),
+    {continue, Done} = minato_auth:step({authentication_sasl_final, ServerFinal}, Check),
+    ?assertEqual(authenticated, minato_auth:step(authentication_ok, Done)).
+
+a_refused_server_signature_leaves_the_exchange_unfinished_test() ->
+    {Check, _ServerFinal} = exchange_to_final(),
+    Forged = <<"v=", (base64:encode(crypto:strong_rand_bytes(32)))/binary>>,
+    ?assertError(
+        {minato_scram, #{reason := server_signature_mismatch}},
+        minato_auth:step({authentication_sasl_final, Forged}, Check)
+    ),
+    ?assertError(
+        {minato_auth, #{reason := sasl_exchange_unfinished}},
+        minato_auth:step(authentication_ok, Check)
+    ).
+
+%%----------------------------------------------------------------------
 %% SASL messages out of order
 %%----------------------------------------------------------------------
 

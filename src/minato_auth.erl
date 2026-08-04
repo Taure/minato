@@ -25,6 +25,18 @@ An `ErrorResponse` from the server is not handled here. It is an ordinary
 decoded message and the caller branches on it: a wrong password arrives that
 way, not as an exception.
 
+## A started SASL exchange has to finish
+
+`AuthenticationOk` is refused while a SCRAM exchange is outstanding, and that
+refusal is load bearing rather than tidiness. The check that authenticates the
+server to the client lives in `AuthenticationSASLFinal`, so a server that cannot
+produce a valid `ServerSignature` has an obvious move available: send
+`AuthenticationOk` instead and never send the final message at all. A client
+that accepted it would have proved itself to an impostor and gone on to send it
+queries, which is exactly the outcome verifying the signature is meant to
+prevent. Only an exchange that reached `verified`, or one that never started
+because the server asked for no password, ends in `authenticated`.
+
 ## Methods
 
 | Server asks for | minato answers with |
@@ -66,8 +78,10 @@ documents what that leaves open.
     user :: binary(),
     password :: binary() | undefined,
     scram_opts :: minato_scram:opts(),
-    scram :: minato_scram:client() | undefined
+    sasl :: sasl()
 }).
+
+-type sasl() :: none | {pending, minato_scram:client()} | verified.
 
 -doc """
 Who to authenticate as.
@@ -115,7 +129,7 @@ init(#{user := User} = Credentials) ->
         user = User,
         password = maps:get(password, Credentials, undefined),
         scram_opts = maps:get(scram, Credentials, #{}),
-        scram = undefined
+        sasl = none
     }.
 
 -doc """
@@ -128,8 +142,12 @@ arrives outside an exchange. Raises `error({minato_scram, _})` for a server that
 breaks SCRAM or fails to prove itself; see `m:minato_scram`.
 """.
 -spec step(minato_protocol:backend(), state()) -> step().
-step(authentication_ok, _State) ->
+step(authentication_ok, #state{sasl = none}) ->
     authenticated;
+step(authentication_ok, #state{sasl = verified}) ->
+    authenticated;
+step(authentication_ok, #state{user = User}) ->
+    bad(authentication_ok, sasl_exchange_unfinished, User);
 step(authentication_cleartext_password, State) ->
     {send, {password, password(State, authentication_cleartext_password)}, State};
 step({authentication_md5_password, Salt}, #state{user = User} = State) ->
@@ -138,28 +156,28 @@ step({authentication_md5_password, Salt}, #state{user = User} = State) ->
 step({authentication_sasl, Mechanisms}, #state{user = User} = State) ->
     Mechanism = mechanism(Mechanisms, User),
     {Message, Client} = minato_scram:client_first(User, State#state.scram_opts),
-    {send, {sasl_initial_response, Mechanism, Message}, State#state{scram = Client}};
-step({authentication_sasl_continue, Data}, #state{scram = Client} = State) ->
-    sasl_continue(Client, Data, State);
-step({authentication_sasl_final, Data}, #state{scram = Client} = State) ->
-    sasl_final(Client, Data, State);
+    {send, {sasl_initial_response, Mechanism, Message}, State#state{sasl = {pending, Client}}};
+step({authentication_sasl_continue, Data}, #state{sasl = Sasl} = State) ->
+    sasl_continue(Sasl, Data, State);
+step({authentication_sasl_final, Data}, #state{sasl = Sasl} = State) ->
+    sasl_final(Sasl, Data, State);
 step(Message, #state{user = User}) ->
     bad(Message, unsupported_method, User).
 
--spec sasl_continue(minato_scram:client() | undefined, binary(), state()) -> step().
-sasl_continue(undefined, _Data, #state{user = User}) ->
-    bad(authentication_sasl_continue, sasl_exchange_not_started, User);
-sasl_continue(Client, Data, State) ->
+-spec sasl_continue(sasl(), binary(), state()) -> step().
+sasl_continue({pending, Client}, Data, State) ->
     Password = password(State, authentication_sasl_continue),
     {Message, Next} = minato_scram:client_final(Data, Password, Client),
-    {send, {sasl_response, Message}, State#state{scram = Next}}.
+    {send, {sasl_response, Message}, State#state{sasl = {pending, Next}}};
+sasl_continue(_Sasl, _Data, #state{user = User}) ->
+    bad(authentication_sasl_continue, sasl_exchange_not_started, User).
 
--spec sasl_final(minato_scram:client() | undefined, binary(), state()) -> step().
-sasl_final(undefined, _Data, #state{user = User}) ->
-    bad(authentication_sasl_final, sasl_exchange_not_started, User);
-sasl_final(Client, Data, State) ->
+-spec sasl_final(sasl(), binary(), state()) -> step().
+sasl_final({pending, Client}, Data, State) ->
     ok = minato_scram:server_final(Data, Client),
-    {continue, State#state{scram = undefined}}.
+    {continue, State#state{sasl = verified}};
+sasl_final(_Sasl, _Data, #state{user = User}) ->
+    bad(authentication_sasl_final, sasl_exchange_not_started, User).
 
 -spec mechanism([binary()], binary()) -> binary().
 mechanism(Mechanisms, User) ->
