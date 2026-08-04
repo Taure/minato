@@ -29,7 +29,8 @@ jobs:
     with:
       version-file: '.tool-versions'
       otp-matrix: '["28", "29"]'
-      enable-ct: false
+      enable-ct: true
+      extra-services-compose: 'test/docker-compose.yml'
       enable-ex-doc: true
       enable-audit: true
       enable-coverage: true

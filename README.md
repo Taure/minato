@@ -45,6 +45,37 @@ The contracts worth knowing before reading the module documentation:
 - A type minato has no codec for still works in the text format, which is what
   makes the text path worth having beyond parity.
 
+## Testing
+
+The codecs are covered three ways.
+
+`rebar3 eunit` needs nothing installed: unit tests and PropEr round trips for
+every type in both wire formats.
+
+`rebar3 ct` runs the differential suite, which needs a PostgreSQL:
+
+```
+docker compose -f test/docker-compose.yml up -d
+rebar3 ct --suite test/minato_differential_SUITE
+docker compose -f test/docker-compose.yml down -v
+```
+
+It compares every type against two independent references. `pg_types` is a
+black box oracle: minato's encoding must be byte identical to it, and the two
+must decode the same bytes to the same value. PostgreSQL 17 is the judge: the
+suite puts minato's own bytes on the wire, so the server parses them with its
+`recv` function and answers with its `send` function, and the round trip has to
+come back unchanged in both wire formats. The corpus is a hand written table of
+awkward values plus a seeded generator, and a disagreement is written down in
+the suite with which implementation is right rather than skipped.
+
+CI runs it on every pull request, on OTP 28 and 29, against the same container.
+
+Point it at another server with `MINATO_PG_HOST`, `MINATO_PG_PORT`,
+`MINATO_PG_DATABASE`, `MINATO_PG_USER` and `MINATO_PG_PASSWORD`. It skips rather
+than fails when nothing answers. `MINATO_DIFF_SCALAR_CASES` and
+`MINATO_DIFF_ARRAY_CASES` set how many values are generated per type.
+
 ## Requirements
 
 Build and test on OTP 28 or later.
@@ -86,10 +117,12 @@ the design decisions above: [pgo](https://github.com/erleans/pgo),
 [asyncpg](https://github.com/MagicStack/asyncpg) and
 [pgx](https://github.com/jackc/pgx).
 
-[pg_types](https://github.com/erleans/pg_types) is used at test time only, as a
-differential oracle to compare encoded and decoded values against. It is a test
-profile dependency, it is never shipped as a runtime dependency, and it is not
-read as a source of implementation.
+[pg_types](https://github.com/erleans/pg_types) and
+[pgo](https://github.com/erleans/pgo) are used at test time only:
+`pg_types` as a differential oracle to compare encoded and decoded values
+against, `pgo` as the transport that carries minato's bytes to a real server.
+Both are test profile dependencies, neither is shipped as a runtime dependency,
+and neither is read as a source of implementation.
 
 ## Licence
 
