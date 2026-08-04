@@ -169,6 +169,43 @@ float_special_text_spellings_test_() ->
         ?_assertEqual(neg_infinity, minato_codec:decode(701, ~"-inf", text))
     ].
 
+float_nan_is_quiet_test_() ->
+    [
+        ?_assertEqual(<<16#7FC00000:32>>, enc(700, nan, binary)),
+        ?_assertEqual(<<16#7FF8000000000000:64>>, enc(701, nan, binary)),
+        ?_assertEqual(nan, minato_codec:decode(700, <<16#7FC00000:32>>, binary)),
+        ?_assertEqual(nan, minato_codec:decode(701, <<16#7FF8000000000000:64>>, binary))
+    ].
+
+float_text_without_a_decimal_point_test_() ->
+    [
+        ?_assertEqual(0.0, minato_codec:decode(701, ~"0", text)),
+        ?_assertEqual(1.0e30, minato_codec:decode(701, ~"1e+30", text)),
+        ?_assertEqual(-1.0e30, minato_codec:decode(701, ~"-1e+30", text)),
+        ?_assertEqual(1.0e-30, minato_codec:decode(701, ~"1e-30", text)),
+        ?_assertEqual(123.0, minato_codec:decode(701, ~"123", text)),
+        ?_assertEqual(1.5, minato_codec:decode(701, ~"1.5", text)),
+        ?_assertError(
+            {minato_codec, #{reason := malformed_text}}, minato_codec:decode(701, ~"nope", text)
+        )
+    ].
+
+float4_text_narrows_to_float4_test_() ->
+    Max = 3.4028234663852886e38,
+    AsDouble = binary_to_float(~"3.4028235e+38"),
+    [
+        ?_assertEqual(Max, minato_codec:decode(700, ~"3.4028235e+38", text)),
+        ?_assert(AsDouble =/= Max),
+        ?_assertEqual(
+            minato_codec:decode(700, enc(700, 1.1, binary), binary),
+            minato_codec:decode(700, enc(700, 1.1, text), text)
+        ),
+        ?_assertEqual(0.0, minato_codec:decode(700, ~"0", text)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, minato_codec:decode(700, ~"1e+300", text)
+        )
+    ].
+
 float4_never_silently_saturates_test_() ->
     [
         ?_assertError({minato_codec, #{reason := out_of_range}}, enc(700, 1.0e300, binary)),
