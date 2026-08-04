@@ -4,3 +4,4 @@ rebar3.crashdump
 *.beam
 *.plt
 doc/
+bom.xml

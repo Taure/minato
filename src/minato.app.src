@@ -1,0 +1,10 @@
+{application, minato, [
+    {description, "An independent Erlang Postgres client"},
+    {vsn, "git"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/Taure/minato"}]}
+]}.
