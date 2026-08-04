@@ -6,9 +6,32 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer, the protocol layer, authentication, the connection,
-the query paths and transactions exist; there is no pool, no published package
-and no stable API. Do not depend on it.
+Early, but usable end to end: codecs, protocol, authentication, connection,
+queries, transactions and a pool. There is no published package and no stable
+API, and nothing runs on it in production yet. Do not depend on it.
+
+## Using it
+
+```erlang
+{ok, _Pid} = minato:start_pool(main, #{size => 10,
+                                       connection => #{host => "localhost",
+                                                       user => ~"minato",
+                                                       password => ~"minato",
+                                                       database => ~"minato_test"}}),
+{ok, #{rows := [{42}]}} = minato:query(main, ~"SELECT $1::int4", [42]),
+
+{ok, done} = minato:transaction(main, fun(Conn) ->
+    {ok, _Result, Written} = minato_query:query(Conn, ~"INSERT INTO t VALUES ($1)", [1]),
+    {ok, done, Written}
+end).
+```
+
+Pools can be declared in the application environment instead, for an application
+that wants its pool up before anything asks for one:
+
+```erlang
+{minato, [{pools, #{main => #{size => 10, connection => #{user => ~"minato"}}}}]}
+```
 
 ## Codecs
 
@@ -249,6 +272,30 @@ transaction_rolled_back, Conn}`.
 `status/1` reports what the server last said: `idle`, `transaction`, or `failed`
 for a transaction where a statement has already errored and everything further
 is rejected until it is rolled back.
+
+## Pool
+
+`minato_pool` holds connections and lends them; it does not run queries. That
+follows from the caller owning the socket: a pool that ran the query would be one
+process serialising every caller again. `checkout/2` hands over the socket along
+with the connection, `checkin/2` hands it back, and `m:minato` wraps both.
+
+- **A pool is up before it has connections.** They are opened in the background
+  and retried with backoff, so an application that starts before its database
+  starts anyway and the first query waits rather than a supervisor giving up.
+- **A borrower that dies is noticed.** The socket belongs to the process holding
+  it, so a dead borrower means a dead connection; the pool's monitor fires and a
+  replacement is opened.
+- **A connection checked in mid-transaction is rolled back** before it is lent
+  again, and closed if that fails. The alternative is the next borrower silently
+  joining a transaction it did not open.
+- **A caller that gives up waiting is removed from the queue**, rather than being
+  handed a connection nobody is waiting for.
+- **The queue is a plain FIFO for now.** A CoDel queue is what belongs here, and
+  it needs a load to measure against before it is worth writing.
+
+`stats/1` reports what the pool holds and what it has done, counted with
+`counters`: checkouts, waits, timeouts and disconnects.
 
 ## Testing
 

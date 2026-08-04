@@ -1,0 +1,242 @@
+-module(minato_pool_SUITE).
+-moduledoc """
+The pool, against a real PostgreSQL.
+
+What is worth proving here is not that a query runs - `minato_query_SUITE` does
+that - but what the pool does with connections at the edges: a borrower that
+dies, a checkout with nothing free, a connection given back mid-transaction, a
+pool started before its database answers.
+
+The last one needs a server that is not there, so it points a pool at a port
+nothing is listening on and requires the pool to be alive and waiting rather
+than dead.
+
+Skips when no server answers.
+""".
+
+-include_lib("stdlib/include/assert.hrl").
+
+-export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
+-export([
+    a_query_runs_through_the_pool/1,
+    a_failing_statement_does_not_cost_the_connection/1,
+    a_transaction_holds_one_connection/1,
+    a_rolled_back_transaction_reports_its_reason/1,
+    a_connection_given_back_mid_transaction_is_reset/1,
+    a_borrower_that_dies_is_replaced/1,
+    a_checkout_with_nothing_free_waits/1,
+    a_checkout_that_waits_too_long_gives_up/1,
+    a_pool_with_no_server_stays_up/1,
+    the_stats_count_what_happened/1
+]).
+
+-define(TIMEOUT, 10000).
+-define(POOL, minato_test_pool).
+
+-spec all() -> [atom()].
+all() ->
+    [
+        a_query_runs_through_the_pool,
+        a_failing_statement_does_not_cost_the_connection,
+        a_transaction_holds_one_connection,
+        a_rolled_back_transaction_reports_its_reason,
+        a_connection_given_back_mid_transaction_is_reset,
+        a_borrower_that_dies_is_replaced,
+        a_checkout_with_nothing_free_waits,
+        a_checkout_that_waits_too_long_gives_up,
+        a_pool_with_no_server_stays_up,
+        the_stats_count_what_happened
+    ].
+
+-spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
+init_per_suite(Config) ->
+    case minato_conn:connect(connection()) of
+        {ok, Conn} ->
+            {ok, _Results, Ready} = minato_query:simple(Conn, schema()),
+            ok = minato_conn:close(Ready),
+            {ok, _Started} = application:ensure_all_started(minato),
+            Config;
+        {error, Reason} ->
+            {skip, {no_server, Reason}}
+    end.
+
+-spec end_per_suite([{atom(), term()}]) -> ok.
+end_per_suite(_Config) ->
+    ok = application:stop(minato).
+
+-spec init_per_testcase(atom(), [{atom(), term()}]) -> [{atom(), term()}].
+init_per_testcase(a_pool_with_no_server_stays_up, Config) ->
+    Config;
+init_per_testcase(_Case, Config) ->
+    {ok, _Pid} = minato:start_pool(?POOL, #{size => 2, connection => connection()}),
+    ok = filled(?POOL, 2, 100),
+    {ok, _Results} = minato:simple(?POOL, ~"TRUNCATE minato_pool_rows"),
+    Config.
+
+-spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
+end_per_testcase(a_pool_with_no_server_stays_up, _Config) ->
+    ok;
+end_per_testcase(_Case, _Config) ->
+    ok = minato:stop_pool(?POOL).
+
+-spec a_query_runs_through_the_pool([{atom(), term()}]) -> ok.
+a_query_runs_through_the_pool(_Config) ->
+    ?assertMatch({ok, #{rows := [{42}]}}, minato:query(?POOL, ~"SELECT $1::int4", [42])).
+
+-spec a_failing_statement_does_not_cost_the_connection([{atom(), term()}]) -> ok.
+a_failing_statement_does_not_cost_the_connection(_Config) ->
+    Failed = minato:query(?POOL, ~"SELECT * FROM no_such_table", []),
+    ?assertMatch({error, {pgsql_error, #{code := ~"42P01"}}}, Failed),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])),
+    ?assertMatch(#{disconnects := 0}, minato:stats(?POOL)).
+
+-spec a_transaction_holds_one_connection([{atom(), term()}]) -> ok.
+a_transaction_holds_one_connection(_Config) ->
+    Written = minato:transaction(?POOL, fun(Conn) ->
+        {ok, _Result, One} = insert(Conn, ~"a"),
+        {ok, _Second, Two} = insert(One, ~"b"),
+        {ok, both, Two}
+    end),
+    ?assertEqual({ok, both}, Written),
+    ?assertEqual([~"a", ~"b"], names()).
+
+-spec a_rolled_back_transaction_reports_its_reason([{atom(), term()}]) -> ok.
+a_rolled_back_transaction_reports_its_reason(_Config) ->
+    Answer = minato:transaction(?POOL, fun(Conn) ->
+        {ok, _Result, Written} = insert(Conn, ~"a"),
+        {rollback, changed_my_mind, Written}
+    end),
+    ?assertEqual({rollback, changed_my_mind}, Answer),
+    ?assertEqual([], names()).
+
+-spec a_connection_given_back_mid_transaction_is_reset([{atom(), term()}]) -> ok.
+a_connection_given_back_mid_transaction_is_reset(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, Open} = minato_txn:open(Conn),
+    {ok, _Result, Written} = insert(Open, ~"a"),
+    ok = minato_pool:checkin(?POOL, Written),
+    ok = filled(?POOL, 2, 100),
+    ?assertEqual([], names()),
+    {ok, Again} = minato_pool:checkout(?POOL),
+    ?assertEqual(idle, minato_txn:status(Again)),
+    ok = minato_pool:checkin(?POOL, Again).
+
+-spec a_borrower_that_dies_is_replaced([{atom(), term()}]) -> ok.
+a_borrower_that_dies_is_replaced(_Config) ->
+    Test = self(),
+    Borrower = spawn(fun() ->
+        {ok, _Conn} = minato_pool:checkout(?POOL),
+        Test ! borrowed,
+        receive
+            never -> ok
+        end
+    end),
+    receive
+        borrowed -> ok
+    after ?TIMEOUT -> error(timeout)
+    end,
+    true = exit(Borrower, kill),
+    ok = filled(?POOL, 2, 200),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])).
+
+-spec a_checkout_with_nothing_free_waits([{atom(), term()}]) -> ok.
+a_checkout_with_nothing_free_waits(_Config) ->
+    {ok, First} = minato_pool:checkout(?POOL),
+    {ok, Second} = minato_pool:checkout(?POOL),
+    Test = self(),
+    _Waiter = spawn_link(fun() ->
+        {ok, Conn} = minato_pool:checkout(?POOL, ?TIMEOUT),
+        Test ! waited,
+        minato_pool:checkin(?POOL, Conn)
+    end),
+    ?assertMatch(#{waiting := 1}, waited_for(?POOL)),
+    ok = minato_pool:checkin(?POOL, First),
+    receive
+        waited -> ok
+    after ?TIMEOUT -> error(never_served)
+    end,
+    ok = minato_pool:checkin(?POOL, Second).
+
+-spec a_checkout_that_waits_too_long_gives_up([{atom(), term()}]) -> ok.
+a_checkout_that_waits_too_long_gives_up(_Config) ->
+    {ok, First} = minato_pool:checkout(?POOL),
+    {ok, Second} = minato_pool:checkout(?POOL),
+    ?assertEqual({error, checkout_timeout}, minato_pool:checkout(?POOL, 100)),
+    ?assertMatch(#{timeouts := 1, waiting := 0}, minato:stats(?POOL)),
+    ok = minato_pool:checkin(?POOL, First),
+    ok = minato_pool:checkin(?POOL, Second).
+
+-spec a_pool_with_no_server_stays_up([{atom(), term()}]) -> ok.
+a_pool_with_no_server_stays_up(_Config) ->
+    Nowhere = maps:merge(connection(), #{port => 1, connect_timeout => 100}),
+    {ok, Pid} = minato:start_pool(minato_nowhere_pool, #{size => 1, connection => Nowhere}),
+    ?assertEqual({error, checkout_timeout}, minato_pool:checkout(minato_nowhere_pool, 200)),
+    ?assert(is_pid(Pid) andalso is_process_alive(Pid)),
+    ?assertMatch(#{idle := 0}, minato:stats(minato_nowhere_pool)),
+    ok = minato:stop_pool(minato_nowhere_pool).
+
+-spec the_stats_count_what_happened([{atom(), term()}]) -> ok.
+the_stats_count_what_happened(_Config) ->
+    {ok, _Result} = minato:query(?POOL, ~"SELECT 1", []),
+    ?assertMatch(
+        #{size := 2, borrowed := 0, checkouts := Count} when Count >= 1, minato:stats(?POOL)
+    ).
+
+%%----------------------------------------------------------------------
+%% Waiting for the pool to be ready
+%%----------------------------------------------------------------------
+
+filled(_Pool, _Size, 0) ->
+    {error, never_filled};
+filled(Pool, Size, Attempts) ->
+    case minato_pool:stats(Pool) of
+        #{idle := Idle} when Idle >= Size -> ok;
+        _Filling ->
+            timer:sleep(20),
+            filled(Pool, Size, Attempts - 1)
+    end.
+
+waited_for(Pool) ->
+    waited_for(Pool, 100).
+
+waited_for(Pool, 0) ->
+    minato_pool:stats(Pool);
+waited_for(Pool, Attempts) ->
+    case minato_pool:stats(Pool) of
+        #{waiting := Waiting} = Stats when Waiting > 0 -> Stats;
+        _None ->
+            timer:sleep(20),
+            waited_for(Pool, Attempts - 1)
+    end.
+
+insert(Conn, Name) ->
+    minato_query:query(Conn, ~"INSERT INTO minato_pool_rows (name) VALUES ($1)", [Name]).
+
+names() ->
+    {ok, #{rows := Rows}} = minato:query(
+        ?POOL, ~"SELECT name FROM minato_pool_rows ORDER BY name", []
+    ),
+    [Name || {Name} <- Rows].
+
+schema() ->
+    ~"""
+    DROP TABLE IF EXISTS minato_pool_rows;
+    CREATE TABLE minato_pool_rows (name text PRIMARY KEY)
+    """.
+
+connection() ->
+    #{
+        host => env("MINATO_PG_HOST", "127.0.0.1"),
+        port => list_to_integer(env("MINATO_PG_PORT", "55432")),
+        user => list_to_binary(env("MINATO_PG_USER", "minato")),
+        password => list_to_binary(env("MINATO_PG_PASSWORD", "minato")),
+        database => list_to_binary(env("MINATO_PG_DATABASE", "minato_test")),
+        timeout => ?TIMEOUT
+    }.
+
+env(Name, Default) ->
+    case os:getenv(Name) of
+        false -> Default;
+        "" -> Default;
+        Value -> Value
+    end.
