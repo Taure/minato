@@ -107,6 +107,13 @@ one.
 - **The server nonce must extend the client nonce.** A server that does not echo
   the client's nonce as a prefix of its own has not seen the client's first
   message, which is what a replay looks like, and is rejected.
+- **A started exchange has to finish.** `AuthenticationOk` is refused while SCRAM
+  is outstanding, and so is a demand for a cleartext or MD5 password part way
+  through one. Both are how a man in the middle who cannot produce a
+  `ServerSignature` would try to get round having to. Asking for cleartext in the
+  first message is still answered, because that is what supporting cleartext
+  means; choosing which methods are acceptable at all is a `require_auth` style
+  option that belongs with the connection layer next to TLS.
 - **The iteration count is bounded at both ends.** The floor is 4096, which is
   what RFC 7677 says a server should announce and what `scram_iterations`
   defaults to. The ceiling is 1,000,000, because `i` is an unbounded number
