@@ -6,9 +6,9 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer, the protocol layer, authentication and the
-connection exist; there is no query API, no pool, no published package and no
-stable API. Do not depend on it.
+Early. The type codec layer, the protocol layer, authentication, the connection
+and the query paths exist; there is no pool, no published package and no stable
+API. Do not depend on it.
 
 ## Codecs
 
@@ -194,6 +194,33 @@ connection.
   number of bytes still to come, so the connection is finished rather than
   retried: recovering would mean knowing how far through a message the far end
   got, which is what the timeout says we do not know.
+
+## Queries
+
+`minato_query` runs SQL on a connection, in both of the protocol's query paths.
+
+```erlang
+{ok, #{rows := [{42}]}, Conn1} = minato_query:query(Conn, ~"SELECT $1::int4", [42]),
+{ok, Statement, Conn2} = minato_query:prepare(Conn1, ~"by_id", ~"SELECT * FROM t WHERE id = $1"),
+{ok, Result, Conn3} = minato_query:execute(Conn2, Statement, [7]).
+```
+
+- **Parameter types are the server's to decide.** `Describe` is answered before
+  the parameters are encoded, so nothing is guessed from the shape of an Erlang
+  term. That is two round trips for a one-off query and one for a prepared
+  statement, which is what `prepare/3` is for.
+- **Formats are chosen per column.** `binary` for every type minato has a codec
+  for and `text` for the rest, so a column of an extension type still arrives
+  rather than failing the query. The `RowDescription` a `Describe` returns says
+  text for every column, because formats are not chosen until `Bind`; minato
+  replaces those with what it asked for before decoding.
+- **A failed statement leaves the connection usable.** The error tuple carries
+  the connection back, read on to `ReadyForQuery`, because a driver that returns
+  an error and a dead connection turns one bad statement into a dead pool. A
+  connection that is *not* usable is not handed back at all: `{error, {socket,
+  _}}` has no connection in it.
+- **`simple/2` has no parameters.** The simple query protocol has nowhere to put
+  them, and a value pasted into SQL is an injection waiting to be found.
 
 ## Testing
 
