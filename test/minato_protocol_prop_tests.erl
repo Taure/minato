@@ -19,7 +19,11 @@ order, whatever sizes the buffers arrive in.
 %% cannot be given a useful type.
 -eqwalizer({nowarn_function, prop_password_roundtrip/0}).
 -eqwalizer({nowarn_function, prop_frame_roundtrip/0}).
+-eqwalizer({nowarn_function, prop_every_split_frames_the_same/0}).
+-eqwalizer({nowarn_function, prop_arbitrary_bytes_are_total/0}).
 -eqwalizer({nowarn_function, prop_every_prefix_is_incomplete/0}).
+-eqwalizer({nowarn_function, gen_stream/0}).
+-eqwalizer({nowarn_function, gen_corrupted_stream/0}).
 -eqwalizer({nowarn_function, prop_data_row_roundtrip/0}).
 -eqwalizer({nowarn_function, prop_data_row_map_roundtrip/0}).
 -eqwalizer({nowarn_function, gen_error_fields/0}).
@@ -40,12 +44,18 @@ frontend_property_test_() ->
     ]}.
 
 framing_property_test_() ->
-    {timeout, 300, [
+    {timeout, 600, [
         {"a stream frames back to the messages it was built from", fun() ->
             check(prop_frame_roundtrip())
         end},
+        {"a stream frames the same wherever it is split", fun() ->
+            check(prop_every_split_frames_the_same())
+        end},
         {"every prefix of a message is incomplete", fun() ->
             check(prop_every_prefix_is_incomplete())
+        end},
+        {"arbitrary bytes frame or raise, and do neither else", fun() ->
+            check(prop_arbitrary_bytes_are_total())
         end}
     ]}.
 
@@ -103,6 +113,32 @@ prop_frame_roundtrip() ->
             Bytes = minato_backend_writer:write_all(Messages),
             {Decoded, Rest} = feed(chunks(Bytes, Sizes)),
             Decoded =:= [decoded(Message) || Message <- Messages] andalso Rest =:= ~""
+        end
+    ).
+
+prop_every_split_frames_the_same() ->
+    ?FORALL(
+        Messages,
+        gen_stream(),
+        begin
+            Bytes = minato_backend_writer:write_all(Messages),
+            Expected = {[decoded(Message) || Message <- Messages], ~""},
+            lists:all(
+                fun(At) -> feed_two(Bytes, At) =:= Expected end,
+                lists:seq(0, byte_size(Bytes))
+            )
+        end
+    ).
+
+prop_arbitrary_bytes_are_total() ->
+    ?FORALL(
+        Bytes,
+        oneof([gen_binary(), gen_corrupted_stream()]),
+        try minato_protocol:frame(Bytes) of
+            {Messages, Rest} -> is_list(Messages) andalso is_binary(Rest)
+        catch
+            error:{minato_protocol, #{message := _, reason := _, data := _}} -> true;
+            _Class:_Reason -> false
         end
     ).
 
@@ -182,6 +218,12 @@ int4(Value) ->
         null -> null;
         Encoded -> iolist_to_binary(Encoded)
     end.
+
+feed_two(Bytes, At) ->
+    <<Head:At/binary, Tail/binary>> = Bytes,
+    {First, Carried} = minato_protocol:frame(Head),
+    {Second, Rest} = minato_protocol:frame(<<Carried/binary, Tail/binary>>),
+    {First ++ Second, Rest}.
 
 feed(Chunks) ->
     feed(Chunks, ~"", []).
@@ -301,6 +343,40 @@ gen_backend() ->
             {notification_response, Pid, Channel, Payload}
         )
     ]).
+
+-doc """
+A short stream of small messages.
+
+`prop_every_split_frames_the_same/0` frames the whole stream once per byte of
+it, so the work it does is quadratic in the bytes generated and a stream of a
+few kilobytes takes minutes. The size is bounded here rather than the number of
+split points, because the split points are the property: skipping some of them
+would leave exactly the boundary that fails untested, while a shorter message
+tests the same boundaries. Long payloads are covered by
+`prop_frame_roundtrip/0`, which frames each stream once at random chunk sizes.
+""".
+gen_stream() ->
+    ?LET(Messages, resize(6, list(resize(6, gen_backend()))), lists:sublist(Messages, 6)).
+
+gen_corrupted_stream() ->
+    ?LET(
+        {Messages, Byte},
+        {gen_stream(), integer(0, 255)},
+        begin
+            Bytes = minato_backend_writer:write_all(Messages),
+            ?LET(
+                At,
+                integer(0, max(0, byte_size(Bytes) - 1)),
+                case Bytes of
+                    ~"" ->
+                        ~"";
+                    _ ->
+                        <<Head:At/binary, _, Tail/binary>> = Bytes,
+                        <<Head/binary, Byte, Tail/binary>>
+                end
+            )
+        end
+    ).
 
 gen_described_field() ->
     ?LET(
