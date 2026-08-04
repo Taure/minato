@@ -1,0 +1,435 @@
+-module(minato_query).
+-moduledoc """
+Running SQL on a connection, in both of the protocol's two query paths.
+
+`simple/2` is the simple query protocol: one message, any number of statements,
+every value in the text format, and no parameters. `query/3` is the extended
+protocol: `Parse`, `Describe`, `Bind`, `Execute`, `Sync`, with parameters sent
+as parameters and results asked for in the binary format wherever minato has a
+codec for the type.
+
+Both take a connection and hand one back, because the connection carries the
+bytes that have arrived but not been read. A result and a connection to carry on
+from is the whole return value:
+
+```erlang
+{ok, #{rows := [{1}]}, Conn1} = minato_query:query(Conn, ~"SELECT $1::int", [1]).
+```
+
+## Which formats are asked for
+
+`Describe` says what the parameter types are and what the result columns are,
+and `minato_codec:preferred_format/1` turns each of those OIDs into `binary` for
+a type minato has a codec for and `text` for one it does not. A column of an
+extension type therefore still arrives, as its text representation, rather than
+failing the query.
+
+`RowDescription` from a `Describe` reports every column as text, because the
+formats are not chosen until `Bind`. minato replaces those with what it asked
+for before decoding, since believing the description would decode binary bytes
+as text on the first integer column.
+
+## Errors leave the connection usable
+
+A statement that fails is a normal outcome. `{error, {pgsql_error, Fields},
+Conn}` hands the connection back because the extended protocol says a failed
+statement is discarded until `Sync`, and this module reads on to
+`ReadyForQuery` before returning, so the connection really is ready.
+
+A connection returned in the error tuple is usable. One that is not usable is
+not returned: `{error, {socket, _}}` has no connection in it, because a socket
+that failed mid-message leaves the stream at an unknown offset, and there is
+nothing to hand back that could be trusted.
+
+## What is not here
+
+No transactions and no `LISTEN`. Both are session state rather than statements,
+and both need the connection to be pinned to the caller for longer than one
+query, so they belong with the pool that hands connections out.
+""".
+
+-export([
+    simple/2,
+    simple/3,
+    query/3,
+    query/4,
+    prepare/3,
+    execute/3,
+    execute/4,
+    close/2
+]).
+
+-define(UNNAMED, ~"").
+
+-record(statement, {
+    name :: binary(),
+    parameters :: [minato_oid:oid()],
+    fields :: [minato_protocol:field()],
+    formats :: [minato_codec:format()]
+}).
+
+-doc """
+A parsed statement on the server, with what it takes and what it returns.
+
+Belongs to the connection it was prepared on: a name is only meaningful to the
+session that parsed it, so a statement cannot be carried to another connection.
+""".
+-opaque statement() :: #statement{}.
+
+-doc """
+What went wrong.
+
+Every failure here comes from the connection layer or from the server. A
+parameter count that does not match raises instead of being returned, because it
+is a bug in the caller rather than a condition to branch on.
+""".
+-type error() :: minato_conn:error().
+
+-doc "The map carried by an `error({minato_query, Report})` exception.".
+-type report() :: #{message := term(), reason := term(), data := term()}.
+
+-export_type([statement/0, error/0, report/0]).
+
+-type conn() :: minato_conn:conn().
+-type opts() :: minato_protocol:opts().
+-type result() :: minato_protocol:result().
+
+-doc "`simple/3` with the default decoding options.".
+-spec simple(conn(), iodata()) ->
+    {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+simple(Conn, Sql) ->
+    simple(Conn, Sql, #{}).
+
+-doc """
+Run one or more statements through the simple query protocol.
+
+Answers with one result per statement, in order, which is why this is the only
+function here that returns a list. Every value comes back in the text format,
+because the simple query protocol has nowhere to ask for anything else.
+
+There are no parameters. A value pasted into the SQL is an injection waiting to
+be found, so anything with a value in it belongs in `query/3`.
+""".
+-spec simple(conn(), iodata(), opts()) ->
+    {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+simple(Conn, Sql, Opts) ->
+    case minato_conn:send(Conn, {query, Sql}) of
+        ok -> collect(Conn, Opts, []);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-doc "`query/4` with the default decoding options.".
+-spec query(conn(), iodata(), [term()]) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+query(Conn, Sql, Parameters) ->
+    query(Conn, Sql, Parameters, #{}).
+
+-doc """
+Run one statement with parameters, through the extended protocol.
+
+The statement is parsed unnamed, so it is replaced by the next one and nothing
+accumulates on the server. A statement that will run again belongs in
+`prepare/3`, which parses it once and keeps it.
+
+Two round trips: `Parse` and `Describe` have to be answered before the
+parameters can be encoded, because their types are the server's to decide.
+That is the price of not guessing them, and `prepare/3` pays it once.
+""".
+-spec query(conn(), iodata(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+query(Conn, Sql, Parameters, Opts) ->
+    case describe(Conn, ?UNNAMED, Sql) of
+        {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
+        Failed -> Failed
+    end.
+
+-doc """
+Parse a statement under a name and keep it for the life of the connection.
+
+The describe round trip happens here rather than on every `execute/3`, which is
+the point: a statement run in a loop costs one round trip a time.
+
+The name is the caller's. Reusing one replaces what it named, and `close/2`
+gives it back.
+""".
+-spec prepare(conn(), binary(), iodata()) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+prepare(Conn, Name, Sql) ->
+    case describe(Conn, Name, Sql) of
+        {ok, Statement, Described} -> ready(Described, Statement);
+        Failed -> Failed
+    end.
+
+-doc "`execute/4` with the default decoding options.".
+-spec execute(conn(), statement(), [term()]) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+execute(Conn, Statement, Parameters) ->
+    execute(Conn, Statement, Parameters, #{}).
+
+-doc """
+Run a prepared statement.
+
+Raises `error({minato_query, t:report/0})` when the number of parameters does
+not match what the statement was described as taking. That is a bug in the
+caller rather than a condition to branch on: the server would refuse it too, a
+round trip later and with a worse message.
+
+The connection is put back to ready before the exception is raised, with a
+`Sync` and a read to `ReadyForQuery`. Raising in the middle of an extended query
+cycle would otherwise leave a connection that is only good for closing, which is
+a heavy price for what is usually a typo.
+""".
+-spec execute(conn(), statement(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+execute(Conn, Statement, Parameters, Opts) ->
+    run(Conn, Statement, Parameters, Opts).
+
+-doc """
+Close a prepared statement and free what the server holds for it.
+
+A connection that is handed back to a pool with a hundred one-off named
+statements on it is a connection leaking server memory for the rest of its life.
+""".
+-spec close(conn(), statement()) -> {ok, conn()} | {error, error(), conn()} | {error, error()}.
+close(Conn, #statement{name = Name}) ->
+    case minato_conn:send(Conn, [{close, statement, Name}, sync]) of
+        ok -> closed(Conn);
+        {error, Reason} -> {error, Reason}
+    end.
+
+%%----------------------------------------------------------------------
+%% The extended protocol
+%%----------------------------------------------------------------------
+
+-spec describe(conn(), binary(), iodata()) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+describe(Conn, Name, Sql) ->
+    Messages = [{parse, Name, Sql, []}, {describe, statement, Name}, flush],
+    case minato_conn:send(Conn, Messages) of
+        ok -> described(Conn, Name, undefined, undefined);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec described(
+    conn(), binary(), [minato_oid:oid()] | undefined, [minato_protocol:field()] | undefined
+) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+described(Conn, Name, Parameters, Fields) ->
+    case minato_conn:next(Conn) of
+        {ok, parse_complete, Read} ->
+            described(Read, Name, Parameters, Fields);
+        {ok, {parameter_description, Oids}, Read} ->
+            described(Read, Name, Oids, Fields);
+        {ok, {row_description, Described}, Read} ->
+            {ok, statement(Name, Parameters, Described), Read};
+        {ok, no_data, Read} ->
+            {ok, statement(Name, Parameters, []), Read};
+        {ok, {notice_response, _Fields}, Read} ->
+            described(Read, Name, Parameters, Fields);
+        {ok, {error_response, Reported}, Read} ->
+            abort(Read, {pgsql_error, Reported});
+        {ok, Message, _Read} ->
+            unexpected(Message, describe);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec statement(binary(), [minato_oid:oid()] | undefined, [minato_protocol:field()]) ->
+    statement().
+statement(Name, Parameters, Fields) ->
+    #statement{
+        name = Name,
+        parameters = parameters(Parameters),
+        fields = [Field#{format => format(Field)} || Field <- Fields],
+        formats = [format(Field) || Field <- Fields]
+    }.
+
+-spec format(minato_protocol:field()) -> minato_codec:format().
+format(#{type_oid := Oid}) ->
+    minato_codec:preferred_format(Oid).
+
+-spec parameters([minato_oid:oid()] | undefined) -> [minato_oid:oid()].
+parameters(undefined) -> [];
+parameters(Oids) -> Oids.
+
+-spec ready(conn(), statement()) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+ready(Conn, Statement) ->
+    case minato_conn:send(Conn, sync) of
+        ok -> prepared(Conn, Statement);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec prepared(conn(), statement()) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+prepared(Conn, Statement) ->
+    case drain(Conn) of
+        {ok, Drained} -> {ok, Statement, Drained};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec closed(conn()) -> {ok, conn()} | {error, error(), conn()} | {error, error()}.
+closed(Conn) ->
+    drain(Conn).
+
+-spec run(conn(), statement(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+run(Conn, #statement{} = Statement, Parameters, Opts) ->
+    #statement{name = Name, parameters = Oids, formats = Formats, fields = Fields} = Statement,
+    Encoded = encode(Conn, Oids, Parameters, Opts),
+    Bind =
+        {bind, ?UNNAMED, Name, [minato_codec:preferred_format(Oid) || Oid <- Oids], Encoded,
+            Formats},
+    case minato_conn:send(Conn, [Bind, {execute, ?UNNAMED, 0}, sync]) of
+        ok -> executed(Conn, Fields, Opts);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec encode(conn(), [minato_oid:oid()], [term()], opts()) -> [iodata() | null].
+encode(_Conn, Oids, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
+    encoded(Oids, Parameters, codec_opts(Opts));
+encode(Conn, Oids, Parameters, _Opts) ->
+    ok = resync(Conn),
+    bad(bind, parameter_count_mismatch, {length(Oids), length(Parameters)}).
+
+-spec encoded([minato_oid:oid()], [term()], minato_codec:opts()) -> [iodata() | null].
+encoded([], [], _Opts) ->
+    [];
+encoded([Oid | Oids], [Value | Values], Opts) ->
+    Encoded = minato_codec:encode(Oid, Value, minato_codec:preferred_format(Oid), Opts),
+    [Encoded | encoded(Oids, Values, Opts)].
+
+-spec codec_opts(opts()) -> minato_codec:opts().
+codec_opts(Opts) ->
+    maps:with([uuid_format, datetime_format], Opts).
+
+-spec executed(conn(), [minato_protocol:field()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+executed(Conn, Fields, Opts) ->
+    case minato_conn:next(Conn) of
+        {ok, {data_row, Columns}, Read} ->
+            keep(minato_protocol:row(Fields, Columns, Opts), executed(Read, Fields, Opts));
+        {ok, {command_complete, Complete}, Read} ->
+            stamp(Complete, executed(Read, Fields, Opts));
+        {ok, empty_query_response, Read} ->
+            stamp({empty, undefined}, executed(Read, Fields, Opts));
+        {ok, {ready_for_query, _Status}, Read} ->
+            {ok, minato_protocol:result({unknown, undefined}, []), Read};
+        {ok, {error_response, Reported}, Read} ->
+            failed(Read, {pgsql_error, Reported});
+        {ok, Message, _Read} when
+            Message =:= parse_complete;
+            Message =:= no_data;
+            element(1, Message) =:= parameter_description
+        ->
+            unexpected(Message, execute);
+        {ok, _Message, Read} ->
+            executed(Read, Fields, Opts);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec keep(minato_protocol:row(), Answer) -> Answer when
+    Answer :: {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+keep(Row, {ok, #{rows := Rows} = Result, Conn}) ->
+    {ok, Result#{rows := [Row | Rows]}, Conn};
+keep(_Row, Failed) ->
+    Failed.
+
+-spec stamp(minato_protocol:tag(), Answer) -> Answer when
+    Answer :: {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+stamp({Command, NumRows}, {ok, Result, Conn}) ->
+    {ok, Result#{command := Command, num_rows := NumRows}, Conn};
+stamp(_Complete, Failed) ->
+    Failed.
+
+%%----------------------------------------------------------------------
+%% The simple protocol
+%%----------------------------------------------------------------------
+
+-spec collect(conn(), opts(), [minato_protocol:field()]) ->
+    {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+collect(Conn, Opts, Fields) ->
+    case minato_conn:next(Conn) of
+        {ok, {row_description, Described}, Read} ->
+            collect(Read, Opts, Described);
+        {ok, {data_row, Columns}, Read} ->
+            first(minato_protocol:row(Fields, Columns, Opts), collect(Read, Opts, Fields));
+        {ok, {command_complete, Complete}, Read} ->
+            began(Complete, collect(Read, Opts, []));
+        {ok, empty_query_response, Read} ->
+            began({empty, undefined}, collect(Read, Opts, []));
+        {ok, {ready_for_query, _Status}, Read} ->
+            {ok, [], Read};
+        {ok, {error_response, Reported}, Read} ->
+            refused({pgsql_error, Reported}, collect(Read, Opts, []));
+        {ok, _Message, Read} ->
+            collect(Read, Opts, Fields);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec first(minato_protocol:row(), Answer) -> Answer when
+    Answer :: {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+first(Row, {ok, [#{rows := Rows} = Result | Results], Conn}) ->
+    {ok, [Result#{rows := [Row | Rows]} | Results], Conn};
+first(_Row, Answer) ->
+    Answer.
+
+-spec began(minato_protocol:tag(), Answer) -> Answer when
+    Answer :: {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+began(Complete, {ok, Results, Conn}) ->
+    {ok, [minato_protocol:result(Complete, []) | Results], Conn};
+began(_Complete, Failed) ->
+    Failed.
+
+-spec refused(error(), {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}) ->
+    {error, error(), conn()} | {error, error()}.
+refused(Reason, {ok, _Results, Conn}) ->
+    {error, Reason, Conn};
+refused(_Reason, Failed) ->
+    Failed.
+
+%%----------------------------------------------------------------------
+%% Getting back to a ready connection
+%%----------------------------------------------------------------------
+
+-spec resync(conn()) -> ok.
+resync(Conn) ->
+    case minato_conn:send(Conn, sync) of
+        ok ->
+            _ = drain(Conn),
+            ok;
+        {error, _Reason} ->
+            ok
+    end.
+
+-spec abort(conn(), error()) -> {error, error(), conn()} | {error, error()}.
+abort(Conn, Reason) ->
+    case minato_conn:send(Conn, sync) of
+        ok -> failed(Conn, Reason);
+        {error, Sending} -> {error, Sending}
+    end.
+
+-spec failed(conn(), error()) -> {error, error(), conn()} | {error, error()}.
+failed(Conn, Reason) ->
+    case drain(Conn) of
+        {ok, Drained} -> {error, Reason, Drained};
+        {error, Draining} -> {error, Draining}
+    end.
+
+-spec drain(conn()) -> {ok, conn()} | {error, error(), conn()} | {error, error()}.
+drain(Conn) ->
+    case minato_conn:next(Conn) of
+        {ok, {ready_for_query, _Status}, Read} -> {ok, Read};
+        {ok, _Message, Read} -> drain(Read);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec unexpected(minato_protocol:backend(), atom()) -> no_return().
+unexpected(Message, Stage) ->
+    bad(Stage, unexpected_message, Message).
+
+-spec bad(term(), term(), term()) -> no_return().
+bad(Message, Reason, Data) ->
+    error({minato_query, #{message => Message, reason => Reason, data => Data}}).
