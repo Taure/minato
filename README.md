@@ -6,8 +6,9 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The type codec layer exists; there is no connection, no pool and no
-protocol yet, no published package, and no stable API. Do not depend on it.
+Early. The type codec layer and the protocol layer exist; there is no
+connection, no pool, no published package and no stable API. Do not depend on
+it.
 
 ## Codecs
 
@@ -45,14 +46,57 @@ The contracts worth knowing before reading the module documentation:
 - A type minato has no codec for still works in the text format, which is what
   makes the text path worth having beyond parity.
 
+## Protocol
+
+`minato_protocol` encodes the messages a client sends and decodes the messages a
+server sends. It is pure in the same way the codecs are: bytes in, terms out, no
+socket and no process.
+
+```erlang
+1> iolist_to_binary(minato_protocol:encode({execute, ~"", 0})).
+<<69,0,0,0,9,0,0,0,0,0>>
+2> minato_protocol:frame(<<49,0,0,0,4, 50,0,0,0,4, 51,0,0>>).
+{[parse_complete,bind_complete],<<51,0,0>>}
+```
+
+`frame/1` is the shape that matters. It takes whatever bytes have arrived,
+returns every complete message in them, and hands back the remainder to be
+prepended to the next read. Not a five byte header read followed by a payload
+read, which costs two system calls per row.
+
+- `decode/1` answers `incomplete` for a buffer that stops anywhere short of a
+  whole message, so carry-over is always safe. A message that is entirely
+  present and still malformed raises, because the server contradicted itself.
+- `BackendKeyData` is kept. It is the whole of what `CancelRequest` needs, and a
+  client that throws it away cannot cancel a query for the life of the
+  connection.
+- `ErrorResponse` is data, not an exception. Every documented field is decoded
+  into a map with atom keys and binary values, and `code` is the SQLSTATE.
+- `CommandComplete` parses to `{Command, Count}`: `{select, 5}`, `{insert, 3}`
+  from the two-number form, `{'begin', undefined}` where there is nothing to
+  count, `{create, table}` for a tag that names its object. The count is an
+  integer or an atom, and the type says so.
+- `DataRow` carries raw column bytes, because it cannot be read without the
+  `RowDescription` that preceded it. `row/3` takes that description as an
+  argument and decodes through `minato_codec`, as tuples or as maps.
+- A message minato does not model decodes to `{unsupported, Type, Payload}`
+  rather than raising, because every backend message is length prefixed and
+  losing the stream is worse than not understanding one message.
+
 ## Testing
 
-The codecs are covered three ways.
-
 `rebar3 eunit` needs nothing installed: unit tests and PropEr round trips for
-every type in both wire formats.
+every type in both wire formats, byte for byte tests of every protocol message
+against the documented format, and framing properties that cut a stream at every
+byte and require it back whole.
 
-`rebar3 ct` runs the differential suite, which needs a PostgreSQL:
+The protocol round trips do not compare an encoder against itself. Frontend
+messages are read back by a separate reader written from the same documentation,
+and backend messages are built by a separate writer, so a length field only one
+of the two believes in fails the property rather than cancelling out.
+
+`rebar3 ct` runs the differential suite for the codecs, which needs a
+PostgreSQL:
 
 ```
 docker compose -f test/docker-compose.yml up -d
