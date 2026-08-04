@@ -6,8 +6,44 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early. The repository is scaffolding only: there is no client yet, no published
-package, and no stable API. Do not depend on it.
+Early. The type codec layer exists; there is no connection, no pool and no
+protocol yet, no published package, and no stable API. Do not depend on it.
+
+## Codecs
+
+`minato_codec` converts Erlang terms to PostgreSQL wire bytes and back, in both
+the binary and the text wire format. It is pure: no I/O, no process, no state.
+
+`bool`, `bytea`, `int2`, `int4`, `int8`, `float4`, `float8`, `numeric`, `text`,
+`varchar`, `json`, `jsonb`, `uuid`, `date`, `time`, `timestamp`, `timestamptz`,
+and the array of each.
+
+```erlang
+1> minato_codec:encode(23, 42, binary).
+<<0,0,0,42>>
+2> minato_codec:decode(1009, ~"{a,NULL,\"b,c\"}", text).
+[<<"a">>,null,<<"b,c">>]
+```
+
+The contracts worth knowing before reading the module documentation:
+
+- `null` is the NULL sentinel in both directions and the only one. NULL has no
+  bytes on the wire, so `encode/4` returns the atom `null` and the caller writes
+  a length of -1.
+- `jsonb` is a JSON document as bytes, never a parsed term. The codec does not
+  contain a JSON parser and never will.
+- `numeric` decodes to an exact decimal binary such as `~"123.4500"`, never to a
+  float, and keeps its display scale. `NaN`, `Infinity` and `-Infinity` are the
+  atoms `nan`, `infinity` and `neg_infinity`.
+- `timestamptz` decodes to `{{Y,M,D},{H,Mi,S}}` with sub-second precision
+  floored away, or losslessly to microseconds since the Unix epoch under
+  `datetime_format => microseconds`.
+- `uuid` decodes to the 36 character form by default and to the raw 16 bytes
+  under `uuid_format => binary`. Encoding accepts either, and 32 hex characters.
+- Arrays are lists. Encoding writes one dimension; decoding reads any number and
+  nests.
+- A type minato has no codec for still works in the text format, which is what
+  makes the text path worth having beyond parity.
 
 ## Requirements
 
