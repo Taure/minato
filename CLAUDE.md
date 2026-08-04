@@ -46,6 +46,22 @@ Taure/pgo stays in production across asobi_saas, asobi_engine and shigoto until
 minato earns its way in behind a differential harness and a soak. Nothing here
 touches a consumer.
 
+## Differential harness
+
+`test/minato_differential_SUITE.erl` compares every codec against `pg_types` and
+against a real PostgreSQL. It needs a server:
+
+```
+docker compose -f test/docker-compose.yml up -d
+rebar3 ct --suite test/minato_differential_SUITE
+```
+
+It skips when no server answers, so `rebar3 ct` on a machine without Docker is
+not a failure. A disagreement goes in `known/3` in the suite with which
+implementation is right and why; anything not listed there fails the run. Never
+widen an entry to make a run go green without first deciding, against the server
+and the documentation, which side is correct.
+
 ## Before pushing
 
 `rebar3 fmt` then the full pre-push checklist. Run eqwalize under

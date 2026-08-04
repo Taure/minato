@@ -34,7 +34,19 @@ JSON representation with the caller and keeps the codec free of a JSON parser.
 
 `float4` and `float8` decode to a float, or to `nan`, `infinity` or
 `neg_infinity`, because the BEAM has no float value for those three. The same
-three atoms are accepted when encoding.
+three atoms are accepted when encoding. `nan` encodes to the quiet NaN, which
+is what PostgreSQL itself emits and what IEEE 754 recommends; a signalling NaN
+can trap on hardware that honours the distinction.
+
+A `float4` decoded from text is narrowed to `float4` precision, so that the
+same value read in either wire format gives the same term. PostgreSQL prints a
+`float4` with only the digits a `float4` needs, and reading those digits as a
+double gives a number no `float4` holds.
+
+In the text format PostgreSQL prints a float in its shortest round-tripping
+form, which for many values carries no decimal point at all: `0`, `1e+30`,
+`1e-30`. `binary_to_float/1` rejects every one of those, so the text decoder
+supplies the missing point before parsing.
 
 `uuid` decoding is governed by the `uuid_format` option: `string`, the default,
 gives the 36 character hyphenated lowercase binary, and `binary` gives the 16
@@ -173,7 +185,7 @@ to_integer(Type, Bin) ->
 
 -spec float32(term()) -> binary().
 float32(nan) ->
-    <<0:1, 255:8, 1:23>>;
+    <<0:1, 255:8, 1:1, 0:22>>;
 float32(infinity) ->
     <<0:1, 255:8, 0:23>>;
 float32(neg_infinity) ->
@@ -203,7 +215,7 @@ as_float(Type, Value) ->
 
 -spec float64(term()) -> binary().
 float64(nan) ->
-    <<0:1, 2047:11, 1:52>>;
+    <<0:1, 2047:11, 1:1, 0:51>>;
 float64(infinity) ->
     <<0:1, 2047:11, 0:52>>;
 float64(neg_infinity) ->
@@ -243,11 +255,34 @@ float_of_text(_Type, ~"inf") ->
     infinity;
 float_of_text(_Type, ~"-inf") ->
     neg_infinity;
+float_of_text(float4, Bin) ->
+    case narrow(parse_float(float4, Bin)) of
+        <<Narrowed:32/float>> -> Narrowed
+    end;
 float_of_text(Type, Bin) ->
+    parse_float(Type, Bin).
+
+-spec parse_float(minato_oid:name(), binary()) -> float().
+parse_float(Type, Bin) ->
     try
-        binary_to_float(Bin)
+        binary_to_float(with_point(Bin))
     catch
-        error:badarg -> float(to_integer(Type, Bin))
+        error:badarg -> minato_codec:bad(Type, malformed_text, Bin)
+    end.
+
+-spec with_point(binary()) -> binary().
+with_point(Bin) ->
+    case binary:split(Bin, [~"e", ~"E"]) of
+        [Mantissa] -> point(Mantissa);
+        [Mantissa, Exponent] -> <<(point(Mantissa))/binary, $e, Exponent/binary>>;
+        _ -> Bin
+    end.
+
+-spec point(binary()) -> binary().
+point(Bin) ->
+    case binary:match(Bin, ~".") of
+        nomatch -> <<Bin/binary, ".0">>;
+        _ -> Bin
     end.
 
 %%----------------------------------------------------------------------

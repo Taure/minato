@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: minato-differential-postgres
+    command:
+      - -c
+      - max_connections=500
+      - -c
+      - timezone=UTC
+    environment:
+      POSTGRES_USER: minato
+      POSTGRES_PASSWORD: minato
+      POSTGRES_DB: minato_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minato -d minato_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
