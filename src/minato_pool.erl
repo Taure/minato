@@ -42,7 +42,16 @@ because there is nothing else to be sure of about it.
 
 -behaviour(gen_server).
 
--export([start_link/2, checkout/1, checkout/2, checkin/2, discard/2, stop/1, stats/1]).
+-export([
+    start_link/2,
+    checkout/1,
+    checkout/2,
+    checkin/2,
+    give_away/3,
+    discard/2,
+    stop/1,
+    stats/1
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(DEFAULT_SIZE, 10).
@@ -165,6 +174,28 @@ checkin(Name, Conn) ->
     end.
 
 -doc """
+Hand a borrowed connection to another process, which then owes it back.
+
+Two things move and both have to: the socket, which belongs to whoever holds it,
+and the pool's idea of who to watch. The pool stops watching the caller and
+starts watching the new owner, so the connection is replaced if that process
+dies rather than the one that borrowed it.
+
+The connection term itself is the caller's to send on. Sending it without
+calling this leaves the receiver holding a term whose socket belongs to somebody
+else, and the pool waiting on a process that has moved on.
+
+For a worker that borrows a connection and hands it to the process that will use
+it, and for `LISTEN` on a connection taken out of the pool.
+""".
+-spec give_away(name(), minato_conn:conn(), pid()) -> ok | {error, term()}.
+give_away(Name, Conn, Pid) ->
+    case call(Name, {give_away, self(), Pid}, ?DEFAULT_CHECKOUT_TIMEOUT) of
+        ok -> minato_conn:give_away(Conn, Pid);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-doc """
 Give a connection back to be closed rather than lent again.
 
 For a borrower that knows the connection is no longer trustworthy: a read that
@@ -211,7 +242,9 @@ init({Name, Opts}) ->
     },
     {ok, fill(State)}.
 
--spec handle_call(checkout | stats | term(), gen_server:from(), #state{}) ->
+-type request() :: checkout | stats | {give_away, pid(), pid()}.
+
+-spec handle_call(request(), gen_server:from(), #state{}) ->
     {reply, term(), #state{}} | {noreply, #state{}}.
 handle_call(checkout, {Pid, _Tag}, #state{idle = [Conn | Rest]} = State) ->
     lending(State#state{idle = Rest}, Conn, Pid);
@@ -219,6 +252,8 @@ handle_call(checkout, {Pid, _Tag} = From, State) ->
     ok = counters:add(State#state.counters, ?WAITS, 1),
     Waiting = queue:in({From, Pid, erlang:monitor(process, Pid)}, State#state.waiting),
     {noreply, State#state{waiting = Waiting}};
+handle_call({give_away, From, To}, _From, State) ->
+    handed_over(State, From, To);
 handle_call(stats, _From, State) ->
     {reply, reported(State), State};
 handle_call(Message, _From, State) ->
@@ -268,6 +303,17 @@ lending(State, Conn, Pid) ->
             {reply, {ok, Conn}, borrow(State, Pid)};
         {error, Reason} ->
             {reply, {error, Reason}, discarded(State, Conn)}
+    end.
+
+-spec handed_over(#state{}, pid(), pid()) -> {reply, ok | {error, term()}, #state{}}.
+handed_over(#state{borrowed = Borrowed} = State, From, To) ->
+    case maps:get(From, Borrowed, undefined) of
+        undefined ->
+            {reply, {error, not_borrowed}, State};
+        #borrowed{monitor = Monitor} ->
+            true = erlang:demonitor(Monitor, [flush]),
+            Moved = State#state{borrowed = maps:remove(From, Borrowed)},
+            {reply, ok, borrow(Moved, To)}
     end.
 
 -spec borrow(#state{}, pid()) -> #state{}.
