@@ -34,7 +34,11 @@ Skips when no server answers.
     rows_can_be_maps/1,
     a_prepared_statement_runs_more_than_once/1,
     a_closed_statement_is_gone/1,
-    an_empty_statement_is_not_an_error/1
+    an_empty_statement_is_not_an_error/1,
+    a_statement_past_its_deadline_is_cancelled/1,
+    a_cancelled_statement_leaves_the_connection_usable/1,
+    the_connection_timeout_is_the_default_deadline/1,
+    a_transaction_survives_a_cancelled_statement/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -56,7 +60,11 @@ all() ->
         rows_can_be_maps,
         a_prepared_statement_runs_more_than_once,
         a_closed_statement_is_gone,
-        an_empty_statement_is_not_an_error
+        an_empty_statement_is_not_an_error,
+        a_statement_past_its_deadline_is_cancelled,
+        a_cancelled_statement_leaves_the_connection_usable,
+        the_connection_timeout_is_the_default_deadline,
+        a_transaction_survives_a_cancelled_statement
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -196,6 +204,40 @@ a_closed_statement_is_gone(Config) ->
 an_empty_statement_is_not_an_error(Config) ->
     {ok, Result, _Conn} = minato_query:query(conn(Config), ~"", []),
     ?assertMatch(#{command := empty, rows := []}, Result).
+
+-spec a_statement_past_its_deadline_is_cancelled([{atom(), term()}]) -> ok.
+a_statement_past_its_deadline_is_cancelled(Config) ->
+    Started = erlang:monotonic_time(millisecond),
+    Answer = minato_query:query(conn(Config), ~"SELECT pg_sleep(30)", [], #{timeout => 300}),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}, _Conn}, Answer),
+    ?assert(Elapsed < 5000).
+
+-spec a_cancelled_statement_leaves_the_connection_usable([{atom(), term()}]) -> ok.
+a_cancelled_statement_leaves_the_connection_usable(Config) ->
+    Sql = ~"SELECT pg_sleep(30)",
+    {error, _Reason, Cancelled} = minato_query:query(conn(Config), Sql, [], #{timeout => 300}),
+    ?assertEqual(idle, minato_txn:status(Cancelled)),
+    ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Cancelled, ~"SELECT 1", [])).
+
+-spec the_connection_timeout_is_the_default_deadline([{atom(), term()}]) -> ok.
+the_connection_timeout_is_the_default_deadline(_Config) ->
+    {ok, Conn} = minato_conn:connect((opts())#{timeout => 300}),
+    Answer = minato_query:query(Conn, ~"SELECT pg_sleep(30)", []),
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}, _Conn}, Answer),
+    {error, _Reason, Usable} = Answer,
+    ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Usable, ~"SELECT 1", [])),
+    ok = minato_conn:close(Usable).
+
+-spec a_transaction_survives_a_cancelled_statement([{atom(), term()}]) -> ok.
+a_transaction_survives_a_cancelled_statement(Config) ->
+    {ok, Open} = minato_txn:open(conn(Config)),
+    Sql = ~"SELECT pg_sleep(30)",
+    {error, _Reason, Cancelled} = minato_query:query(Open, Sql, [], #{timeout => 300}),
+    ?assertEqual(failed, minato_txn:status(Cancelled)),
+    {ok, Rolled} = minato_txn:rollback(Cancelled),
+    ?assertEqual(idle, minato_txn:status(Rolled)),
+    ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Rolled, ~"SELECT 1", [])).
 
 %%----------------------------------------------------------------------
 %% Where the server is

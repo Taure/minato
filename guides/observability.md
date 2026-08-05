@@ -144,6 +144,26 @@ discovered when a query fails on it. Retiring on your own schedule turns that
 into a connection replaced quietly, counted as `retired` rather than
 `disconnects`.
 
+## Statements that run too long
+
+`timeout` in the query options is a deadline on the statement, not just on the
+read:
+
+```erlang
+minato:query(main, ~"SELECT slow(...)", [], #{timeout => 2000}).
+```
+
+When it expires minato cancels the statement on the server and reads the
+cancellation through, so what comes back is `{error, {pgsql_error, #{code :=
+~"57014"}}}` and the connection goes back to the pool. It defaults to the
+connection's read timeout. In a dashboard those appear as ordinary failed
+queries with SQLSTATE `57014`, and a rate of them is a query that needs looking
+at rather than a client that needs restarting.
+
+A `{error, {socket, timeout}}` after that is the other case: the server did not
+acknowledge the cancellation within `cancel_timeout` either, so the connection
+is closed and replaced, and `disconnects` goes up.
+
 ## What to alert on
 
 - `timeouts` increasing at all. A checkout timeout is a request that failed
@@ -154,5 +174,8 @@ into a connection replaced quietly, counted as `retired` rather than
 - `listener_resubscribed` at any rate above roughly never, on a system that
   treats `NOTIFY` as its wake-up: every one of those is a window where nothing
   woke up. Poll as well; the notification is an optimisation.
+- `57014` appearing in `[minato, query, stop]` reasons. Every one is a statement
+  that outlived its deadline and was cancelled; the connection survived, but
+  somebody's query did not.
 - `[minato, connect, stop]` with `outcome => error` in a steady state. The
   credentials, the certificate or the network changed.

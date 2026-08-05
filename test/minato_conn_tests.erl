@@ -169,6 +169,25 @@ cancel_opens_a_second_connection_and_sends_the_key_test() ->
     ?assert(lists:member({cancel_request, 4242, 777}, Received)),
     minato_backend_server:stop(Server).
 
+a_deadline_cancels_and_then_gives_up_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{timeout => 2000, cancel_timeout => 150}),
+    Bounded = minato_conn:deadline(Conn, 100),
+    ok = minato_conn:send(Bounded, {query, ~"SELECT 1"}),
+    ?assertEqual({error, {socket, timeout}}, minato_conn:next(Bounded)),
+    Received = minato_backend_server:received(Server),
+    ?assert(lists:member({cancel_request, 4242, 777}, Received)),
+    ok = minato_conn:close(Bounded),
+    minato_backend_server:stop(Server).
+
+a_deadline_is_cleared_when_the_statement_ends_test() ->
+    Ready = {ready_for_query, idle},
+    {Server, {ok, Conn}} = connects([?READY ++ [Ready]], #{timeout => 2000}),
+    Bounded = minato_conn:deadline(Conn, 100),
+    {ok, Ready, Cleared} = minato_conn:next(Bounded),
+    ?assertEqual({error, {socket, timeout}}, minato_conn:next(Cleared, 100)),
+    ok = minato_conn:close(Cleared),
+    minato_backend_server:stop(Server).
+
 cancel_without_a_key_is_refused_test() ->
     Script = [[authentication_ok, {ready_for_query, idle}]],
     {Server, {ok, Conn}} = connects(Script, #{}),
