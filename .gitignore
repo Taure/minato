@@ -6,3 +6,5 @@ rebar3.crashdump
 doc/
 bom.xml
 bench/js/node_modules/
+test/certs/*.crt
+test/certs/*.key

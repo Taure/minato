@@ -42,9 +42,10 @@ both 28 and 29.
 
 ## Consumers
 
-Nothing runs on minato in production. The clients it would replace stay where
-they are until minato earns its way in behind the differential harness and the
-soak, and no consumer is repointed from this repository.
+The first two are `kura`, through its `kura_postgres` backend, and `shigoto`,
+which uses a driver directly. Both stay on the client they have until minato
+earns its way in behind the differential harness and a soak, and neither is
+repointed from this repository: the change belongs in theirs.
 
 ## Differential harness
 
