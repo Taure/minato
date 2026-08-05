@@ -126,11 +126,15 @@ Run one statement with parameters.
 The extended protocol, so the parameters are parameters and nothing is pasted
 into the SQL. See `m:minato_query` for what the result holds and which wire
 formats are asked for.
+
+The statement is parsed once per connection and kept, so the same SQL costs one
+round trip after the first on each connection in the pool. `minato_query:cached/4`
+documents what fills that cache and what happens when it is full.
 """.
 -spec query(pool(), iodata(), [term()], minato_protocol:opts()) ->
     answer(minato_protocol:result()).
 query(Pool, Sql, Parameters, Opts) ->
-    with(Pool, fun(Conn) -> answered(minato_query:query(Conn, Sql, Parameters, Opts)) end).
+    with(Pool, fun(Conn) -> answered(minato_query:cached(Conn, Sql, Parameters, Opts)) end).
 
 -doc "`simple/3` with the default decoding options.".
 -spec simple(pool(), iodata()) -> answer([minato_protocol:result()]).

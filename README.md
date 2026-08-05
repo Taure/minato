@@ -254,6 +254,17 @@ connection.
   an error and a dead connection turns one bad statement into a dead pool. A
   connection that is *not* usable is not handed back at all: `{error, {socket,
   _}}` has no connection in it.
+- **A statement is parsed once per connection.** `minato:query/3` goes through
+  `minato_query:cached/4`, which keeps the parsed statement on the connection it
+  used, so the same SQL costs one round trip after the first on each connection
+  in the pool rather than two every time. The cache is bounded by
+  `prepared_statements` (64 by default, 0 to turn it off), and a connection that
+  is full runs anything new unnamed, so unbounded distinct SQL gets the uncached
+  path rather than an unbounded pile of parsed statements in the backend.
+- **A schema change under a cached plan is recovered, not returned.** Altering a
+  table makes PostgreSQL refuse the statement it planned with `0A000`, which is
+  not something a caller can act on; the statement is closed, parsed again and
+  run once more. A second `0A000` is a real failure.
 - **`simple/2` has no parameters.** The simple query protocol has nowhere to put
   them, and a value pasted into SQL is an injection waiting to be found.
 

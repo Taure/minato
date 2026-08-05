@@ -91,6 +91,11 @@ the server issued is the whole of the authorisation.
     parameters/1,
     parameter/2,
     channel_binding/1,
+    recall/2,
+    remember/3,
+    forget/2,
+    claim/1,
+    statements/1,
     transaction_status/1,
     backend_key/1,
     timeout/1
@@ -101,6 +106,7 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_CONNECT_TIMEOUT, 5000).
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_TLS_DEPTH, 3).
+-define(DEFAULT_STATEMENTS, 64).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -115,6 +121,9 @@ the server issued is the whole of the authorisation.
     key :: key() | undefined,
     timeout :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
+    statements = #{} :: #{binary() => term()},
+    prepared = 0 :: non_neg_integer(),
+    limit :: non_neg_integer(),
     opts :: opts()
 }).
 
@@ -135,6 +144,7 @@ How to reach a server and who to be.
   connect_timeout => timeout(),
   timeout => timeout(),
   socket_options => [gen_tcp:connect_option()],
+  prepared_statements => non_neg_integer(),
   frame_opts => minato_protocol:frame_opts()}
 ```
 
@@ -158,6 +168,10 @@ to `prefer` under `ssl => true` and `disable` without it, since there is nothing
 to bind to on a plain socket. `require` refuses to connect at all unless the
 server offers `SCRAM-SHA-256-PLUS`.
 
+`prepared_statements` is how many statements this connection will keep parsed on
+the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
+off. See `m:minato_query` for what fills it.
+
 `timeout` is the per read timeout and applies for the life of the connection.
 `connect_timeout` covers the TCP connect and the TLS handshake.
 """.
@@ -175,6 +189,7 @@ server offers `SCRAM-SHA-256-PLUS`.
     connect_timeout => timeout(),
     timeout => timeout(),
     socket_options => [gen_tcp:connect_option()],
+    prepared_statements => non_neg_integer(),
     frame_opts => minato_protocol:frame_opts()
 }.
 
@@ -425,6 +440,60 @@ options(Transport, Socket, Opts) ->
 options_module(gen_tcp) -> inet;
 options_module(ssl) -> ssl.
 
+-doc """
+What this connection has parsed on the server under this SQL, or `undefined`.
+
+The value is whatever the query layer put there, which is why it is untyped
+here: the connection keeps statements without knowing what a statement is.
+
+The cache belongs to the connection because the statement does: a name is
+meaningful only to the session that parsed it, so a cache anywhere else would
+hand out names another session does not have.
+""".
+-spec recall(conn(), binary()) -> dynamic().
+recall(#conn{statements = Statements}, Sql) ->
+    maps:get(Sql, Statements, undefined).
+
+-doc """
+Keep a parsed statement under its SQL, if there is room.
+
+Room is `claim/1`'s to give: a connection that has handed out every name it is
+allowed answers `undefined` there, and the caller runs the statement unnamed. An
+unbounded workload therefore gets the uncached path rather than an unbounded
+pile of parsed statements in the backend.
+""".
+-spec remember(conn(), binary(), term()) -> conn().
+remember(#conn{statements = Statements} = Conn, Sql, Statement) ->
+    Conn#conn{statements = Statements#{Sql => Statement}}.
+
+-doc """
+Take the next statement name this connection has room for, or `undefined`.
+
+Names never repeat, even after `forget/2`, because the statement a forgotten
+name refers to may still be parsed on the server, and parsing a second one under
+the same name is an error rather than a replacement.
+""".
+-spec claim(conn()) -> {binary() | undefined, conn()}.
+claim(#conn{prepared = Prepared, limit = Limit} = Conn) when Prepared >= Limit ->
+    {undefined, Conn};
+claim(#conn{prepared = Prepared} = Conn) ->
+    {<<"minato_", (integer_to_binary(Prepared))/binary>>, Conn#conn{prepared = Prepared + 1}}.
+
+-doc """
+Drop what was kept under this SQL.
+
+For a statement the server has stopped accepting, which is what a schema change
+under a cached plan looks like.
+""".
+-spec forget(conn(), binary()) -> conn().
+forget(#conn{statements = Statements} = Conn, Sql) ->
+    Conn#conn{statements = maps:remove(Sql, Statements)}.
+
+-doc "How many statements this connection is keeping, and how many names it may claim.".
+-spec statements(conn()) -> {non_neg_integer(), non_neg_integer()}.
+statements(#conn{statements = Statements, limit = Limit}) ->
+    {map_size(Statements), Limit}.
+
 -doc "Every parameter the server has reported, by name.".
 -spec parameters(conn()) -> #{binary() => binary()}.
 parameters(#conn{parameters = Parameters}) ->
@@ -521,6 +590,7 @@ new(Transport, Socket, Opts) ->
         socket = Socket,
         binding = binding(Transport, Socket),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+        limit = maps:get(prepared_statements, Opts, ?DEFAULT_STATEMENTS),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         opts = maps:remove(password, Opts)
     }.
