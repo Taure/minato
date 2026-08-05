@@ -38,7 +38,9 @@ Skips when no server answers.
     a_pool_opens_only_its_floor_before_anybody_asks/1,
     a_pool_grows_when_a_caller_finds_none_free/1,
     a_pool_that_cannot_connect_fails_a_checkout_at_once/1,
-    a_pool_told_to_wait_waits/1
+    a_pool_told_to_wait_waits/1,
+    a_connection_nobody_wants_is_closed_down_to_the_floor/1,
+    a_pool_that_grew_gives_the_connections_back/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -67,7 +69,9 @@ all() ->
         a_pool_opens_only_its_floor_before_anybody_asks,
         a_pool_grows_when_a_caller_finds_none_free,
         a_pool_that_cannot_connect_fails_a_checkout_at_once,
-        a_pool_told_to_wait_waits
+        a_pool_told_to_wait_waits,
+        a_connection_nobody_wants_is_closed_down_to_the_floor,
+        a_pool_that_grew_gives_the_connections_back
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -95,6 +99,10 @@ init_per_testcase(a_pool_that_cannot_connect_fails_a_checkout_at_once, Config) -
     Config;
 init_per_testcase(a_pool_told_to_wait_waits, Config) ->
     Config;
+init_per_testcase(a_connection_nobody_wants_is_closed_down_to_the_floor, Config) ->
+    Config;
+init_per_testcase(a_pool_that_grew_gives_the_connections_back, Config) ->
+    Config;
 init_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, Config) ->
     Config;
 init_per_testcase(a_pool_grows_when_a_caller_finds_none_free, Config) ->
@@ -120,6 +128,10 @@ end_per_testcase(a_pool_that_cannot_connect_fails_a_checkout_at_once, _Config) -
     ok;
 end_per_testcase(a_pool_told_to_wait_waits, _Config) ->
     ok;
+end_per_testcase(a_connection_nobody_wants_is_closed_down_to_the_floor, _Config) ->
+    ok = minato:stop_pool(minato_idle_pool);
+end_per_testcase(a_pool_that_grew_gives_the_connections_back, _Config) ->
+    ok = minato:stop_pool(minato_grew_pool);
 end_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, _Config) ->
     ok = minato:stop_pool(minato_floor_pool);
 end_per_testcase(a_pool_grows_when_a_caller_finds_none_free, _Config) ->
@@ -354,6 +366,56 @@ a_pool_told_to_wait_waits(_Config) ->
     ok = refused(minato_patient_pool, 200),
     ?assertEqual({error, checkout_timeout}, minato_pool:checkout(minato_patient_pool, 200)),
     ok = minato:stop_pool(minato_patient_pool).
+
+-spec a_connection_nobody_wants_is_closed_down_to_the_floor([{atom(), term()}]) -> ok.
+a_connection_nobody_wants_is_closed_down_to_the_floor(_Config) ->
+    {ok, _Pid} = minato:start_pool(minato_idle_pool, #{
+        size => 4, min_size => 4, max_idle => 1, connection => connection()
+    }),
+    ok = filled(minato_idle_pool, 4, 200),
+    ?assertMatch(#{idle := 4}, minato:stats(minato_idle_pool)),
+    ok = shrunk(minato_idle_pool, 4, 600),
+    ?assertMatch(#{idle := 4}, minato:stats(minato_idle_pool)),
+    {ok, Conn} = minato_pool:checkout(minato_idle_pool),
+    ok = minato_pool:checkin(minato_idle_pool, Conn),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(minato_idle_pool, ~"SELECT 1", [])).
+
+-spec a_pool_that_grew_gives_the_connections_back([{atom(), term()}]) -> ok.
+a_pool_that_grew_gives_the_connections_back(_Config) ->
+    {ok, _Pid} = minato:start_pool(minato_grew_pool, #{
+        size => 4, min_size => 1, max_idle => 100, connection => connection()
+    }),
+    ok = filled(minato_grew_pool, 1, 200),
+    {ok, One} = minato_pool:checkout(minato_grew_pool, ?TIMEOUT),
+    {ok, Two} = minato_pool:checkout(minato_grew_pool, ?TIMEOUT),
+    {ok, Three} = minato_pool:checkout(minato_grew_pool, ?TIMEOUT),
+    ?assertMatch(#{borrowed := 3}, minato:stats(minato_grew_pool)),
+    ok = minato_pool:checkin(minato_grew_pool, One),
+    ok = minato_pool:checkin(minato_grew_pool, Two),
+    ok = minato_pool:checkin(minato_grew_pool, Three),
+    ok = settled_at(minato_grew_pool, 1, 150),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(minato_grew_pool, ~"SELECT 1", [])).
+
+settled_at(_Pool, _Floor, 0) ->
+    {error, never_shrank};
+settled_at(Pool, Floor, Attempts) ->
+    case minato:stats(Pool) of
+        #{idle := Floor, borrowed := 0} ->
+            ok;
+        _Waiting ->
+            timer:sleep(100),
+            settled_at(Pool, Floor, Attempts - 1)
+    end.
+
+shrunk(_Pool, _Floor, 0) ->
+    ok;
+shrunk(Pool, Floor, Attempts) ->
+    case minato:stats(Pool) of
+        #{idle := Idle} when Idle < Floor -> {error, {shrank_below_floor, Idle}};
+        _Held ->
+            timer:sleep(100),
+            shrunk(Pool, Floor, Attempts - 1)
+    end.
 
 refused(_Pool, 0) ->
     {error, never_failed};

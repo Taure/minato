@@ -42,6 +42,7 @@ that is hurting and guessing.
 | `size` | `10` | the most connections this pool will hold |
 | `min_size` | `1` | how many it opens before anybody asks |
 | `disconnected` | `fail` | what a checkout gets when the pool is empty and cannot connect |
+| `max_idle` | `60000` | close a connection nobody has wanted for this long, down to `min_size` |
 | `max_age` | `infinity` | retire a connection checked in older than this |
 
 `min_size` is one because a node with twenty pools should not want a hundred
@@ -49,6 +50,12 @@ connections the moment it boots, and one is still enough for the pool to prove
 it can connect and complain at start up rather than at the first query. The rest
 open when a caller finds none free. Set it to `size` for a pool that must be
 warm on the first request, and to `0` for one that may never be used at all.
+
+`max_idle` is the other half of `min_size`. A pool that grew to meet a busy hour
+would otherwise hold that hour's connections until the process died, which is a
+cost the server pays and nobody sees. The floor is never swept below, because
+the point of the floor is that somebody has already paid for those connections.
+`infinity` keeps whatever the pool has grown to.
 
 `disconnected` is `fail`: a checkout against a pool that holds nothing and whose
 last attempt to connect failed answers `{error, disconnected}` immediately.
