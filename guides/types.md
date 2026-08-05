@@ -36,11 +36,23 @@ reads any number and nests.
 ## The ones worth knowing about
 
 **`numeric` is exact.** It decodes to a binary such as `~"123.4500"`, keeping
-the scale the server sent, and never to a float. A currency amount that round
-trips through a float is a currency amount that is eventually wrong, and a
-client that quietly does that to you is worse than one that hands you a string.
+the scale the server sent, and never to a float unless you ask. `numeric` is the
+type somebody chose *because* binary floating point was not good enough: `0.1`
+has no exact representation, anything past about seventeen significant digits is
+rounded away, and a column of money summed in floats drifts. A client that
+converts by default has quietly thrown away the one property the column was
+picked for, and you find out during a reconciliation.
+
+`numeric_format => float` converts anyway, which is the right answer for an
+average or a ratio and the wrong one for money:
+
+```erlang
+{ok, #{rows := [{3.5}]}} =
+    minato:query(main, ~"SELECT avg(n) FROM t", [], #{numeric_format => float}).
+```
+
 `NaN`, `Infinity` and `-Infinity` are the atoms `nan`, `infinity` and
-`neg_infinity`.
+`neg_infinity` in both forms.
 
 **`jsonb` is bytes.** minato contains no JSON parser and never will: it does not
 know which JSON library you use, whether you want maps or proplists, or whether

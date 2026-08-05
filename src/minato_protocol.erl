@@ -120,7 +120,8 @@ minato_protocol:row(Fields, Columns, #{}).
 #{return_rows_as_maps => boolean(),
   column_name_as_atom => boolean(),
   uuid_format => string | binary,
-  datetime_format => datetime | microseconds}
+  datetime_format => datetime | microseconds,
+  numeric_format => binary | float}
 ```
 
 `return_rows_as_maps` defaults to `false`, giving a tuple per row. `true` gives
@@ -132,8 +133,8 @@ something the application wrote. A query built at run time can alias a column
 after a value, and every distinct alias would then make an atom that is never
 collected. Turn it on for queries whose column names you chose.
 
-`uuid_format` and `datetime_format` are passed through to `m:minato_codec`
-unchanged.
+`uuid_format`, `datetime_format` and `numeric_format` are passed through to
+`m:minato_codec` unchanged.
 
 ## Messages not modelled
 
@@ -294,7 +295,8 @@ table}`.
     return_rows_as_maps => boolean(),
     column_name_as_atom => boolean(),
     uuid_format => string | binary,
-    datetime_format => datetime | microseconds
+    datetime_format => datetime | microseconds,
+    numeric_format => binary | float
 }.
 
 -doc """

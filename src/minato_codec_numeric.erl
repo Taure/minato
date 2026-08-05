@@ -69,9 +69,16 @@ encode(numeric, Value, text, _Opts) ->
     {Negative, Digits, Exponent} = parse(Value),
     to_decimal_text(Negative, Digits, Exponent).
 
--doc "Decode `Format` wire bytes to a numeric value.".
+-doc """
+Decode `Format` wire bytes to a numeric value.
+
+An exact decimal binary, unless `numeric_format => float` asks for a float. See
+`m:minato_codec` for why the exact form is the default.
+""".
 -spec decode(numeric, binary(), minato_codec:format(), minato_codec:opts()) ->
-    binary() | nan | infinity | neg_infinity.
+    binary() | float() | nan | infinity | neg_infinity.
+decode(numeric, Bin, Format, #{numeric_format := float} = Opts) ->
+    floated(decode(numeric, Bin, Format, maps:remove(numeric_format, Opts)));
 decode(numeric, <<_:16, _:16/signed, ?SIGN_NAN:16, _:16, _/binary>>, binary, _Opts) ->
     nan;
 decode(numeric, <<_:16, _:16/signed, ?SIGN_PINF:16, _:16, _/binary>>, binary, _Opts) ->
@@ -98,6 +105,22 @@ decode(numeric, Bin, text, _Opts) ->
     decode_text(Bin);
 decode(numeric, Bin, Format, _Opts) ->
     minato_codec:bad(numeric, {malformed, Format}, Bin).
+
+-spec floated(binary() | float() | nan | infinity | neg_infinity) ->
+    float() | nan | infinity | neg_infinity.
+floated(Value) when is_binary(Value) ->
+    binary_to_float(exponentless(Value));
+floated(Value) when is_float(Value) ->
+    Value;
+floated(Value) ->
+    Value.
+
+-spec exponentless(binary()) -> binary().
+exponentless(Value) ->
+    case binary:match(Value, ~".") of
+        nomatch -> <<Value/binary, ".0">>;
+        _Found -> Value
+    end.
 
 -spec decode_text(binary()) -> binary() | nan | infinity | neg_infinity.
 decode_text(~"NaN") -> nan;

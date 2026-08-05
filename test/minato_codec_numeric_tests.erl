@@ -160,3 +160,21 @@ implied_zero_groups_test_() ->
         ?_assertEqual(~"0.00000001", roundtrip(~"0.00000001", binary)),
         ?_assertEqual(~"100000000.00000001", roundtrip(~"100000000.00000001", binary))
     ].
+
+numeric_decodes_to_a_float_when_asked_test() ->
+    ?assertEqual(3.5, decoded(~"3.5000", #{numeric_format => float})),
+    ?assertEqual(42.0, decoded(~"42", #{numeric_format => float})),
+    ?assertEqual(-0.25, decoded(~"-0.25", #{numeric_format => float})).
+
+numeric_stays_exact_by_default_test() ->
+    ?assertEqual(~"3.5000", decoded(~"3.5000", #{})),
+    ?assertEqual(~"42", decoded(~"42", #{})).
+
+a_float_form_keeps_the_specials_test() ->
+    ?assertEqual(nan, decoded(nan, #{numeric_format => float})),
+    ?assertEqual(infinity, decoded(infinity, #{numeric_format => float})),
+    ?assertEqual(neg_infinity, decoded(neg_infinity, #{numeric_format => float})).
+
+decoded(Value, Opts) ->
+    Wire = iolist_to_binary(minato_codec_numeric:encode(numeric, Value, binary, #{})),
+    minato_codec_numeric:decode(numeric, Wire, binary, Opts).

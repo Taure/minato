@@ -43,11 +43,17 @@ does.
 
 ```erlang
 #{uuid_format => string | binary,
-  datetime_format => datetime | microseconds}
+  datetime_format => datetime | microseconds,
+  numeric_format => binary | float}
 ```
 
-Both are decode-time options; encoding accepts every form regardless.
+All three are decode-time options; encoding accepts every form regardless.
 
+- `numeric_format` defaults to `binary`, giving the exact decimal text
+  PostgreSQL sent. `float` converts it, which loses exactness and is the right
+  answer for an average or a ratio and the wrong one for money. A client that
+  did this by default would be quietly lossy about the one type chosen for not
+  being lossy, which is why it has to be asked for.
 - `uuid_format` defaults to `string`, giving the 36 character hyphenated form.
   `binary` gives the 16 raw bytes.
 - `datetime_format` defaults to `datetime`, giving `{Hour, Minute, Second}` and
@@ -115,6 +121,7 @@ and the array type of each of them.
 -doc "Decode-time options. See the module documentation.".
 -type opts() :: #{
     uuid_format => string | binary,
+    numeric_format => binary | float,
     datetime_format => datetime | microseconds
 }.
 
