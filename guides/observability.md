@@ -24,7 +24,7 @@ Spans are `telemetry:span/3` shaped - `start`, then `stop` or `exception` - and
 | `[minato, checkout, start]` | `system_time`, `monotonic_time` | `pool` |
 | `[minato, checkout, stop]` | `duration`, `monotonic_time` | `pool`, `outcome`, `reason` |
 | `[minato, connection, opened]` | `system_time` | `pool` |
-| `[minato, connection, closed]` | `system_time` | `pool`, `reason` (`discarded` or `borrower_died`) |
+| `[minato, connection, closed]` | `system_time` | `pool`, `reason` (`discarded`, `borrower_died`, `max_age` or `idle`) |
 | `[minato, notification, received]` | `system_time`, `subscribers`, `bytes` | `listener`, `channel` |
 | `[minato, listener, reconnected]` | `system_time`, `channels` | `listener` |
 

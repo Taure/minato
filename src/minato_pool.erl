@@ -59,6 +59,7 @@ because there is nothing else to be sure of about it.
 -define(DEFAULT_SIZE, 10).
 -define(DEFAULT_MIN_SIZE, 1).
 -define(CROWDED_SHARE, 4).
+-define(SWEEP_INTERVAL, 5000).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
 -define(MINIMUM_BACKOFF, 100).
 -define(MAXIMUM_BACKOFF, 30000).
@@ -72,9 +73,10 @@ because there is nothing else to be sure of about it.
     min_size :: non_neg_integer(),
     max_age :: timeout(),
     disconnected :: fail | wait,
+    max_idle :: timeout(),
     failures = 0 :: non_neg_integer(),
     measured = false :: boolean(),
-    idle = [] :: [minato_conn:conn()],
+    idle = [] :: [{minato_conn:conn(), integer()}],
     borrowed = #{} :: #{pid() => #borrowed{}},
     waiting = queue:new() :: queue:queue(waiter()),
     connecting = 0 :: non_neg_integer(),
@@ -111,6 +113,12 @@ an outage the alternative is every caller in the system holding a process for
 five seconds to learn the same thing. `wait` queues anyway, for work that would
 rather be slow than fail.
 
+`max_idle` closes a connection that has sat unused for that many milliseconds,
+down to `min_size`. A pool that grew to meet a busy hour otherwise holds that
+hour's connections until the process dies, which is a cost the server pays and
+nobody sees. It is one minute by default, and `infinity` keeps whatever the pool
+has grown to.
+
 `max_age` retires a connection when it is checked in older than that many
 milliseconds, and opens a replacement. It is `infinity` by default, because a
 connection to PostgreSQL itself is good indefinitely and churning them would be
@@ -122,6 +130,7 @@ and a connection cut by one of them is discovered by a query failing.
     size => pos_integer(),
     min_size => non_neg_integer(),
     max_age => timeout(),
+    max_idle => timeout(),
     disconnected => fail | wait,
     connection := minato_conn:opts()
 }.
@@ -166,6 +175,7 @@ separate because one of them is a problem and the other is the pool working.
     {connected, minato_conn:conn()}
     | {connect_failed, term()}
     | retry
+    | sweep
     | {'DOWN', reference(), process, pid(), term()}.
 
 -doc "Start a pool under a supervisor.".
@@ -293,16 +303,18 @@ init({Name, Opts}) ->
         size = Size,
         min_size = min(maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE), Size),
         disconnected = maps:get(disconnected, Opts, fail),
+        max_idle = maps:get(max_idle, Opts, 60000),
         max_age = maps:get(max_age, Opts, infinity),
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
+    _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, fill(State)}.
 
 -type request() :: checkout | stats | {give_away, pid(), pid()}.
 
 -spec handle_call(request(), gen_server:from(), #state{}) ->
     {reply, term(), #state{}} | {noreply, #state{}}.
-handle_call(checkout, {Pid, _Tag}, #state{idle = [Conn | Rest]} = State) ->
+handle_call(checkout, {Pid, _Tag}, #state{idle = [{Conn, _Since} | Rest]} = State) ->
     lending(State#state{idle = Rest}, Conn, Pid);
 handle_call(checkout, From, State) ->
     asked(State, From);
@@ -348,6 +360,9 @@ handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) 
     {noreply, State#state{connecting = fewer(Connecting), backoff = longer(Delay)}};
 handle_info(retry, State) ->
     {noreply, fill(State)};
+handle_info(sweep, State) ->
+    _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
+    {noreply, swept(State)};
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, lost(State, Pid)};
 handle_info(_Message, State) ->
@@ -355,7 +370,7 @@ handle_info(_Message, State) ->
 
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{idle = Idle}) ->
-    _ = [minato_conn:close(Conn) || Conn <- Idle],
+    _ = [minato_conn:close(Conn) || {Conn, _Since} <- Idle],
     ok.
 
 %%----------------------------------------------------------------------
@@ -491,7 +506,7 @@ hand_out(#state{waiting = Waiting} = State, Conn) ->
             gen_server:reply(From, Answer),
             Lent;
         {empty, _Rest} ->
-            State#state{idle = [Conn | State#state.idle]}
+            State#state{idle = [{Conn, erlang:monotonic_time(millisecond)} | State#state.idle]}
     end.
 
 -spec returned(#state{}, pid(), minato_conn:conn()) -> #state{}.
@@ -633,6 +648,55 @@ fewer(0) ->
     0;
 fewer(Connecting) ->
     Connecting - 1.
+
+-doc """
+Close connections nobody has wanted for `max_idle`, down to `min_size`.
+
+A pool that grew for a busy hour holds that hour's connections until the process
+dies otherwise. The floor is kept because a pool with nothing open pays a
+connect on the next query, and the point of the floor is that somebody has
+already paid it.
+""".
+-spec swept(#state{}) -> #state{}.
+swept(#state{max_idle = infinity} = State) ->
+    State;
+swept(#state{idle = Idle, min_size = Floor} = State) when length(Idle) =< Floor ->
+    State;
+swept(#state{idle = Idle, min_size = Floor, max_idle = MaxIdle} = State) ->
+    Now = erlang:monotonic_time(millisecond),
+    {Keep, Stale} = idle_split(oldest_first(Idle, []), Now - MaxIdle, Floor, [], []),
+    _ = [closed(State, Conn) || Conn <- Stale],
+    State#state{idle = Keep}.
+
+-spec oldest_first([{minato_conn:conn(), integer()}], [{minato_conn:conn(), integer()}]) ->
+    [{minato_conn:conn(), integer()}].
+oldest_first([], Reversed) ->
+    Reversed;
+oldest_first([Held | Rest], Reversed) ->
+    oldest_first(Rest, [Held | Reversed]).
+
+-spec idle_split(
+    [{minato_conn:conn(), integer()}],
+    integer(),
+    non_neg_integer(),
+    [{minato_conn:conn(), integer()}],
+    [minato_conn:conn()]
+) -> {[{minato_conn:conn(), integer()}], [minato_conn:conn()]}.
+idle_split([], _Cutoff, _Floor, Keep, Stale) ->
+    {Keep, Stale};
+idle_split([{Conn, Since} | Rest], Cutoff, Floor, Keep, Stale) when
+    Since < Cutoff, length(Rest) + length(Keep) >= Floor
+->
+    idle_split(Rest, Cutoff, Floor, Keep, [Conn | Stale]);
+idle_split([Held | Rest], Cutoff, Floor, Keep, Stale) ->
+    idle_split(Rest, Cutoff, Floor, [Held | Keep], Stale).
+
+-spec closed(#state{}, minato_conn:conn()) -> ok.
+closed(#state{name = Name}, Conn) ->
+    ok = minato_conn:close(Conn),
+    minato_telemetry:event(
+        [minato, connection, closed], #{pool => Name, reason => idle}
+    ).
 
 -spec holders(#{pid() => #borrowed{}}) -> non_neg_integer().
 holders(Borrowed) ->
