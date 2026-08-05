@@ -45,6 +45,8 @@ faster - never the only path.
 -export([start_link/2, listen/2, unlisten/2, channels/1, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(MINIMUM_BACKOFF, 100).
 -define(MAXIMUM_BACKOFF, 30000).
 -define(CALL_TIMEOUT, 5000).
@@ -271,13 +273,35 @@ delivered(State, [_Message | Rest]) ->
     delivered(State, Rest).
 
 -spec notify(#state{}, binary(), binary(), integer()) -> ok.
-notify(#state{channels = Channels}, Channel, Payload, From) ->
+notify(#state{name = Name, channels = Channels}, Channel, Payload, From) ->
     Subscribers = maps:get(Channel, Channels, #{}),
     _ = [Pid ! {minato_notification, Channel, Payload, From} || Pid := _Monitor <- Subscribers],
-    ok.
+    minato_telemetry:event(
+        [minato, notification, received],
+        #{subscribers => map_size(Subscribers), bytes => byte_size(Payload)},
+        #{listener => Name, channel => Channel}
+    ).
 
 -spec announce(#state{}) -> ok.
-announce(#state{name = Name, channels = Channels}) ->
+announce(#state{name = Name, channels = Channels} = State) ->
+    ?LOG_WARNING(
+        #{
+            event => listener_resubscribed,
+            listener => Name,
+            channels => maps:keys(Channels),
+            missed => notifications_while_disconnected
+        },
+        #{domain => [minato]}
+    ),
+    ok = minato_telemetry:event(
+        [minato, listener, reconnected],
+        #{channels => map_size(Channels)},
+        #{listener => Name}
+    ),
+    announced(State).
+
+-spec announced(#state{}) -> ok.
+announced(#state{name = Name, channels = Channels}) ->
     _ = [
         Pid ! {minato_listener, Name, resubscribed}
      || _Channel := Subscribers <- Channels, Pid := _Monitor <- Subscribers

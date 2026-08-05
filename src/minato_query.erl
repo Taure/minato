@@ -61,6 +61,8 @@ query, so they belong with the pool that hands connections out.
     close/2
 ]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(UNNAMED, ~"").
 
 -record(statement, {
@@ -93,6 +95,7 @@ is a bug in the caller rather than a condition to branch on.
 -export_type([statement/0, error/0, report/0]).
 
 -type conn() :: minato_conn:conn().
+
 -type opts() :: minato_protocol:opts().
 -type result() :: minato_protocol:result().
 
@@ -115,10 +118,12 @@ be found, so anything with a value in it belongs in `query/3`.
 -spec simple(conn(), iodata(), opts()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 simple(Conn, Sql, Opts) ->
-    case minato_conn:send(Conn, {query, Sql}) of
-        ok -> collect(Conn, Opts, []);
-        {error, Reason} -> {error, Reason}
-    end.
+    observed(simple, Sql, fun() ->
+        case minato_conn:send(Conn, {query, Sql}) of
+            ok -> collect(Conn, Opts, []);
+            {error, Reason} -> {error, Reason}
+        end
+    end).
 
 -doc "`query/4` with the default decoding options.".
 -spec query(conn(), iodata(), [term()]) ->
@@ -140,10 +145,12 @@ That is the price of not guessing them, and `prepare/3` pays it once.
 -spec query(conn(), iodata(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 query(Conn, Sql, Parameters, Opts) ->
-    case describe(Conn, ?UNNAMED, Sql) of
-        {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
-        Failed -> Failed
-    end.
+    observed(unnamed, Sql, fun() ->
+        case describe(Conn, ?UNNAMED, Sql) of
+            {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
+            Failed -> Failed
+        end
+    end).
 
 -doc "`cached/4` with the default decoding options.".
 -spec cached(conn(), iodata(), [term()]) ->
@@ -177,10 +184,12 @@ more. A second `0A000` is a real failure and is returned.
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 cached(Conn, Sql, Parameters, Opts) ->
     Key = iolist_to_binary(Sql),
-    case minato_conn:recall(Conn, Key) of
-        undefined -> parsed(Conn, Key, Parameters, Opts);
-        Statement -> reused(Conn, Key, Statement, Parameters, Opts)
-    end.
+    observed(cached, Key, fun() ->
+        case minato_conn:recall(Conn, Key) of
+            undefined -> parsed(Conn, Key, Parameters, Opts);
+            Statement -> reused(Conn, Key, Statement, Parameters, Opts)
+        end
+    end).
 
 -spec parsed(conn(), binary(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
@@ -213,6 +222,10 @@ reused(Conn, Sql, Statement, Parameters, Opts) ->
 -spec replanned(conn(), binary(), statement(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 replanned(Conn, Sql, Statement, Parameters, Opts) ->
+    ?LOG_INFO(
+        #{event => cached_plan_invalidated, sql => statement_for_log(Sql)},
+        #{domain => [minato]}
+    ),
     Forgotten = minato_conn:forget(Conn, Sql),
     case close(Forgotten, Statement) of
         {ok, Closed} -> parsed(Closed, Sql, Parameters, Opts);
@@ -272,6 +285,25 @@ close(Conn, #statement{name = Name}) ->
         ok -> closed(Conn);
         {error, Reason} -> {error, Reason}
     end.
+
+%%----------------------------------------------------------------------
+%% Instrumentation
+%%----------------------------------------------------------------------
+
+-spec observed(atom(), iodata(), fun(() -> Answer)) -> Answer.
+observed(Path, Sql, Fun) ->
+    Metadata = maps:merge(#{path => Path}, minato_telemetry:statements(Sql)),
+    minato_telemetry:span([minato, query], Metadata, fun() -> reported(Fun()) end).
+
+-spec reported(dynamic()) -> {dynamic(), minato_telemetry:metadata()}.
+reported({ok, #{command := Command, num_rows := Rows}, _Conn} = Answer) ->
+    {Answer, #{outcome => ok, command => Command, num_rows => Rows}};
+reported({ok, Results, _Conn} = Answer) when is_list(Results) ->
+    {Answer, #{outcome => ok, statements => length(Results)}};
+reported({error, Reason, _Conn} = Answer) ->
+    {Answer, #{outcome => error, reason => Reason}};
+reported({error, Reason} = Answer) ->
+    {Answer, #{outcome => error, reason => Reason}}.
 
 %%----------------------------------------------------------------------
 %% The extended protocol
@@ -505,6 +537,13 @@ drain(Conn) ->
 -spec unexpected(minato_protocol:backend(), atom()) -> no_return().
 unexpected(Message, Stage) ->
     bad(Stage, unexpected_message, Message).
+
+-spec statement_for_log(binary()) -> binary() | hidden.
+statement_for_log(Sql) ->
+    case minato_telemetry:statements() of
+        true -> Sql;
+        false -> hidden
+    end.
 
 -spec bad(term(), term(), term()) -> no_return().
 bad(Message, Reason, Data) ->

@@ -3,7 +3,7 @@
     {vsn, "git"},
     {registered, [minato_sup]},
     {mod, {minato_app, []}},
-    {applications, [kernel, stdlib, crypto, public_key, ssl]},
+    {applications, [kernel, stdlib, crypto, public_key, ssl, telemetry]},
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
