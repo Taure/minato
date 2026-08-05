@@ -53,6 +53,8 @@ query, so they belong with the pool that hands connections out.
     simple/3,
     query/3,
     query/4,
+    cached/3,
+    cached/4,
     prepare/3,
     execute/3,
     execute/4,
@@ -141,6 +143,80 @@ query(Conn, Sql, Parameters, Opts) ->
     case describe(Conn, ?UNNAMED, Sql) of
         {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
         Failed -> Failed
+    end.
+
+-doc "`cached/4` with the default decoding options.".
+-spec cached(conn(), iodata(), [term()]) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+cached(Conn, Sql, Parameters) ->
+    cached(Conn, Sql, Parameters, #{}).
+
+-doc """
+Run a statement, parsing it once per connection and keeping it.
+
+The same SQL on the same connection costs one round trip after the first, which
+is what `query/3` cannot do: it parses unnamed every time, because it has
+nowhere to keep anything. A pooled caller gets a different connection each time
+and would pay the parse on each of them; a connection that keeps its statements
+pays it once per connection instead.
+
+The cache is the connection's, bounded by `prepared_statements` in
+`minato_conn:opts/0`, and a connection that is full runs anything new unnamed.
+A workload with unbounded distinct SQL therefore gets the uncached path rather
+than an unbounded pile of parsed statements in the backend.
+
+## A cached plan the server stops accepting
+
+Changing a table under a prepared statement makes PostgreSQL refuse it with
+`0A000`, because the result type it was planned for is not the one it would
+return now. That is not an error the caller can do anything with, so it is not
+returned: the statement is dropped from the cache, parsed again, and run once
+more. A second `0A000` is a real failure and is returned.
+""".
+-spec cached(conn(), iodata(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+cached(Conn, Sql, Parameters, Opts) ->
+    Key = iolist_to_binary(Sql),
+    case minato_conn:recall(Conn, Key) of
+        undefined -> parsed(Conn, Key, Parameters, Opts);
+        Statement -> reused(Conn, Key, Statement, Parameters, Opts)
+    end.
+
+-spec parsed(conn(), binary(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+parsed(Conn, Sql, Parameters, Opts) ->
+    case minato_conn:claim(Conn) of
+        {undefined, Full} -> query(Full, Sql, Parameters, Opts);
+        {Name, Claimed} -> prepared(Claimed, Name, Sql, Parameters, Opts)
+    end.
+
+-spec prepared(conn(), binary(), binary(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+prepared(Conn, Name, Sql, Parameters, Opts) ->
+    case prepare(Conn, Name, Sql) of
+        {ok, Statement, Ready} ->
+            run(minato_conn:remember(Ready, Sql, Statement), Statement, Parameters, Opts);
+        Failed ->
+            Failed
+    end.
+
+-spec reused(conn(), binary(), statement(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+reused(Conn, Sql, Statement, Parameters, Opts) ->
+    case run(Conn, Statement, Parameters, Opts) of
+        {error, {pgsql_error, #{code := ~"0A000"}}, Stale} ->
+            replanned(Stale, Sql, Statement, Parameters, Opts);
+        Answer ->
+            Answer
+    end.
+
+-spec replanned(conn(), binary(), statement(), [term()], opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+replanned(Conn, Sql, Statement, Parameters, Opts) ->
+    Forgotten = minato_conn:forget(Conn, Sql),
+    case close(Forgotten, Statement) of
+        {ok, Closed} -> parsed(Closed, Sql, Parameters, Opts);
+        {error, Reason} -> {error, Reason}
     end.
 
 -doc """
