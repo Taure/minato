@@ -5,3 +5,4 @@ rebar3.crashdump
 *.plt
 doc/
 bom.xml
+bench/js/node_modules/
