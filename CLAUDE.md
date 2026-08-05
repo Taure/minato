@@ -42,9 +42,9 @@ both 28 and 29.
 
 ## Consumers
 
-Taure/pgo stays in production across asobi_saas, asobi_engine and shigoto until
-minato earns its way in behind a differential harness and a soak. Nothing here
-touches a consumer.
+Nothing runs on minato in production. The clients it would replace stay where
+they are until minato earns its way in behind the differential harness and the
+soak, and no consumer is repointed from this repository.
 
 ## Differential harness
 
