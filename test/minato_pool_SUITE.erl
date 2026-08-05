@@ -30,7 +30,10 @@ Skips when no server answers.
     the_stats_count_what_happened/1,
     a_connection_can_be_handed_to_another_process/1,
     the_process_it_was_handed_to_is_the_one_watched/1,
-    a_connection_nobody_borrowed_cannot_be_handed_on/1
+    a_connection_nobody_borrowed_cannot_be_handed_on/1,
+    a_connection_older_than_max_age_is_retired/1,
+    a_healthy_pool_answers_ok/1,
+    a_pool_with_no_server_is_not_healthy/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -51,7 +54,10 @@ all() ->
         the_stats_count_what_happened,
         a_connection_can_be_handed_to_another_process,
         the_process_it_was_handed_to_is_the_one_watched,
-        a_connection_nobody_borrowed_cannot_be_handed_on
+        a_connection_nobody_borrowed_cannot_be_handed_on,
+        a_connection_older_than_max_age_is_retired,
+        a_healthy_pool_answers_ok,
+        a_pool_with_no_server_is_not_healthy
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -73,6 +79,14 @@ end_per_suite(_Config) ->
 -spec init_per_testcase(atom(), [{atom(), term()}]) -> [{atom(), term()}].
 init_per_testcase(a_pool_with_no_server_stays_up, Config) ->
     Config;
+init_per_testcase(a_pool_with_no_server_is_not_healthy, Config) ->
+    Config;
+init_per_testcase(a_connection_older_than_max_age_is_retired, Config) ->
+    {ok, _Pid} = minato:start_pool(?POOL, #{
+        size => 1, max_age => 1, connection => connection()
+    }),
+    ok = filled(?POOL, 1, 100),
+    Config;
 init_per_testcase(_Case, Config) ->
     {ok, _Pid} = minato:start_pool(?POOL, #{size => 2, connection => connection()}),
     ok = filled(?POOL, 2, 100),
@@ -81,6 +95,8 @@ init_per_testcase(_Case, Config) ->
 
 -spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
 end_per_testcase(a_pool_with_no_server_stays_up, _Config) ->
+    ok;
+end_per_testcase(a_pool_with_no_server_is_not_healthy, _Config) ->
     ok;
 end_per_testcase(_Case, _Config) ->
     ok = minato:stop_pool(?POOL).
@@ -240,6 +256,27 @@ a_connection_nobody_borrowed_cannot_be_handed_on(_Config) ->
     {ok, Conn} = minato_pool:checkout(?POOL),
     ok = minato_pool:checkin(?POOL, Conn),
     ?assertEqual({error, not_borrowed}, minato:give_away(?POOL, Conn, self())).
+
+-spec a_connection_older_than_max_age_is_retired([{atom(), term()}]) -> ok.
+a_connection_older_than_max_age_is_retired(_Config) ->
+    {ok, First} = minato_pool:checkout(?POOL),
+    timer:sleep(5),
+    ok = minato_pool:checkin(?POOL, First),
+    ok = settled(1, 200),
+    ?assertMatch(#{retired := Count, disconnects := 0} when Count >= 1, minato:stats(?POOL)),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])).
+
+-spec a_healthy_pool_answers_ok([{atom(), term()}]) -> ok.
+a_healthy_pool_answers_ok(_Config) ->
+    ?assertEqual(ok, minato:health(?POOL)),
+    ?assertMatch(#{borrowed := 0}, minato:stats(?POOL)).
+
+-spec a_pool_with_no_server_is_not_healthy([{atom(), term()}]) -> ok.
+a_pool_with_no_server_is_not_healthy(_Config) ->
+    Nowhere = maps:merge(connection(), #{port => 1, connect_timeout => 100}),
+    {ok, _Pid} = minato:start_pool(minato_unhealthy_pool, #{size => 1, connection => Nowhere}),
+    ?assertEqual({error, checkout_timeout}, minato:health(minato_unhealthy_pool, 200)),
+    ok = minato:stop_pool(minato_unhealthy_pool).
 
 %%----------------------------------------------------------------------
 %% Waiting for the pool to be ready

@@ -91,6 +91,7 @@ the server issued is the whole of the authorisation.
     parameters/1,
     parameter/2,
     channel_binding/1,
+    age/1,
     recall/2,
     remember/3,
     forget/2,
@@ -98,7 +99,8 @@ the server issued is the whole of the authorisation.
     statements/1,
     transaction_status/1,
     backend_key/1,
-    timeout/1
+    timeout/1,
+    with_timeout/2
 ]).
 
 -define(DEFAULT_HOST, "localhost").
@@ -121,6 +123,7 @@ the server issued is the whole of the authorisation.
     key :: key() | undefined,
     timeout :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
+    opened :: integer(),
     statements = #{} :: #{binary() => term()},
     prepared = 0 :: non_neg_integer(),
     limit :: non_neg_integer(),
@@ -547,10 +550,34 @@ transaction_status(#conn{status = Status}) ->
 backend_key(#conn{key = Key}) ->
     Key.
 
+-doc """
+How long this connection has been open, in milliseconds.
+
+For a pool deciding whether to keep lending it. A connection to PostgreSQL
+itself can live for months; one that goes through a proxy, a load balancer or a
+NAT is on a clock somebody else set, and finding out where that clock ran out
+by having a query fail is the expensive way.
+""".
+-spec age(conn()) -> non_neg_integer().
+age(#conn{opened = Opened}) ->
+    erlang:monotonic_time(millisecond) - Opened.
+
 -doc "The per read timeout this connection was opened with.".
 -spec timeout(conn()) -> timeout().
 timeout(#conn{timeout = Timeout}) ->
     Timeout.
+
+-doc """
+The same connection with a different read timeout.
+
+For work that should be given less time than the connection's own budget - a
+health check that has to answer inside a probe interval - or more, for a query
+that is known to be slow. The change lasts as long as the connection term the
+caller keeps.
+""".
+-spec with_timeout(conn(), timeout()) -> conn().
+with_timeout(Conn, Timeout) ->
+    Conn#conn{timeout = Timeout}.
 
 %%----------------------------------------------------------------------
 %% Opening
@@ -610,6 +637,7 @@ new(Transport, Socket, Opts) ->
         transport = Transport,
         socket = Socket,
         binding = binding(Transport, Socket),
+        opened = erlang:monotonic_time(millisecond),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
         limit = maps:get(prepared_statements, Opts, ?DEFAULT_STATEMENTS),
         frame_opts = maps:get(frame_opts, Opts, #{}),

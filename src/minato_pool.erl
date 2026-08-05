@@ -67,6 +67,7 @@ because there is nothing else to be sure of about it.
     name :: name(),
     opts :: minato_conn:opts(),
     size :: pos_integer(),
+    max_age :: timeout(),
     idle = [] :: [minato_conn:conn()],
     borrowed = #{} :: #{pid() => #borrowed{}},
     waiting = queue:new() :: queue:queue(waiter()),
@@ -89,13 +90,28 @@ What to open, and how many.
 `connection` is passed to `minato_conn:connect/1` unchanged. `size` is how many
 connections the pool keeps. How long to wait for a free one is the caller's to
 say, in `checkout/2`.
+
+`max_age` retires a connection when it is checked in older than that many
+milliseconds, and opens a replacement. It is `infinity` by default, because a
+connection to PostgreSQL itself is good indefinitely and churning them would be
+work nobody asked for. Set it when something sits in the middle - a proxy, a
+load balancer, a NAT - since those have idle and lifetime limits of their own,
+and a connection cut by one of them is discovered by a query failing.
 """.
 -type opts() :: #{
     size => pos_integer(),
+    max_age => timeout(),
     connection := minato_conn:opts()
 }.
 
--doc "What the pool has been doing since it started.".
+-doc """
+What the pool has been doing since it started.
+
+`disconnects` is connections lost: a connect that failed, a borrower that died,
+a connection given back in a state it could not be reset from. `retired` is
+connections closed on purpose because they reached `max_age`. The two are
+separate because one of them is a problem and the other is the pool working.
+""".
 -type stats() :: #{
     size := non_neg_integer(),
     idle := non_neg_integer(),
@@ -104,7 +120,8 @@ say, in `checkout/2`.
     checkouts := non_neg_integer(),
     waits := non_neg_integer(),
     timeouts := non_neg_integer(),
-    disconnects := non_neg_integer()
+    disconnects := non_neg_integer(),
+    retired := non_neg_integer()
 }.
 
 -export_type([name/0, opts/0, stats/0]).
@@ -113,7 +130,8 @@ say, in `checkout/2`.
 -define(WAITS, 2).
 -define(TIMEOUTS, 3).
 -define(DISCONNECTS, 4).
--define(COUNTERS, 4).
+-define(RETIRED, 5).
+-define(COUNTERS, 5).
 
 -type waiter() :: {gen_server:from(), pid(), reference()}.
 
@@ -251,6 +269,7 @@ init({Name, Opts}) ->
         name = Name,
         opts = maps:get(connection, Opts),
         size = Size,
+        max_age = maps:get(max_age, Opts, infinity),
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
     {ok, fill(State)}.
@@ -381,9 +400,27 @@ dropped(#state{borrowed = Borrowed} = State, Pid, Conn) ->
 -spec reset(#state{}, minato_conn:conn()) -> #state{}.
 reset(State, Conn) ->
     case minato_conn:transaction_status(Conn) of
-        idle -> hand_out(State, Conn);
+        idle -> aged(State, Conn);
         _Open -> rolled_back(State, minato_txn:rollback(Conn))
     end.
+
+-spec aged(#state{}, minato_conn:conn()) -> #state{}.
+aged(#state{max_age = infinity} = State, Conn) ->
+    hand_out(State, Conn);
+aged(#state{max_age = MaxAge} = State, Conn) ->
+    case minato_conn:age(Conn) >= MaxAge of
+        true -> retired(State, Conn);
+        false -> hand_out(State, Conn)
+    end.
+
+-spec retired(#state{}, minato_conn:conn()) -> #state{}.
+retired(State, Conn) ->
+    ok = minato_conn:close(Conn),
+    ok = counters:add(State#state.counters, ?RETIRED, 1),
+    ok = minato_telemetry:event(
+        [minato, connection, closed], #{pool => State#state.name, reason => max_age}
+    ),
+    fill(State).
 
 -spec rolled_back(
     #state{},
@@ -392,7 +429,7 @@ reset(State, Conn) ->
     | {error, minato_txn:error()}
 ) -> #state{}.
 rolled_back(State, {ok, Conn}) ->
-    hand_out(State, Conn);
+    aged(State, Conn);
 rolled_back(State, {error, _Reason, Conn}) ->
     discarded(State, Conn);
 rolled_back(State, {error, _Reason}) ->
@@ -492,5 +529,6 @@ reported(#state{} = State) ->
         checkouts => counters:get(Counters, ?CHECKOUTS),
         waits => counters:get(Counters, ?WAITS),
         timeouts => counters:get(Counters, ?TIMEOUTS),
-        disconnects => counters:get(Counters, ?DISCONNECTS)
+        disconnects => counters:get(Counters, ?DISCONNECTS),
+        retired => counters:get(Counters, ?RETIRED)
     }.
