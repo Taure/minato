@@ -33,7 +33,8 @@ Skips when no server answers.
     a_connection_nobody_borrowed_cannot_be_handed_on/1,
     a_connection_older_than_max_age_is_retired/1,
     a_healthy_pool_answers_ok/1,
-    a_pool_with_no_server_is_not_healthy/1
+    a_pool_with_no_server_is_not_healthy/1,
+    a_cancelled_statement_does_not_cost_a_connection/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -57,7 +58,8 @@ all() ->
         a_connection_nobody_borrowed_cannot_be_handed_on,
         a_connection_older_than_max_age_is_retired,
         a_healthy_pool_answers_ok,
-        a_pool_with_no_server_is_not_healthy
+        a_pool_with_no_server_is_not_healthy,
+        a_cancelled_statement_does_not_cost_a_connection
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -277,6 +279,16 @@ a_pool_with_no_server_is_not_healthy(_Config) ->
     {ok, _Pid} = minato:start_pool(minato_unhealthy_pool, #{size => 1, connection => Nowhere}),
     ?assertEqual({error, checkout_timeout}, minato:health(minato_unhealthy_pool, 200)),
     ok = minato:stop_pool(minato_unhealthy_pool).
+
+-spec a_cancelled_statement_does_not_cost_a_connection([{atom(), term()}]) -> ok.
+a_cancelled_statement_does_not_cost_a_connection(_Config) ->
+    #{disconnects := Before} = minato:stats(?POOL),
+    Opts = #{timeout => 300},
+    Answer = minato:query(?POOL, ~"SELECT pg_sleep(30)", [], Opts),
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}}, Answer),
+    ok = settled(2, 200),
+    ?assertMatch(#{disconnects := Before, borrowed := 0}, minato:stats(?POOL)),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])).
 
 %%----------------------------------------------------------------------
 %% Waiting for the pool to be ready

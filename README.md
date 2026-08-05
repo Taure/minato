@@ -249,6 +249,16 @@ connection.
   rather than failing the query. The `RowDescription` a `Describe` returns says
   text for every column, because formats are not chosen until `Bind`; minato
   replaces those with what it asked for before decoding.
+- **A statement that runs too long is cancelled, not abandoned.** `timeout` in
+  the query options is a deadline: when it expires minato sends `CancelRequest`
+  and keeps reading, so the answer is the server's own `57014` and the
+  connection is still usable afterwards. A read timeout alone can only end the
+  wait - the server carries on running the query and the connection is left with
+  an answer coming that nobody is reading, which makes it fit for closing and
+  nothing else. The deadline defaults to the connection's read timeout, so a
+  slow query costs a query rather than a connection. A server that does not
+  acknowledge the cancellation within `cancel_timeout` has stopped talking, and
+  then the connection really is finished.
 - **A failed statement leaves the connection usable.** The error tuple carries
   the connection back, read on to `ReadyForQuery`, because a driver that returns
   an error and a dead connection turns one bad statement into a dead pool. A

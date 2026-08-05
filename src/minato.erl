@@ -134,8 +134,7 @@ The statement is parsed once per connection and kept, so the same SQL costs one
 round trip after the first on each connection in the pool. `minato_query:cached/4`
 documents what fills that cache and what happens when it is full.
 """.
--spec query(pool(), iodata(), [term()], minato_protocol:opts()) ->
-    answer(minato_protocol:result()).
+-spec query(pool(), iodata(), [term()], minato_query:opts()) -> answer(minato_protocol:result()).
 query(Pool, Sql, Parameters, Opts) ->
     with(Pool, fun(Conn) -> answered(minato_query:cached(Conn, Sql, Parameters, Opts)) end).
 
@@ -150,7 +149,7 @@ Run statements through the simple query protocol, with no parameters.
 One result per statement. For DDL, `SET`, and anything else with no values in
 it; a statement with a value in it belongs in `query/3`.
 """.
--spec simple(pool(), iodata(), minato_protocol:opts()) -> answer([minato_protocol:result()]).
+-spec simple(pool(), iodata(), minato_query:opts()) -> answer([minato_protocol:result()]).
 simple(Pool, Sql, Opts) ->
     with(Pool, fun(Conn) -> answered(minato_query:simple(Conn, Sql, Opts)) end).
 

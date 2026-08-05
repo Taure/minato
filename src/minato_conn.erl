@@ -100,7 +100,8 @@ the server issued is the whole of the authorisation.
     transaction_status/1,
     backend_key/1,
     timeout/1,
-    with_timeout/2
+    with_timeout/2,
+    deadline/2
 ]).
 
 -define(DEFAULT_HOST, "localhost").
@@ -109,6 +110,7 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
+-define(DEFAULT_CANCEL_TIMEOUT, 5000).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -122,6 +124,9 @@ the server issued is the whole of the authorisation.
     status = idle :: minato_protocol:transaction_status(),
     key :: key() | undefined,
     timeout :: timeout(),
+    deadline = infinity :: integer() | infinity,
+    cancelled = false :: boolean(),
+    grace :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
     opened :: integer(),
     statements = #{} :: #{binary() => term()},
@@ -148,6 +153,7 @@ How to reach a server and who to be.
   timeout => timeout(),
   socket_options => [gen_tcp:connect_option()],
   prepared_statements => non_neg_integer(),
+  cancel_timeout => timeout(),
   frame_opts => minato_protocol:frame_opts()}
 ```
 
@@ -176,7 +182,9 @@ the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
 off. See `m:minato_query` for what fills it.
 
 `timeout` is the per read timeout and applies for the life of the connection.
-`connect_timeout` covers the TCP connect and the TLS handshake.
+`connect_timeout` covers the TCP connect and the TLS handshake. `cancel_timeout`
+is how long a cancelled statement is given to come back before the connection is
+given up on; see `deadline/2`.
 """.
 -type opts() :: #{
     host => inet:socket_address() | inet:hostname(),
@@ -193,6 +201,7 @@ off. See `m:minato_query` for what fills it.
     timeout => timeout(),
     socket_options => [gen_tcp:connect_option()],
     prepared_statements => non_neg_integer(),
+    cancel_timeout => timeout(),
     frame_opts => minato_protocol:frame_opts()
 }.
 
@@ -356,8 +365,9 @@ next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
 next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
     case minato_protocol:frame(Buffer, FrameOpts) of
         {[], _Rest} ->
-            case fill(Conn, Timeout) of
+            case fill(Conn, budget(Conn, Timeout)) of
                 {ok, Filled} -> next(Filled, Timeout);
+                {error, {socket, timeout}} -> expired(Conn, Timeout);
                 {error, Reason} -> {error, Reason}
             end;
         {[Message | Rest], Remainder} ->
@@ -366,8 +376,38 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
     end.
 
 -spec noted(minato_protocol:backend(), conn()) -> conn().
-noted({ready_for_query, Status}, Conn) -> Conn#conn{status = Status};
-noted(_Message, Conn) -> Conn.
+noted({ready_for_query, Status}, Conn) ->
+    Conn#conn{status = Status};
+noted(_Message, Conn) ->
+    Conn.
+
+-spec budget(conn(), timeout()) -> timeout().
+budget(#conn{deadline = infinity}, Timeout) ->
+    Timeout;
+budget(#conn{deadline = Deadline}, Timeout) ->
+    remaining(Deadline - erlang:monotonic_time(millisecond), Timeout).
+
+-spec remaining(integer(), timeout()) -> timeout().
+remaining(Left, _Timeout) when Left =< 0 -> 0;
+remaining(Left, infinity) -> Left;
+remaining(Left, Timeout) when Left < Timeout -> Left;
+remaining(_Left, Timeout) -> Timeout.
+
+-spec expired(conn(), timeout()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
+expired(#conn{deadline = infinity}, _Timeout) ->
+    {error, {socket, timeout}};
+expired(#conn{cancelled = true}, _Timeout) ->
+    {error, {socket, timeout}};
+expired(#conn{grace = infinity} = Conn, Timeout) ->
+    cancelling(Conn, infinity, Timeout);
+expired(#conn{grace = Grace} = Conn, Timeout) ->
+    cancelling(Conn, erlang:monotonic_time(millisecond) + Grace, Timeout).
+
+-spec cancelling(conn(), integer() | infinity, timeout()) ->
+    {ok, minato_protocol:backend(), conn()} | {error, error()}.
+cancelling(Conn, Deadline, Timeout) ->
+    _ = cancel(Conn),
+    next(Conn#conn{cancelled = true, deadline = Deadline}, Timeout).
 
 -doc """
 Ask for the next bytes to arrive as a message instead of a read.
@@ -562,6 +602,34 @@ by having a query fail is the expensive way.
 age(#conn{opened = Opened}) ->
     erlang:monotonic_time(millisecond) - Opened.
 
+-doc """
+Give the statement that runs next this long, then cancel it.
+
+A read timeout on its own can only end the wait, not the statement: the server
+carries on running the query, and the connection is left with an answer coming
+that nobody is reading, which makes it fit for closing and nothing else. A
+deadline sends `CancelRequest` when it expires and then goes on reading, so what
+arrives is the server's own `57014` and the `ReadyForQuery` after it. A
+cancelled statement therefore comes back as an ordinary failed statement with
+the connection still usable, which is the difference between a slow query
+costing one query and costing a connection.
+
+The cancelled statement gets `cancel_timeout` to acknowledge it. A server that
+does not answer even that has stopped talking, and the connection really is
+finished: `{error, {socket, timeout}}`, with no connection handed back.
+
+It lasts until it is cleared with `infinity`, which the query layer does before
+handing a connection back, so a deadline belongs to one call rather than to the
+connection. It covers everything that call does, including the `Describe` round
+trip a first-time statement needs, because a caller asking for 300 milliseconds
+means the answer, not one leg of it.
+""".
+-spec deadline(conn(), timeout()) -> conn().
+deadline(Conn, infinity) ->
+    Conn#conn{deadline = infinity, cancelled = false};
+deadline(Conn, Timeout) ->
+    Conn#conn{deadline = erlang:monotonic_time(millisecond) + Timeout, cancelled = false}.
+
 -doc "The per read timeout this connection was opened with.".
 -spec timeout(conn()) -> timeout().
 timeout(#conn{timeout = Timeout}) ->
@@ -639,6 +707,7 @@ new(Transport, Socket, Opts) ->
         binding = binding(Transport, Socket),
         opened = erlang:monotonic_time(millisecond),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+        grace = maps:get(cancel_timeout, Opts, ?DEFAULT_CANCEL_TIMEOUT),
         limit = maps:get(prepared_statements, Opts, ?DEFAULT_STATEMENTS),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         opts = maps:remove(password, Opts)

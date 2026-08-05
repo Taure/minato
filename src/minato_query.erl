@@ -96,7 +96,33 @@ is a bug in the caller rather than a condition to branch on.
 
 -type conn() :: minato_conn:conn().
 
--type opts() :: minato_protocol:opts().
+-doc """
+Decoding options, plus how long the statement may run.
+
+```erlang
+#{timeout => timeout(),
+  return_rows_as_maps => boolean(),
+  column_name_as_atom => boolean(),
+  uuid_format => string | binary,
+  datetime_format => datetime | microseconds}
+```
+
+Everything but `timeout` is passed to `m:minato_protocol` unchanged. `timeout`
+becomes a deadline on the statement: when it expires the statement is cancelled
+on the server rather than abandoned, and comes back as `57014` with the
+connection still usable. It defaults to the connection's own read timeout, so a
+statement that outlives that costs a statement rather than a connection. See
+`minato_conn:deadline/2`.
+""".
+-type opts() :: #{
+    timeout => timeout(),
+    return_rows_as_maps => boolean(),
+    column_name_as_atom => boolean(),
+    uuid_format => string | binary,
+    datetime_format => datetime | microseconds
+}.
+
+-export_type([opts/0]).
 -type result() :: minato_protocol:result().
 
 -doc "`simple/3` with the default decoding options.".
@@ -118,9 +144,11 @@ be found, so anything with a value in it belongs in `query/3`.
 -spec simple(conn(), iodata(), opts()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 simple(Conn, Sql, Opts) ->
+    Bounded = bounded(Conn, Opts),
+    Decoding = decoding(Opts),
     observed(simple, Sql, fun() ->
-        case minato_conn:send(Conn, {query, Sql}) of
-            ok -> collect(Conn, Opts, []);
+        case minato_conn:send(Bounded, {query, Sql}) of
+            ok -> collect(Bounded, Decoding, []);
             {error, Reason} -> {error, Reason}
         end
     end).
@@ -145,9 +173,11 @@ That is the price of not guessing them, and `prepare/3` pays it once.
 -spec query(conn(), iodata(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 query(Conn, Sql, Parameters, Opts) ->
+    Bounded = bounded(Conn, Opts),
+    Decoding = decoding(Opts),
     observed(unnamed, Sql, fun() ->
-        case describe(Conn, ?UNNAMED, Sql) of
-            {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
+        case describe(Bounded, ?UNNAMED, Sql) of
+            {ok, Statement, Described} -> run(Described, Statement, Parameters, Decoding);
             Failed -> Failed
         end
     end).
@@ -184,14 +214,16 @@ more. A second `0A000` is a real failure and is returned.
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 cached(Conn, Sql, Parameters, Opts) ->
     Key = iolist_to_binary(Sql),
+    Bounded = bounded(Conn, Opts),
+    Decoding = decoding(Opts),
     observed(cached, Key, fun() ->
-        case minato_conn:recall(Conn, Key) of
-            undefined -> parsed(Conn, Key, Parameters, Opts);
-            Statement -> reused(Conn, Key, Statement, Parameters, Opts)
+        case minato_conn:recall(Bounded, Key) of
+            undefined -> parsed(Bounded, Key, Parameters, Decoding);
+            Statement -> reused(Bounded, Key, Statement, Parameters, Decoding)
         end
     end).
 
--spec parsed(conn(), binary(), [term()], opts()) ->
+-spec parsed(conn(), binary(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 parsed(Conn, Sql, Parameters, Opts) ->
     case minato_conn:claim(Conn) of
@@ -199,7 +231,7 @@ parsed(Conn, Sql, Parameters, Opts) ->
         {Name, Claimed} -> prepared(Claimed, Name, Sql, Parameters, Opts)
     end.
 
--spec prepared(conn(), binary(), binary(), [term()], opts()) ->
+-spec prepared(conn(), binary(), binary(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 prepared(Conn, Name, Sql, Parameters, Opts) ->
     case prepare(Conn, Name, Sql) of
@@ -209,7 +241,7 @@ prepared(Conn, Name, Sql, Parameters, Opts) ->
             Failed
     end.
 
--spec reused(conn(), binary(), statement(), [term()], opts()) ->
+-spec reused(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 reused(Conn, Sql, Statement, Parameters, Opts) ->
     case run(Conn, Statement, Parameters, Opts) of
@@ -219,7 +251,7 @@ reused(Conn, Sql, Statement, Parameters, Opts) ->
             Answer
     end.
 
--spec replanned(conn(), binary(), statement(), [term()], opts()) ->
+-spec replanned(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 replanned(Conn, Sql, Statement, Parameters, Opts) ->
     ?LOG_INFO(
@@ -271,7 +303,28 @@ a heavy price for what is usually a typo.
 -spec execute(conn(), statement(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 execute(Conn, Statement, Parameters, Opts) ->
-    run(Conn, Statement, Parameters, Opts).
+    Bounded = bounded(Conn, Opts),
+    Decoding = decoding(Opts),
+    observed(prepared, name(Statement), fun() ->
+        run(Bounded, Statement, Parameters, Decoding)
+    end).
+
+-spec name(statement()) -> binary().
+name(#statement{name = Name}) ->
+    Name.
+
+-spec bounded(conn(), opts()) -> conn().
+bounded(Conn, Opts) ->
+    minato_conn:deadline(Conn, maps:get(timeout, Opts, minato_conn:timeout(Conn))).
+
+-spec decoding(opts()) -> minato_protocol:opts().
+decoding(Opts) ->
+    #{
+        return_rows_as_maps => maps:get(return_rows_as_maps, Opts, false),
+        column_name_as_atom => maps:get(column_name_as_atom, Opts, false),
+        uuid_format => maps:get(uuid_format, Opts, string),
+        datetime_format => maps:get(datetime_format, Opts, datetime)
+    }.
 
 -doc """
 Close a prepared statement and free what the server holds for it.
@@ -293,7 +346,12 @@ close(Conn, #statement{name = Name}) ->
 -spec observed(atom(), iodata(), fun(() -> Answer)) -> Answer.
 observed(Path, Sql, Fun) ->
     Metadata = maps:merge(#{path => Path}, minato_telemetry:statements(Sql)),
-    minato_telemetry:span([minato, query], Metadata, fun() -> reported(Fun()) end).
+    minato_telemetry:span([minato, query], Metadata, fun() -> reported(cleared(Fun())) end).
+
+-spec cleared(dynamic()) -> dynamic().
+cleared({ok, Answer, Conn}) -> {ok, Answer, minato_conn:deadline(Conn, infinity)};
+cleared({error, Reason, Conn}) -> {error, Reason, minato_conn:deadline(Conn, infinity)};
+cleared(Answer) -> Answer.
 
 -spec reported(dynamic()) -> {dynamic(), minato_telemetry:metadata()}.
 reported({ok, #{command := Command, num_rows := Rows}, _Conn} = Answer) ->
@@ -380,7 +438,7 @@ prepared(Conn, Statement) ->
 closed(Conn) ->
     drain(Conn).
 
--spec run(conn(), statement(), [term()], opts()) ->
+-spec run(conn(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 run(Conn, #statement{} = Statement, Parameters, Opts) ->
     #statement{name = Name, parameters = Oids, formats = Formats, fields = Fields} = Statement,
@@ -393,7 +451,7 @@ run(Conn, #statement{} = Statement, Parameters, Opts) ->
         {error, Reason} -> {error, Reason}
     end.
 
--spec encode(conn(), [minato_oid:oid()], [term()], opts()) -> [iodata() | null].
+-spec encode(conn(), [minato_oid:oid()], [term()], minato_protocol:opts()) -> [iodata() | null].
 encode(_Conn, Oids, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
     encoded(Oids, Parameters, codec_opts(Opts));
 encode(Conn, Oids, Parameters, _Opts) ->
@@ -407,11 +465,11 @@ encoded([Oid | Oids], [Value | Values], Opts) ->
     Encoded = minato_codec:encode(Oid, Value, minato_codec:preferred_format(Oid), Opts),
     [Encoded | encoded(Oids, Values, Opts)].
 
--spec codec_opts(opts()) -> minato_codec:opts().
+-spec codec_opts(minato_protocol:opts()) -> minato_codec:opts().
 codec_opts(Opts) ->
     maps:with([uuid_format, datetime_format], Opts).
 
--spec executed(conn(), [minato_protocol:field()], opts()) ->
+-spec executed(conn(), [minato_protocol:field()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 executed(Conn, Fields, Opts) ->
     case minato_conn:next(Conn) of
@@ -455,7 +513,7 @@ stamp(_Complete, Failed) ->
 %% The simple protocol
 %%----------------------------------------------------------------------
 
--spec collect(conn(), opts(), [minato_protocol:field()]) ->
+-spec collect(conn(), minato_protocol:opts(), [minato_protocol:field()]) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 collect(Conn, Opts, Fields) ->
     case minato_conn:next(Conn) of

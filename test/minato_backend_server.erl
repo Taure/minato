@@ -17,8 +17,11 @@ is given; anything else is a list of `m:minato_backend_writer` messages. When
 the script runs out the server keeps reading and answers nothing, which is what
 a client waiting on a message it will never get has to cope with.
 
-A connection that closes is not the end: `cancel/1` opens a second one, so the
-server accepts again and carries on with whatever script is left.
+Connections are served concurrently, each with its own copy of the script,
+because `cancel/1` opens a second connection while the first is still waiting
+for an answer: a server that accepted one at a time would leave the cancel
+sitting in a backlog nobody reads, which is exactly the case a cancel test needs
+to observe.
 """.
 
 -export([start/1, port/1, received/1, stop/1]).
@@ -77,29 +80,41 @@ stop(#{pid := Pid}) ->
 accept(Listen, Owner, Script) ->
     case gen_tcp:accept(Listen, ?ACCEPT_TIMEOUT) of
         {ok, Socket} ->
-            Remaining = serve(Socket, Owner, ~"", false, Script),
-            ok = gen_tcp:close(Socket),
-            accept(Listen, Owner, Remaining);
+            Acceptor = self(),
+            Served = spawn_link(fun() -> served(Socket, Owner, Acceptor, Script) end),
+            ok = gen_tcp:controlling_process(Socket, Served),
+            Served ! {?MODULE, yours},
+            accept(Listen, Owner, Script);
         {error, timeout} ->
             accept(Listen, Owner, Script)
     end.
 
--spec serve(gen_tcp:socket(), pid(), binary(), boolean(), [answer()]) -> [answer()].
-serve(Socket, Owner, Buffer, StartedUp, Script) ->
+-spec served(gen_tcp:socket(), pid(), pid(), [answer()]) -> ok.
+served(Socket, Owner, Acceptor, Script) ->
+    receive
+        {?MODULE, yours} ->
+            _ = serve(Socket, Owner, Acceptor, ~"", false, Script),
+            gen_tcp:close(Socket)
+    after ?ACCEPT_TIMEOUT ->
+        gen_tcp:close(Socket)
+    end.
+
+-spec serve(gen_tcp:socket(), pid(), pid(), binary(), boolean(), [answer()]) -> [answer()].
+serve(Socket, Owner, Acceptor, Buffer, StartedUp, Script) ->
     case read(Socket, Buffer, StartedUp) of
         {ok, Message, Rest} ->
-            Owner ! {?MODULE, self(), Message},
-            answer(Socket, Owner, Rest, started_up(Message, StartedUp), Script);
+            Owner ! {?MODULE, Acceptor, Message},
+            answer(Socket, Owner, Acceptor, Rest, started_up(Message, StartedUp), Script);
         closed ->
             Script
     end.
 
--spec answer(gen_tcp:socket(), pid(), binary(), boolean(), [answer()]) -> [answer()].
-answer(Socket, Owner, Rest, StartedUp, [Answer | Script]) ->
+-spec answer(gen_tcp:socket(), pid(), pid(), binary(), boolean(), [answer()]) -> [answer()].
+answer(Socket, Owner, Acceptor, Rest, StartedUp, [Answer | Script]) ->
     ok = gen_tcp:send(Socket, bytes(Answer)),
-    serve(Socket, Owner, Rest, StartedUp, Script);
-answer(Socket, Owner, Rest, StartedUp, []) ->
-    serve(Socket, Owner, Rest, StartedUp, []).
+    serve(Socket, Owner, Acceptor, Rest, StartedUp, Script);
+answer(Socket, Owner, Acceptor, Rest, StartedUp, []) ->
+    serve(Socket, Owner, Acceptor, Rest, StartedUp, []).
 
 -spec bytes(answer()) -> iodata().
 bytes({raw, Bytes}) -> Bytes;
