@@ -198,7 +198,7 @@ and would pay the parse on each of them; a connection that keeps its statements
 pays it once per connection instead.
 
 The cache is the connection's, bounded by `prepared_statements` in
-`minato_conn:opts/0`, and a connection that is full runs anything new unnamed.
+`t:minato_conn:opts/0`, and a connection that is full runs anything new unnamed.
 A workload with unbounded distinct SQL therefore gets the uncached path rather
 than an unbounded pile of parsed statements in the backend.
 
