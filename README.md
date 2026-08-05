@@ -6,8 +6,8 @@ An independent Erlang client for PostgreSQL.
 
 ## Status
 
-Early, but usable end to end: codecs, protocol, authentication, connection,
-queries, transactions, a pool and LISTEN/NOTIFY. There is no published package and no stable
+Early, but usable end to end: codecs, protocol, authentication with channel
+binding, TLS, connection, queries, transactions, a pool and LISTEN/NOTIFY. There is no published package and no stable
 API, and nothing runs on it in production yet. Do not depend on it.
 
 ## Using it
@@ -166,12 +166,24 @@ tests assert the behaviour rather than omitting the cases. A password that
 cannot be prepared falls back to its raw bytes, which is what PostgreSQL
 documents itself as doing when it stores the verifier, so the two agree.
 
-`SCRAM-SHA-256-PLUS` is not implemented. The client advertises `n,,`: no channel
-binding. That is the honest flag for a client that cannot do it, and it leaves
-the exchange open to a man in the middle holding a certificate the client will
-accept. Channel binding needs the server certificate from the TLS session, so it
-belongs with the connection layer. No Erlang client has it, which makes it a
-real differentiator rather than a box to tick.
+`SCRAM-SHA-256-PLUS` is implemented, with `tls-server-end-point` binding. Under
+TLS the hash of the server's certificate goes into the `c=` field of
+`client-final-message`, which the `ClientProof` covers, so the exchange is tied
+to the TLS session it happened on. Without that, SCRAM proves a shared password
+over whatever channel the client is on, and a man in the middle holding a
+certificate the client accepts can relay the entire exchange and keep the
+session.
+
+`channel_binding` is `prefer` under `ssl => true` and `disable` on a plain
+socket, where there is nothing to bind to. `require` refuses to connect unless
+the server offers `-PLUS`. A client that can bind but is talking to a server
+that did not offer it sends `y,,`, which is how a server that does support
+binding detects the mechanism list being stripped in transit.
+
+The hash is taken with the algorithm the certificate was signed with, as RFC
+5929 says and as PostgreSQL computes it; SHA-1 and MD5 signatures are hashed
+with SHA-256 instead, because the binding must not be weaker than the mechanism
+it binds.
 
 ## Connection
 
@@ -410,6 +422,22 @@ run before believing anything is minutes.
 It has already earned its place: it found a connector that crashed when the
 socket handover failed, and a transaction API with no way for the caller to say
 "the connection is gone".
+
+### TLS
+
+`minato_tls_SUITE` runs against a second server in the compose file with
+`ssl=on`, using the CA and certificate in `test/certs` (generated for these
+tests, valid for ten years). Every other suite can only prove the failure path -
+that minato refuses to continue when a server declines TLS - and this proves the
+one that matters: a handshake that completes, a certificate verified against a
+CA, a hostname that is checked, a certificate for another host that is refused,
+and a working session afterwards, including a megabyte value and five thousand
+rows through the record layer.
+
+The server is the judge of whether the session is encrypted: the suite asks
+`pg_stat_ssl` rather than believing the client. Channel binding is proved the
+same way - `channel_binding => require` only connects if PostgreSQL negotiated
+`SCRAM-SHA-256-PLUS` and accepted the certificate hash the client bound to.
 
 ## Requirements
 

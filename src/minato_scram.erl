@@ -69,15 +69,26 @@ above ever got a number to compare.
 
 ## Channel binding
 
-Not implemented. The client advertises `n,,`: no channel binding, no authzid.
+`channel_binding` in `t:opts/0` decides what the gs2 header says, and
+`t:binding/0` documents the three forms. `{tls_server_end_point, Hash}` is the
+one that does something: the hash of the server's certificate goes into the
+`c=` field of `client-final-message`, which is covered by the `ClientProof`, so
+the exchange is tied to the TLS session it happened on.
 
-That leaves the mechanism open to a man in the middle who holds a certificate
-the client will accept, because nothing in the handshake is tied to the TLS
-channel underneath it. PostgreSQL offers `SCRAM-SHA-256-PLUS` with
-`tls-server-end-point` binding for exactly that, and no Erlang client implements
-it, so it is a real differentiator rather than a box to tick. It needs the
-server certificate from the TLS session, which is why it belongs with the
-connection layer rather than here.
+Without it, SCRAM proves a shared password over whatever channel the client
+happens to be on, and a man in the middle holding a certificate the client
+accepts can relay the whole exchange and keep the session. With it, the relay
+fails: the certificate hash the client bound to is not the one the server sees,
+and the server rejects the proof.
+
+`y,,` is the other half. A client that can bind and is talking to a server that
+did not offer `-PLUS` says so in the header, and a server that did offer it and
+receives `y` knows the mechanism list was tampered with on the way. That is the
+downgrade the flag exists to catch, and it only works if the client sets it
+honestly.
+
+The hash is the connection layer's to compute, because it comes from the TLS
+session; see `m:minato_conn`.
 
 ## What is not an error here
 
@@ -97,7 +108,9 @@ therefore safe to log, and no scrubbing is needed for one that is not.
 
 -export([client_first/2, client_first/3, client_final/3, server_final/2]).
 
--define(GS2_HEADER, ~"n,,").
+-define(GS2_NO_BINDING, ~"n,,").
+-define(GS2_UNOFFERED, ~"y,,").
+-define(GS2_BOUND, ~"p=tls-server-end-point,,").
 -define(NONCE_BYTES, 24).
 -define(KEY_LENGTH, 32).
 -define(MINIMUM_ITERATIONS, 4096).
@@ -107,6 +120,7 @@ therefore safe to log, and no scrubbing is needed for one that is not.
 -record(first, {
     nonce :: binary(),
     bare :: binary(),
+    binding :: binary(),
     minimum_iterations :: pos_integer(),
     maximum_iterations :: pos_integer()
 }).
@@ -133,13 +147,28 @@ ends are checked.
 """.
 -type opts() :: #{
     minimum_iterations => pos_integer(),
-    maximum_iterations => pos_integer()
+    maximum_iterations => pos_integer(),
+    channel_binding => binding()
 }.
+
+-doc """
+What to tell the server about channel binding, in the gs2 header.
+
+- `none` is `n,,`: this exchange is not bound to anything.
+- `unoffered` is `y,,`: the client can bind and the server did not offer it.
+  A server that did offer it and receives this has found a man in the middle
+  stripping the `-PLUS` mechanism, and fails the exchange, which is the whole
+  point of the flag.
+- `{tls_server_end_point, Hash}` is `p=tls-server-end-point,,` followed by the
+  hash of the server's certificate, which ties this exchange to this TLS
+  session. See `m:minato_conn` for where the hash comes from.
+""".
+-type binding() :: none | unoffered | {tls_server_end_point, binary()}.
 
 -doc "The map carried by an `error({minato_scram, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
 
--export_type([client/0, opts/0, report/0]).
+-export_type([client/0, opts/0, binding/0, report/0]).
 
 -doc """
 Build the `client-first-message` and the state the rest of the exchange needs.
@@ -177,13 +206,24 @@ of the exchange, so nothing outside a test may call this.
 -spec client_first(binary(), binary(), opts()) -> {iodata(), client()}.
 client_first(Username, Nonce, Opts) ->
     Bare = <<"n=", (saslname(Username))/binary, ",r=", Nonce/binary>>,
+    Binding = maps:get(channel_binding, Opts, none),
     Client = #first{
         nonce = Nonce,
         bare = Bare,
+        binding = cbind_input(Binding),
         minimum_iterations = maps:get(minimum_iterations, Opts, ?MINIMUM_ITERATIONS),
         maximum_iterations = maps:get(maximum_iterations, Opts, ?MAXIMUM_ITERATIONS)
     },
-    {[?GS2_HEADER, Bare], Client}.
+    {[gs2_header(Binding), Bare], Client}.
+
+-spec gs2_header(binding()) -> binary().
+gs2_header(none) -> ?GS2_NO_BINDING;
+gs2_header(unoffered) -> ?GS2_UNOFFERED;
+gs2_header({tls_server_end_point, _Hash}) -> ?GS2_BOUND.
+
+-spec cbind_input(binding()) -> binary().
+cbind_input({tls_server_end_point, Hash}) -> <<?GS2_BOUND/binary, Hash/binary>>;
+cbind_input(Binding) -> gs2_header(Binding).
 
 -doc """
 Read the `server-first-message` and answer it with the `client-final-message`.
@@ -210,7 +250,8 @@ client_final(ServerFirst, Password, #first{} = Client) ->
     ),
     ClientKey = crypto:mac(hmac, sha256, Salted, ~"Client Key"),
     StoredKey = crypto:hash(sha256, ClientKey),
-    WithoutProof = <<"c=", (base64:encode(?GS2_HEADER))/binary, ",r=", ServerNonce/binary>>,
+    #first{binding = CbindInput} = Client,
+    WithoutProof = <<"c=", (base64:encode(CbindInput))/binary, ",r=", ServerNonce/binary>>,
     AuthMessage = <<Bare/binary, ",", ServerFirst/binary, ",", WithoutProof/binary>>,
     Proof = crypto:exor(ClientKey, crypto:mac(hmac, sha256, StoredKey, AuthMessage)),
     ServerKey = crypto:mac(hmac, sha256, Salted, ~"Server Key"),
