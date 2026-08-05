@@ -84,13 +84,65 @@ attached:
 
 ```erlang
 #{size := 10, idle := 8, borrowed := 2, waiting := 0,
-  checkouts := 148_233, waits := 41, timeouts := 0, disconnects := 3}
+  checkouts := 148_233, waits := 41, timeouts := 0,
+  disconnects := 3, retired := 96}
 ```
 
-`waits` against `checkouts` is how often a caller found nothing free.
-`timeouts` is how often one gave up. `disconnects` climbing is a pool losing
-connections, which is either the server closing them or the application killing
-processes that hold them.
+`waits` against `checkouts` is how often a caller found nothing free. `timeouts`
+is how often one gave up. `disconnects` climbing is a pool losing connections -
+the server closing them, or the application killing processes that hold them -
+while `retired` is the pool closing them on purpose at `max_age`. They are
+counted separately because one is a problem and the other is the pool working.
+
+## Traces
+
+The spans above are already the shape OpenTelemetry wants, so a bridge is a few
+lines rather than a package:
+
+```erlang
+%% needs opentelemetry_telemetry
+Spans = [[minato, connect], [minato, query], [minato, checkout]],
+_ = [
+    otel_telemetry:handle_span(Span, #{tracer_id => minato})
+ || Span <- Spans
+].
+```
+
+A `[minato, query]` span nested inside an application span is the picture worth
+having: the request, the checkout it waited on, and the statement it ran, with
+the gap between them visible. `[minato, checkout]` is what makes that picture
+useful, because a request that spent 40 ms waiting for a connection and 2 ms
+querying looks exactly like the reverse until the two are separate spans.
+
+## Health
+
+`minato:health/1` borrows a connection and runs `SELECT 1`, both inside a
+timeout:
+
+```erlang
+case minato:health(main, 1000) of
+    ok -> ready;
+    {error, _Reason} -> not_ready
+end.
+```
+
+Use it as a **readiness** probe, not a liveness one. A pool that cannot reach
+its database is not broken - it is waiting, and reconnecting with backoff while
+it waits. Restarting the node for that turns a database outage into an outage of
+everything else the node was doing.
+
+## Connections that live too long
+
+`max_age` in the pool options retires a connection when it is checked in older
+than that, and opens a replacement. It is `infinity` by default: a connection to
+PostgreSQL itself is good indefinitely, and churning connections is work nobody
+asked for.
+
+Set it when something sits in the middle. A proxy, a load balancer or a NAT has
+idle and lifetime limits of its own, and a connection one of them cut is
+discovered when a query fails on it. Retiring on your own schedule turns that
+into a connection replaced quietly, counted as `retired` rather than
+`disconnects`.
 
 ## What to alert on
 

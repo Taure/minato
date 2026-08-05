@@ -314,6 +314,13 @@ with the connection, `checkin/2` hands it back, and `m:minato` wraps both.
   joining a transaction it did not open.
 - **A caller that gives up waiting is removed from the queue**, rather than being
   handed a connection nobody is waiting for.
+- **`max_age` retires a connection** when it is checked in older than that and
+  opens a replacement. `infinity` by default, because a connection to PostgreSQL
+  is good indefinitely; set it when a proxy, load balancer or NAT sits in the
+  middle with a clock of its own.
+- **`minato:health/1` borrows a connection and runs `SELECT 1`.** A readiness
+  probe, not a liveness one: a pool that cannot reach its database is waiting,
+  and restarting the node for that turns a database outage into a total one.
 - **A connection can be handed to another process.** `minato:give_away/3` moves
   the socket and the pool's monitor together, so a connection can outlive the
   process that borrowed it when that is what was meant, and the pool watches

@@ -53,6 +53,8 @@ statements inside a transaction have to run on that one.
     transaction/2,
     with/2,
     give_away/3,
+    health/1,
+    health/2,
     stats/1
 ]).
 
@@ -200,6 +202,44 @@ sent one without this call holds a term whose socket is somebody else's.
 -spec give_away(pool(), conn(), pid()) -> ok | {error, term()}.
 give_away(Pool, Conn, Pid) ->
     minato_pool:give_away(Pool, Conn, Pid).
+
+-doc "`health/2` with a one second budget.".
+-spec health(pool()) -> ok | {error, term()}.
+health(Pool) ->
+    health(Pool, 1000).
+
+-doc """
+Ask whether this pool can reach the database right now.
+
+Borrows a connection and runs `SELECT 1` on it, both inside the timeout, so a
+pool that is up but has no connections, one whose connections have all been
+taken, and one whose server has gone away all answer `{error, _}` rather than
+`ok`.
+
+This is the readiness probe. It is deliberately not a liveness probe: a pool
+that cannot reach its database is not broken, it is waiting, and restarting the
+node for it turns a database outage into an outage of everything. Report it as
+not ready, keep the process alive, and let the pool reconnect.
+""".
+-spec health(pool(), timeout()) -> ok | {error, term()}.
+health(Pool, Timeout) ->
+    case minato_pool:checkout(Pool, Timeout) of
+        {ok, Conn} -> answered(Pool, Conn, Timeout);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec answered(pool(), conn(), timeout()) -> ok | {error, term()}.
+answered(Pool, Conn, Timeout) ->
+    case minato_query:query(minato_conn:with_timeout(Conn, Timeout), ~"SELECT 1", []) of
+        {ok, _Result, Read} ->
+            minato_pool:checkin(Pool, Read);
+        {error, Reason, Read} ->
+            ok = minato_pool:checkin(Pool, Read),
+            {error, Reason};
+        {error, Reason} ->
+            ok = minato_pool:discard(Pool, Conn),
+            {error, Reason}
+    end.
 
 -doc "What the pool holds and what it has done.".
 -spec stats(pool()) -> minato_pool:stats().
