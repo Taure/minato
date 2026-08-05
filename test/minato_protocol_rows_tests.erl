@@ -198,3 +198,38 @@ every_field_key_is_an_atom_and_every_value_a_binary_test() ->
     {[{error_response, Fields}], ~""} = minato_protocol:frame(Bytes),
     ?assert(lists:all(fun is_atom/1, maps:keys(Fields))),
     ?assert(lists:all(fun is_binary/1, maps:values(Fields))).
+
+every_codec_option_reaches_the_codec_test() ->
+    Uuid = <<1:128>>,
+    Fields = [
+        described(~"id", 2950, binary),
+        described(~"amount", 1700, binary),
+        described(~"at", 1114, binary)
+    ],
+    Columns = [Uuid, encoded(1700, ~"3.5"), encoded(1114, {{2026, 8, 5}, {12, 0, 0}})],
+    Opts = #{
+        uuid_format => binary,
+        numeric_format => float,
+        datetime_format => microseconds
+    },
+    {Id, Amount, At} = minato_protocol:row(Fields, Columns, Opts),
+    ?assertEqual(Uuid, Id),
+    ?assertEqual(3.5, Amount),
+    ?assert(is_integer(At)).
+
+encoded(Oid, Value) ->
+    case minato_codec:encode(Oid, Value, binary) of
+        null -> error({unexpected_null, Oid});
+        Bytes -> iolist_to_binary(Bytes)
+    end.
+
+described(Name, Oid, Format) ->
+    #{
+        name => Name,
+        table_oid => 0,
+        column => 0,
+        type_oid => Oid,
+        type_size => -1,
+        type_modifier => -1,
+        format => Format
+    }.

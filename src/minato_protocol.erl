@@ -571,11 +571,9 @@ key(#{name := Name}, true) -> binary_to_atom(Name, utf8);
 key(#{name := Name}, false) -> Name.
 
 -spec codec_opts(opts()) -> minato_codec:opts().
-codec_opts(#{uuid_format := Uuid, datetime_format := Datetime}) ->
-    #{uuid_format => Uuid, datetime_format => Datetime};
-codec_opts(#{uuid_format := Uuid}) ->
-    #{uuid_format => Uuid};
-codec_opts(#{datetime_format := Datetime}) ->
-    #{datetime_format => Datetime};
-codec_opts(_Opts) ->
-    #{}.
+codec_opts(Opts) ->
+    #{
+        uuid_format => maps:get(uuid_format, Opts, string),
+        datetime_format => maps:get(datetime_format, Opts, datetime),
+        numeric_format => maps:get(numeric_format, Opts, binary)
+    }.
