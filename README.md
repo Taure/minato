@@ -341,8 +341,9 @@ messages are read back by a separate reader written from the same documentation,
 and backend messages are built by a separate writer, so a length field only one
 of the two believes in fails the property rather than cancelling out.
 
-`rebar3 ct` runs the differential suite for the codecs and the authentication
-suite, both of which need a PostgreSQL:
+`rebar3 ct` runs the differential suite for the codecs, the authentication
+suite, the connection, query, transaction, pool, listener and soak suites, all
+of which need a PostgreSQL:
 
 ```
 docker compose -f test/docker-compose.yml up -d
@@ -373,6 +374,24 @@ Point it at another server with `MINATO_PG_HOST`, `MINATO_PG_PORT`,
 `MINATO_PG_DATABASE`, `MINATO_PG_USER` and `MINATO_PG_PASSWORD`. It skips rather
 than fails when nothing answers. `MINATO_DIFF_SCALAR_CASES` and
 `MINATO_DIFF_ARRAY_CASES` set how many values are generated per type.
+
+### Soak
+
+`minato_soak_SUITE` runs concurrent workers against a pool for a bounded time,
+each checking its own answers: a `SELECT` that has to return the row that worker
+just wrote, which fails if a connection is ever handed out with somebody else's
+bytes on it. Then it measures the pool at rest - every connection back, none
+borrowed, nobody waiting - because a driver that loses one connection per
+thousand operations looks perfect in a unit test.
+
+One case kills backends underneath the load with `pg_terminate_backend` and
+requires the pool to refill and keep answering. The default run is short enough
+for CI; `MINATO_SOAK_SECONDS` makes it as long as you want, and the number to
+run before believing anything is minutes.
+
+It has already earned its place: it found a connector that crashed when the
+socket handover failed, and a transaction API with no way for the caller to say
+"the connection is gone".
 
 ## Requirements
 

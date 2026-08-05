@@ -54,8 +54,16 @@ rollback the server never did.
 -doc "What went wrong. `transaction_rolled_back` is a COMMIT the server refused.".
 -type error() :: minato_query:error() | transaction_rolled_back.
 
--doc "What the caller's function answers with.".
--type outcome() :: {ok, term(), conn()} | {rollback, term(), conn()}.
+-doc """
+What the caller's function answers with.
+
+`{ok, Value, Conn}` commits and `{rollback, Reason, Conn}` rolls back, both
+handing back the connection they finished with. `{error, Reason}` has no
+connection in it and is for the case where there is nothing left to finish the
+transaction on: a statement that failed at the socket rather than at the server.
+Neither `COMMIT` nor `ROLLBACK` is attempted for it.
+""".
+-type outcome() :: {ok, term(), conn()} | {rollback, term(), conn()} | {error, error()}.
 
 -export_type([error/0, outcome/0]).
 
@@ -71,6 +79,10 @@ connection holding an open one.
 
 Answers `{error, transaction_rolled_back, Conn}` when the server turned the
 `COMMIT` into a `ROLLBACK`, which is the case a caller must not read as success.
+
+A function that answers `{error, Reason}` reports a connection that is gone: no
+`COMMIT` and no `ROLLBACK` is attempted, because there is nothing to attempt
+them on, and the failure is passed straight back.
 """.
 -spec transaction(conn(), fun((conn()) -> outcome())) ->
     {ok, term(), conn()} | {rollback, term(), conn()} | {error, error(), conn()} | {error, error()}.
@@ -141,7 +153,8 @@ status(Conn) ->
 guarded(Conn, Fun) ->
     try Fun(Conn) of
         {ok, Value, Used} -> committed(Used, Value);
-        {rollback, Reason, Used} -> rolled_back(Used, Reason)
+        {rollback, Reason, Used} -> rolled_back(Used, Reason);
+        {error, Reason} -> {error, Reason}
     catch
         Class:Reason:Stacktrace ->
             _ = rollback(Conn),
