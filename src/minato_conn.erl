@@ -77,6 +77,9 @@ the server issued is the whole of the authorisation.
     send/2,
     next/1,
     next/2,
+    activate/1,
+    deactivate/1,
+    handle_message/2,
     parameters/1,
     parameter/2,
     transaction_status/1,
@@ -307,6 +310,101 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
 -spec noted(minato_protocol:backend(), conn()) -> conn().
 noted({ready_for_query, Status}, Conn) -> Conn#conn{status = Status};
 noted(_Message, Conn) -> Conn.
+
+-doc """
+Ask for the next bytes to arrive as a message instead of a read.
+
+`{active, once}` on the socket, so exactly one message arrives and the owner
+asks again. That is the arrangement a process which has to wait for the server
+without a query outstanding needs - `LISTEN` is the only one there is - because
+`next/1` blocks, and a process blocked in a read answers nothing else.
+
+The connection is unusable for `next/1` until the messages stop coming, and the
+two must not be mixed on one connection.
+""".
+-spec activate(conn()) -> ok | {error, error()}.
+activate(#conn{transport = Transport, socket = Socket}) ->
+    options(Transport, Socket, [{active, once}]).
+
+-doc """
+Go back to reading, after `activate/1`.
+
+`{active, false}` on the socket, and then whatever the socket already delivered
+to the mailbox is taken back into the buffer, because those bytes have left the
+socket and `next/1` would otherwise wait for bytes it already has. A connection
+that has been switched back can be read with `next/1` as usual.
+""".
+-spec deactivate(conn()) -> {ok, conn()} | {error, error()}.
+deactivate(#conn{transport = Transport, socket = Socket} = Conn) ->
+    case options(Transport, Socket, [{active, false}]) of
+        ok -> {ok, flushed(Conn)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec flushed(conn()) -> conn().
+flushed(#conn{transport = Transport, socket = Socket, buffer = Buffer} = Conn) ->
+    receive
+        {Tag, Delivered, Data} when
+            Tag =:= Transport, Delivered =:= Socket, is_binary(Data)
+        ->
+            flushed(Conn#conn{buffer = <<Buffer/binary, Data/binary>>})
+    after 0 ->
+        Conn
+    end.
+
+-doc """
+Turn a socket message into the protocol messages it carried.
+
+For a connection under `activate/1`. Anything that is not this connection's
+socket answers `ignore`, so an owner with other messages of its own can pass
+everything through.
+
+`{closed, Reason}` is the socket going away, and there is no connection in it:
+the socket is gone, and what is left of the buffer belongs to a message that
+will never finish arriving.
+""".
+-spec handle_message(conn(), term()) ->
+    {messages, [minato_protocol:backend()], conn()} | {closed, term()} | ignore.
+handle_message(#conn{transport = gen_tcp, socket = Socket} = Conn, {tcp, Socket, Data}) when
+    is_binary(Data)
+->
+    arrived(Conn, Data);
+handle_message(#conn{transport = ssl, socket = Socket} = Conn, {ssl, Socket, Data}) when
+    is_binary(Data)
+->
+    arrived(Conn, Data);
+handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_closed, Socket}) ->
+    {closed, closed};
+handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_error, Socket, Reason}) ->
+    {closed, Reason};
+handle_message(#conn{transport = ssl, socket = Socket}, {ssl_closed, Socket}) ->
+    {closed, closed};
+handle_message(#conn{transport = ssl, socket = Socket}, {ssl_error, Socket, Reason}) ->
+    {closed, Reason};
+handle_message(_Conn, _Message) ->
+    ignore.
+
+-spec arrived(conn(), binary()) -> {messages, [minato_protocol:backend()], conn()}.
+arrived(#conn{buffer = Buffer, pending = Pending, frame_opts = FrameOpts} = Conn, Data) ->
+    {Messages, Rest} = minato_protocol:frame(<<Buffer/binary, Data/binary>>, FrameOpts),
+    Read = Conn#conn{buffer = Rest, pending = []},
+    {messages, Pending ++ Messages, noticed(Pending ++ Messages, Read)}.
+
+-spec noticed([minato_protocol:backend()], conn()) -> conn().
+noticed([], Conn) -> Conn;
+noticed([Message | Rest], Conn) -> noticed(Rest, noted(Message, Conn)).
+
+-spec options(transport(), socket(), [{atom(), term()}]) -> ok | {error, error()}.
+options(Transport, Socket, Opts) ->
+    Module = options_module(Transport),
+    case Module:setopts(Socket, Opts) of
+        ok -> ok;
+        {error, Reason} -> {error, {socket, Reason}}
+    end.
+
+-spec options_module(transport()) -> inet | ssl.
+options_module(gen_tcp) -> inet;
+options_module(ssl) -> ssl.
 
 -doc "Every parameter the server has reported, by name.".
 -spec parameters(conn()) -> #{binary() => binary()}.

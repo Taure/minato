@@ -42,6 +42,10 @@ statements inside a transaction have to run on that one.
 -export([
     start_pool/2,
     stop_pool/1,
+    start_listener/2,
+    stop_listener/1,
+    listen/2,
+    unlisten/2,
     query/3,
     query/4,
     simple/2,
@@ -76,6 +80,40 @@ start_pool(Name, Opts) ->
 -spec stop_pool(pool()) -> ok | {error, not_found}.
 stop_pool(Name) ->
     minato_sup:stop_pool(Name).
+
+-doc """
+Start a listener and keep it under minato's supervisor.
+
+A listener holds one connection of its own, because `LISTEN` is session state
+and a pooled connection would deliver notifications to whichever caller happened
+to hold it next.
+""".
+-spec start_listener(minato_listener:name(), minato_listener:opts()) ->
+    supervisor:startchild_ret().
+start_listener(Name, Opts) ->
+    minato_sup:start_listener(Name, Opts).
+
+-doc "Stop a listener and close its connection.".
+-spec stop_listener(minato_listener:name()) -> ok | {error, not_found}.
+stop_listener(Name) ->
+    minato_sup:stop_listener(Name).
+
+-doc """
+Subscribe the calling process to a channel.
+
+Notifications arrive as `{minato_notification, Channel, Payload, From}`, and a
+reconnect arrives as `{minato_listener, Name, resubscribed}` - which means
+notifications were missed, because `NOTIFY` has no replay. See
+`m:minato_listener`.
+""".
+-spec listen(minato_listener:name(), binary()) -> ok | {error, term()}.
+listen(Listener, Channel) ->
+    minato_listener:listen(Listener, Channel).
+
+-doc "Stop the calling process's subscription.".
+-spec unlisten(minato_listener:name(), binary()) -> ok | {error, term()}.
+unlisten(Listener, Channel) ->
+    minato_listener:unlisten(Listener, Channel).
 
 -doc "`query/4` with the default decoding options.".
 -spec query(pool(), iodata(), [term()]) -> answer(minato_protocol:result()).

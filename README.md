@@ -7,7 +7,7 @@ An independent Erlang client for PostgreSQL.
 ## Status
 
 Early, but usable end to end: codecs, protocol, authentication, connection,
-queries, transactions and a pool. There is no published package and no stable
+queries, transactions, a pool and LISTEN/NOTIFY. There is no published package and no stable
 API, and nothing runs on it in production yet. Do not depend on it.
 
 ## Using it
@@ -296,6 +296,32 @@ with the connection, `checkin/2` hands it back, and `m:minato` wraps both.
 
 `stats/1` reports what the pool holds and what it has done, counted with
 `counters`: checkouts, waits, timeouts and disconnects.
+
+## Notifications
+
+`minato_listener` holds a connection of its own and `LISTEN`s on it, because
+`LISTEN` is session state: on a pooled connection the notification would be
+delivered to whichever caller happened to hold it next, which is to say nowhere.
+
+```erlang
+{ok, _Pid} = minato:start_listener(events, #{connection => #{user => ~"minato"}}),
+ok = minato:listen(events, ~"job_ready"),
+receive
+    {minato_notification, ~"job_ready", Payload, _From} -> Payload
+end.
+```
+
+Subscribing is per process and the process is monitored, so a subscriber that
+dies is dropped and a channel nobody is left listening to is `UNLISTEN`ed.
+Channel names are quoted, not interpolated.
+
+The part worth reading twice: **a connection that drops takes its subscriptions
+with it, and whatever was published while it was away is gone.** `NOTIFY` is
+fire and forget and has no replay. The listener reconnects with backoff,
+`LISTEN`s again for every channel that still has a subscriber, and then sends
+each subscriber `{minato_listener, Name, resubscribed}` - which is a consumer's
+cue to go and look, because it missed something. Treat `NOTIFY` as a hint that
+makes a poll faster, never as the only path.
 
 ## Testing
 
