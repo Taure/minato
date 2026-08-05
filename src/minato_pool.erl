@@ -54,6 +54,8 @@ because there is nothing else to be sure of about it.
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(DEFAULT_SIZE, 10).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
 -define(MINIMUM_BACKOFF, 100).
@@ -145,6 +147,17 @@ connection is replaced rather than leaked.
 """.
 -spec checkout(name(), timeout()) -> {ok, minato_conn:conn()} | {error, term()}.
 checkout(Name, Timeout) ->
+    minato_telemetry:span([minato, checkout], #{pool => Name}, fun() ->
+        borrowed(waited(Name, Timeout))
+    end).
+
+-spec borrowed({ok, minato_conn:conn()} | {error, term()}) ->
+    {{ok, minato_conn:conn()} | {error, term()}, minato_telemetry:metadata()}.
+borrowed({ok, Conn}) -> {{ok, Conn}, #{outcome => ok}};
+borrowed({error, Reason}) -> {{error, Reason}, #{outcome => error, reason => Reason}}.
+
+-spec waited(name(), timeout()) -> {ok, minato_conn:conn()} | {error, term()}.
+waited(Name, Timeout) ->
     try call(Name, checkout, Timeout) of
         {ok, Conn} -> {ok, Conn};
         {error, Reason} -> {error, Reason}
@@ -272,11 +285,21 @@ handle_cast(_Message, State) ->
 
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
 handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
+    ok = minato_telemetry:event([minato, connection, opened], #{pool => State#state.name}),
     Ready = State#state{connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF},
     {noreply, hand_out(Ready, Conn)};
-handle_info({connect_failed, _Reason}, #state{connecting = Connecting} = State) ->
+handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State) ->
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
     Delay = State#state.backoff,
+    ?LOG_WARNING(
+        #{
+            event => connect_failed,
+            pool => State#state.name,
+            reason => Reason,
+            retry_in_ms => Delay
+        },
+        #{domain => [minato]}
+    ),
     _ = erlang:send_after(Delay, self(), retry),
     {noreply, State#state{connecting = fewer(Connecting), backoff = longer(Delay)}};
 handle_info(retry, State) ->
@@ -379,6 +402,9 @@ rolled_back(State, {error, _Reason}) ->
 discarded(State, Conn) ->
     ok = minato_conn:close(Conn),
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
+    ok = minato_telemetry:event(
+        [minato, connection, closed], #{pool => State#state.name, reason => discarded}
+    ),
     fill(State).
 
 -spec lost(#state{}, pid()) -> #state{}.
@@ -386,6 +412,10 @@ lost(#state{borrowed = Borrowed} = State, Pid) ->
     case maps:find(Pid, Borrowed) of
         {ok, #borrowed{}} ->
             ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
+            ok = minato_telemetry:event(
+                [minato, connection, closed],
+                #{pool => State#state.name, reason => borrower_died, borrower => Pid}
+            ),
             fill(State#state{borrowed = maps:remove(Pid, Borrowed)});
         error ->
             State#state{waiting = without(State#state.waiting, Pid)}

@@ -240,6 +240,27 @@ prove itself. The socket is closed before either is re-raised.
 """.
 -spec connect(opts()) -> {ok, conn()} | {error, error()}.
 connect(#{user := _} = Opts) ->
+    minato_telemetry:span(
+        [minato, connect],
+        #{
+            host => maps:get(host, Opts, ?DEFAULT_HOST),
+            port => maps:get(port, Opts, ?DEFAULT_PORT),
+            database => maps:get(database, Opts, maps:get(user, Opts)),
+            user => maps:get(user, Opts),
+            ssl => maps:get(ssl, Opts, false)
+        },
+        fun() -> connected(opening(Opts)) end
+    ).
+
+-spec connected({ok, conn()} | {error, error()}) ->
+    {{ok, conn()} | {error, error()}, minato_telemetry:metadata()}.
+connected({ok, Conn}) ->
+    {{ok, Conn}, #{outcome => ok}};
+connected({error, Reason}) ->
+    {{error, Reason}, #{outcome => error, reason => Reason}}.
+
+-spec opening(opts()) -> {ok, conn()} | {error, error()}.
+opening(Opts) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),

@@ -350,6 +350,25 @@ each subscriber `{minato_listener, Name, resubscribed}` - which is a consumer's
 cue to go and look, because it missed something. Treat `NOTIFY` as a hint that
 makes a poll faster, never as the only path.
 
+## Observability
+
+Every event minato emits is `telemetry`, and every log record is a map report
+under `domain => [minato]`. There is nothing to bridge: an OpenTelemetry
+exporter, a Prometheus collector and a `logger` handler already read both.
+
+Spans for connecting, for queries and for checking a connection out of the pool;
+events for connections opening and closing, notifications arriving, and a
+listener reconnecting. `[minato, checkout, stop]` measures time spent waiting
+for a connection rather than running a query, which is what separates a slow
+database from a pool that is too small.
+
+Parameters are never emitted, in any configuration. Statements only appear under
+`{minato, [{log_statements, true}]}`, read per call so it can be turned on
+without a restart.
+
+See [the observability guide](guides/observability.md) for every event, every
+field, and what is worth alerting on.
+
 ## Testing
 
 `rebar3 eunit` needs nothing installed: unit tests and PropEr round trips for
