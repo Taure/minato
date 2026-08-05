@@ -53,6 +53,11 @@ end).
   session, without ever learning the password.
 - **TLS has no `prefer` mode.** A server that declines is refused, because
   declining is the one message an attacker on the connection can always produce.
+- **A pool opens one connection and grows.** `min_size` is 1, not `size`: a node
+  with twenty pools should not want two hundred connections the moment it boots,
+  and a pool that cannot connect still says so at start up. A checkout against a
+  pool that holds nothing and cannot connect fails immediately rather than
+  queueing every caller for the checkout timeout.
 - **Result sets are framed in bulk.** One read with the remainder carried
   forward, never a header read then a payload read: 61 reads over 5000 rows
   rather than 10,006. See [the benchmark](bench/README.md).

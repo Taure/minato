@@ -65,7 +65,9 @@ end_per_suite(_Config) ->
 
 -spec init_per_testcase(atom(), [{atom(), term()}]) -> [{atom(), term()}].
 init_per_testcase(_Case, Config) ->
-    {ok, _Pid} = minato:start_pool(?POOL, #{size => ?SIZE, connection => connection()}),
+    {ok, _Pid} = minato:start_pool(?POOL, #{
+        size => ?SIZE, min_size => ?SIZE, connection => connection()
+    }),
     ok = settled(?SIZE, 200),
     {ok, _Results} = minato:simple(?POOL, ~"TRUNCATE minato_soak"),
     Config.

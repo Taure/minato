@@ -57,17 +57,23 @@ because there is nothing else to be sure of about it.
 -include_lib("kernel/include/logger.hrl").
 
 -define(DEFAULT_SIZE, 10).
+-define(DEFAULT_MIN_SIZE, 1).
+-define(CROWDED_SHARE, 4).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
 -define(MINIMUM_BACKOFF, 100).
 -define(MAXIMUM_BACKOFF, 30000).
 
--record(borrowed, {monitor :: reference()}).
+-record(borrowed, {monitor :: reference(), count = 1 :: pos_integer()}).
 
 -record(state, {
     name :: name(),
     opts :: minato_conn:opts(),
     size :: pos_integer(),
+    min_size :: non_neg_integer(),
     max_age :: timeout(),
+    disconnected :: fail | wait,
+    failures = 0 :: non_neg_integer(),
+    measured = false :: boolean(),
     idle = [] :: [minato_conn:conn()],
     borrowed = #{} :: #{pid() => #borrowed{}},
     waiting = queue:new() :: queue:queue(waiter()),
@@ -91,6 +97,20 @@ What to open, and how many.
 connections the pool keeps. How long to wait for a free one is the caller's to
 say, in `checkout/2`.
 
+`min_size` is how many connections the pool opens before anybody asks, and it
+defaults to one. The rest are opened when a caller finds none free, so a node
+with twenty pools does not want a hundred connections the moment it boots, while
+a pool that cannot connect at all still says so at start up rather than at the
+first query. `0` opens nothing until asked.
+
+`disconnected` decides what a checkout gets when the pool holds no connections
+and the last attempt to open one failed. `fail` is the default and answers
+`{error, disconnected}` at once, because a caller that cannot be served should
+find out in microseconds rather than after the whole checkout timeout - during
+an outage the alternative is every caller in the system holding a process for
+five seconds to learn the same thing. `wait` queues anyway, for work that would
+rather be slow than fail.
+
 `max_age` retires a connection when it is checked in older than that many
 milliseconds, and opens a replacement. It is `infinity` by default, because a
 connection to PostgreSQL itself is good indefinitely and churning them would be
@@ -100,7 +120,9 @@ and a connection cut by one of them is discovered by a query failing.
 """.
 -type opts() :: #{
     size => pos_integer(),
+    min_size => non_neg_integer(),
     max_age => timeout(),
+    disconnected => fail | wait,
     connection := minato_conn:opts()
 }.
 
@@ -269,6 +291,8 @@ init({Name, Opts}) ->
         name = Name,
         opts = maps:get(connection, Opts),
         size = Size,
+        min_size = min(maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE), Size),
+        disconnected = maps:get(disconnected, Opts, fail),
         max_age = maps:get(max_age, Opts, infinity),
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
@@ -280,10 +304,8 @@ init({Name, Opts}) ->
     {reply, term(), #state{}} | {noreply, #state{}}.
 handle_call(checkout, {Pid, _Tag}, #state{idle = [Conn | Rest]} = State) ->
     lending(State#state{idle = Rest}, Conn, Pid);
-handle_call(checkout, {Pid, _Tag} = From, State) ->
-    ok = counters:add(State#state.counters, ?WAITS, 1),
-    Waiting = queue:in({From, Pid, erlang:monitor(process, Pid)}, State#state.waiting),
-    {noreply, State#state{waiting = Waiting}};
+handle_call(checkout, From, State) ->
+    asked(State, From);
 handle_call({give_away, From, To}, _From, State) ->
     handed_over(State, From, To);
 handle_call(stats, _From, State) ->
@@ -305,9 +327,12 @@ handle_cast(_Message, State) ->
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
 handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
     ok = minato_telemetry:event([minato, connection, opened], #{pool => State#state.name}),
-    Ready = State#state{connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF},
-    {noreply, hand_out(Ready, Conn)};
-handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State) ->
+    Ready = State#state{
+        connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
+    },
+    {noreply, hand_out(measured(Ready, Conn), Conn)};
+handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
+    State = State0#state{failures = State0#state.failures + 1},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
     Delay = State#state.backoff,
     ?LOG_WARNING(
@@ -347,21 +372,115 @@ lending(State, Conn, Pid) ->
             {reply, {error, Reason}, discarded(State, Conn)}
     end.
 
--spec handed_over(#state{}, pid(), pid()) -> {reply, ok | {error, term()}, #state{}}.
-handed_over(#state{borrowed = Borrowed} = State, From, To) ->
-    case maps:get(From, Borrowed, undefined) of
-        undefined ->
-            {reply, {error, not_borrowed}, State};
-        #borrowed{monitor = Monitor} ->
-            true = erlang:demonitor(Monitor, [flush]),
-            Moved = State#state{borrowed = maps:remove(From, Borrowed)},
-            {reply, ok, borrow(Moved, To)}
+-doc """
+Check the connection budget once, on the first connection this pool opens.
+
+`size` connections per pool, times the pools on this node, times the nodes, is
+the number PostgreSQL compares with `max_connections`, and it is the number
+nobody works out until the server starts refusing. The pool asks the server what
+its limit is while it holds a connection nobody is using yet, and says something
+if one pool alone wants a quarter of it.
+
+Once, not per connection: the answer does not change, and a warning that repeats
+is a warning people filter.
+""".
+-spec measured(#state{}, minato_conn:conn()) -> #state{}.
+measured(#state{measured = true} = State, _Conn) ->
+    State;
+measured(#state{size = Size, name = Name} = State, Conn) ->
+    case minato_query:simple(Conn, ~"SHOW max_connections") of
+        {ok, [#{rows := [{Limit}]}], _Read} -> crowded(Name, Size, Limit);
+        _Unknown -> ok
+    end,
+    State#state{measured = true}.
+
+-spec crowded(name(), pos_integer(), term()) -> ok.
+crowded(Name, Size, Limit) when is_binary(Limit) ->
+    crowded(Name, Size, binary_to_integer(Limit));
+crowded(Name, Size, Limit) when is_integer(Limit), Size * ?CROWDED_SHARE > Limit ->
+    _ = ?LOG_WARNING(
+        #{
+            event => connection_budget,
+            pool => Name,
+            size => Size,
+            server_max_connections => Limit,
+            note => one_pool_wants_a_large_share_of_the_server
+        },
+        #{domain => [minato]}
+    ),
+    ok;
+crowded(_Name, _Size, _Limit) ->
+    ok.
+
+-spec asked(#state{}, gen_server:from()) ->
+    {reply, {error, disconnected}, #state{}} | {noreply, #state{}}.
+asked(State, {Pid, _Tag} = From) ->
+    case unreachable(State) of
+        true ->
+            {reply, {error, disconnected}, State};
+        false ->
+            ok = counters:add(State#state.counters, ?WAITS, 1),
+            Waiting = queue:in({From, Pid, erlang:monitor(process, Pid)}, State#state.waiting),
+            {noreply, grown(State#state{waiting = Waiting})}
     end.
 
+-spec unreachable(#state{}) -> boolean().
+unreachable(#state{disconnected = wait}) ->
+    false;
+unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
+    Failures > 0 andalso Idle =:= [] andalso holders(Borrowed) =:= 0.
+
+-spec grown(#state{}) -> #state{}.
+grown(#state{size = Size, connecting = Connecting} = State) ->
+    case held(State) < Size andalso Connecting =:= 0 of
+        true ->
+            ok = connect(State#state.opts),
+            State#state{connecting = Connecting + 1};
+        false ->
+            State
+    end.
+
+-spec held(#state{}) -> non_neg_integer().
+held(#state{idle = Idle, borrowed = Borrowed, connecting = Connecting}) ->
+    length(Idle) + holders(Borrowed) + Connecting.
+
+-spec handed_over(#state{}, pid(), pid()) -> {reply, ok | {error, term()}, #state{}}.
+handed_over(#state{borrowed = Borrowed} = State, From, To) ->
+    case maps:is_key(From, Borrowed) of
+        false -> {reply, {error, not_borrowed}, State};
+        true -> {reply, ok, borrow(released(State, From), To)}
+    end.
+
+-doc """
+Note that `Pid` is holding one more connection.
+
+Counted rather than recorded, because one process may hold several: a worker
+with two repos does, and so does anything that checks a connection out on behalf
+of somebody else. A map keyed by pid alone would have lost the second
+connection at the second checkin, which is a connection leaked per checkout
+pair.
+""".
 -spec borrow(#state{}, pid()) -> #state{}.
 borrow(#state{borrowed = Borrowed} = State, Pid) ->
-    Monitor = erlang:monitor(process, Pid),
-    State#state{borrowed = Borrowed#{Pid => #borrowed{monitor = Monitor}}}.
+    case maps:find(Pid, Borrowed) of
+        {ok, #borrowed{count = Count} = Held} ->
+            State#state{borrowed = Borrowed#{Pid => Held#borrowed{count = Count + 1}}};
+        error ->
+            Monitor = erlang:monitor(process, Pid),
+            State#state{borrowed = Borrowed#{Pid => #borrowed{monitor = Monitor}}}
+    end.
+
+-spec released(#state{}, pid()) -> #state{}.
+released(#state{borrowed = Borrowed} = State, Pid) ->
+    case maps:find(Pid, Borrowed) of
+        {ok, #borrowed{count = Count} = Held} when Count > 1 ->
+            State#state{borrowed = Borrowed#{Pid => Held#borrowed{count = Count - 1}}};
+        {ok, #borrowed{monitor = Monitor}} ->
+            true = erlang:demonitor(Monitor, [flush]),
+            State#state{borrowed = maps:remove(Pid, Borrowed)};
+        error ->
+            State
+    end.
 
 -spec hand_out(#state{}, minato_conn:conn()) -> #state{}.
 hand_out(#state{waiting = Waiting} = State, Conn) ->
@@ -377,24 +496,16 @@ hand_out(#state{waiting = Waiting} = State, Conn) ->
 
 -spec returned(#state{}, pid(), minato_conn:conn()) -> #state{}.
 returned(#state{borrowed = Borrowed} = State, Pid, Conn) ->
-    case maps:find(Pid, Borrowed) of
-        {ok, #borrowed{monitor = Monitor}} ->
-            true = erlang:demonitor(Monitor, [flush]),
-            reset(State#state{borrowed = maps:remove(Pid, Borrowed)}, Conn);
-        error ->
-            ok = minato_conn:close(Conn),
-            State
+    case maps:is_key(Pid, Borrowed) of
+        true -> reset(released(State, Pid), Conn);
+        false -> discarded(State, Conn)
     end.
 
 -spec dropped(#state{}, pid(), minato_conn:conn()) -> #state{}.
 dropped(#state{borrowed = Borrowed} = State, Pid, Conn) ->
-    case maps:find(Pid, Borrowed) of
-        {ok, #borrowed{monitor = Monitor}} ->
-            true = erlang:demonitor(Monitor, [flush]),
-            discarded(State#state{borrowed = maps:remove(Pid, Borrowed)}, Conn);
-        error ->
-            ok = minato_conn:close(Conn),
-            State
+    case maps:is_key(Pid, Borrowed) of
+        true -> discarded(released(State, Pid), Conn);
+        false -> discarded(State, Conn)
     end.
 
 -spec reset(#state{}, minato_conn:conn()) -> #state{}.
@@ -447,11 +558,16 @@ discarded(State, Conn) ->
 -spec lost(#state{}, pid()) -> #state{}.
 lost(#state{borrowed = Borrowed} = State, Pid) ->
     case maps:find(Pid, Borrowed) of
-        {ok, #borrowed{}} ->
-            ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
+        {ok, #borrowed{count = Count}} ->
+            ok = counters:add(State#state.counters, ?DISCONNECTS, Count),
             ok = minato_telemetry:event(
                 [minato, connection, closed],
-                #{pool => State#state.name, reason => borrower_died, borrower => Pid}
+                #{
+                    pool => State#state.name,
+                    reason => borrower_died,
+                    borrower => Pid,
+                    connections => Count
+                }
             ),
             fill(State#state{borrowed = maps:remove(Pid, Borrowed)});
         error ->
@@ -466,10 +582,10 @@ without(Waiting, Pid) ->
 %% Filling up
 %%----------------------------------------------------------------------
 
+-doc false.
 -spec fill(#state{}) -> #state{}.
-fill(#state{size = Size, idle = Idle, borrowed = Borrowed, connecting = Connecting} = State) ->
-    Held = length(Idle) + map_size(Borrowed) + Connecting,
-    case Size - Held of
+fill(#state{min_size = Floor, connecting = Connecting} = State) ->
+    case Floor - held(State) of
         Missing when Missing > 0 ->
             lists:foreach(fun(_) -> connect(State#state.opts) end, lists:seq(1, Missing)),
             State#state{connecting = Connecting + Missing};
@@ -518,13 +634,17 @@ fewer(0) ->
 fewer(Connecting) ->
     Connecting - 1.
 
+-spec holders(#{pid() => #borrowed{}}) -> non_neg_integer().
+holders(Borrowed) ->
+    lists:sum([Count || _Pid := #borrowed{count = Count} <- Borrowed]).
+
 -spec reported(#state{}) -> stats().
 reported(#state{} = State) ->
     #state{idle = Idle, borrowed = Borrowed, waiting = Waiting, counters = Counters} = State,
     #{
         size => State#state.size,
         idle => length(Idle),
-        borrowed => map_size(Borrowed),
+        borrowed => holders(Borrowed),
         waiting => queue:len(Waiting),
         checkouts => counters:get(Counters, ?CHECKOUTS),
         waits => counters:get(Counters, ?WAITS),

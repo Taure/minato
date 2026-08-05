@@ -34,7 +34,11 @@ Skips when no server answers.
     a_connection_older_than_max_age_is_retired/1,
     a_healthy_pool_answers_ok/1,
     a_pool_with_no_server_is_not_healthy/1,
-    a_cancelled_statement_does_not_cost_a_connection/1
+    a_cancelled_statement_does_not_cost_a_connection/1,
+    a_pool_opens_only_its_floor_before_anybody_asks/1,
+    a_pool_grows_when_a_caller_finds_none_free/1,
+    a_pool_that_cannot_connect_fails_a_checkout_at_once/1,
+    a_pool_told_to_wait_waits/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -59,7 +63,11 @@ all() ->
         a_connection_older_than_max_age_is_retired,
         a_healthy_pool_answers_ok,
         a_pool_with_no_server_is_not_healthy,
-        a_cancelled_statement_does_not_cost_a_connection
+        a_cancelled_statement_does_not_cost_a_connection,
+        a_pool_opens_only_its_floor_before_anybody_asks,
+        a_pool_grows_when_a_caller_finds_none_free,
+        a_pool_that_cannot_connect_fails_a_checkout_at_once,
+        a_pool_told_to_wait_waits
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -83,14 +91,22 @@ init_per_testcase(a_pool_with_no_server_stays_up, Config) ->
     Config;
 init_per_testcase(a_pool_with_no_server_is_not_healthy, Config) ->
     Config;
+init_per_testcase(a_pool_that_cannot_connect_fails_a_checkout_at_once, Config) ->
+    Config;
+init_per_testcase(a_pool_told_to_wait_waits, Config) ->
+    Config;
+init_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, Config) ->
+    Config;
+init_per_testcase(a_pool_grows_when_a_caller_finds_none_free, Config) ->
+    Config;
 init_per_testcase(a_connection_older_than_max_age_is_retired, Config) ->
     {ok, _Pid} = minato:start_pool(?POOL, #{
-        size => 1, max_age => 1, connection => connection()
+        size => 1, min_size => 1, max_age => 1, connection => connection()
     }),
     ok = filled(?POOL, 1, 100),
     Config;
 init_per_testcase(_Case, Config) ->
-    {ok, _Pid} = minato:start_pool(?POOL, #{size => 2, connection => connection()}),
+    {ok, _Pid} = minato:start_pool(?POOL, #{size => 2, min_size => 2, connection => connection()}),
     ok = filled(?POOL, 2, 100),
     {ok, _Results} = minato:simple(?POOL, ~"TRUNCATE minato_pool_rows"),
     Config.
@@ -100,6 +116,14 @@ end_per_testcase(a_pool_with_no_server_stays_up, _Config) ->
     ok;
 end_per_testcase(a_pool_with_no_server_is_not_healthy, _Config) ->
     ok;
+end_per_testcase(a_pool_that_cannot_connect_fails_a_checkout_at_once, _Config) ->
+    ok;
+end_per_testcase(a_pool_told_to_wait_waits, _Config) ->
+    ok;
+end_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, _Config) ->
+    ok = minato:stop_pool(minato_floor_pool);
+end_per_testcase(a_pool_grows_when_a_caller_finds_none_free, _Config) ->
+    ok = minato:stop_pool(minato_growth_pool);
 end_per_testcase(_Case, _Config) ->
     ok = minato:stop_pool(?POOL).
 
@@ -289,6 +313,57 @@ a_cancelled_statement_does_not_cost_a_connection(_Config) ->
     ok = settled(2, 200),
     ?assertMatch(#{disconnects := Before, borrowed := 0}, minato:stats(?POOL)),
     ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])).
+
+-spec a_pool_opens_only_its_floor_before_anybody_asks([{atom(), term()}]) -> ok.
+a_pool_opens_only_its_floor_before_anybody_asks(_Config) ->
+    {ok, _Pid} = minato:start_pool(minato_floor_pool, #{
+        size => 8, min_size => 2, connection => connection()
+    }),
+    ok = filled(minato_floor_pool, 2, 200),
+    timer:sleep(100),
+    ?assertMatch(#{idle := 2, size := 8}, minato:stats(minato_floor_pool)).
+
+-spec a_pool_grows_when_a_caller_finds_none_free([{atom(), term()}]) -> ok.
+a_pool_grows_when_a_caller_finds_none_free(_Config) ->
+    {ok, _Pid} = minato:start_pool(minato_growth_pool, #{
+        size => 4, min_size => 1, connection => connection()
+    }),
+    ok = filled(minato_growth_pool, 1, 200),
+    {ok, First} = minato_pool:checkout(minato_growth_pool),
+    {ok, Second} = minato_pool:checkout(minato_growth_pool, ?TIMEOUT),
+    ?assertMatch(#{borrowed := 2}, minato:stats(minato_growth_pool)),
+    ok = minato_pool:checkin(minato_growth_pool, First),
+    ok = minato_pool:checkin(minato_growth_pool, Second).
+
+-spec a_pool_that_cannot_connect_fails_a_checkout_at_once([{atom(), term()}]) -> ok.
+a_pool_that_cannot_connect_fails_a_checkout_at_once(_Config) ->
+    Nowhere = maps:merge(connection(), #{port => 1, connect_timeout => 100}),
+    {ok, _Pid} = minato:start_pool(minato_gone_pool, #{size => 1, connection => Nowhere}),
+    ok = refused(minato_gone_pool, 200),
+    Started = erlang:monotonic_time(millisecond),
+    ?assertEqual({error, disconnected}, minato_pool:checkout(minato_gone_pool, ?TIMEOUT)),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 1000),
+    ok = minato:stop_pool(minato_gone_pool).
+
+-spec a_pool_told_to_wait_waits([{atom(), term()}]) -> ok.
+a_pool_told_to_wait_waits(_Config) ->
+    Nowhere = maps:merge(connection(), #{port => 1, connect_timeout => 100}),
+    {ok, _Pid} = minato:start_pool(minato_patient_pool, #{
+        size => 1, disconnected => wait, connection => Nowhere
+    }),
+    ok = refused(minato_patient_pool, 200),
+    ?assertEqual({error, checkout_timeout}, minato_pool:checkout(minato_patient_pool, 200)),
+    ok = minato:stop_pool(minato_patient_pool).
+
+refused(_Pool, 0) ->
+    {error, never_failed};
+refused(Pool, Attempts) ->
+    case minato:stats(Pool) of
+        #{disconnects := Failures} when Failures > 0 -> ok;
+        _NotYet ->
+            timer:sleep(20),
+            refused(Pool, Attempts - 1)
+    end.
 
 %%----------------------------------------------------------------------
 %% Waiting for the pool to be ready
