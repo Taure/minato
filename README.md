@@ -97,9 +97,10 @@ docker compose -f test/docker-compose.yml down -v
   prepared against unprepared
 - **authentication** - the whole SASL exchange over a real socket, including
   recomputing the verifier PostgreSQL stored in `pg_authid`
-- **TLS** - a verified handshake against a second server with `ssl=on`, a
-  certificate for another host refused, and `pg_stat_ssl` asked whether the
-  session is really encrypted
+- **TLS** - a verified handshake against a second server with `ssl=on`, whose
+  certificate authority it generates at start up so no key is in this
+  repository, a certificate for another host refused, and `pg_stat_ssl` asked
+  whether the session is really encrypted
 - **soak** - concurrent workers checking their own answers, with backends killed
   underneath them, and the pool measured at rest afterwards
 

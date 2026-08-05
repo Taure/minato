@@ -24,13 +24,24 @@ services:
     container_name: minato-tls-postgres
     user: root
     volumes:
-      - ./certs:/certs:ro
+      - ./certs:/certs
     command:
       - bash
       - -c
       - >-
-        install -o postgres -g postgres -m 600 /certs/server.key /tmp/server.key &&
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes
+        -keyout /tmp/ca.key -out /certs/ca.crt -subj "/CN=minato test CA"
+        -addext "basicConstraints=critical,CA:TRUE" &&
+        openssl req -newkey rsa:2048 -nodes -keyout /tmp/server.key
+        -out /tmp/server.csr -subj "/CN=localhost" &&
+        printf "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n"
+        > /tmp/server.ext &&
+        openssl x509 -req -in /tmp/server.csr -CA /certs/ca.crt -CAkey /tmp/ca.key
+        -CAserial /tmp/ca.srl -CAcreateserial -out /certs/server.crt -days 3650 -sha256
+        -extfile /tmp/server.ext &&
+        chown postgres:postgres /tmp/server.key && chmod 600 /tmp/server.key &&
         install -o postgres -g postgres -m 644 /certs/server.crt /tmp/server.crt &&
+        chmod 644 /certs/ca.crt /certs/server.crt &&
         exec docker-entrypoint.sh postgres
         -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key
         -c timezone=UTC

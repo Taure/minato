@@ -93,6 +93,16 @@ server refused.
   keeps its own output clean; what your handlers do with `{error, {pgsql_error,
   Fields}}` is yours.
 
+## Verifying this yourself
+
+`minato_tls_SUITE` runs against a PostgreSQL that generates its own certificate
+authority when it starts, so there is no key in this repository to wonder about.
+It proves a handshake that completes, a certificate verified against that CA
+rather than accepted, a hostname that is checked, a certificate for another host
+refused, and `channel_binding => require` connecting - which only succeeds if
+the server negotiated `SCRAM-SHA-256-PLUS` and accepted the certificate hash the
+client bound to.
+
 ## Reporting something
 
 Open an issue for anything that is not exploitable. For anything that is, please

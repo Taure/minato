@@ -8,9 +8,14 @@ prove the one that matters: that a handshake completes, that the certificate is
 verified against a CA rather than accepted, that the hostname is checked, and
 that what follows is a working session on an encrypted socket.
 
-`test/certs` holds a CA and a server certificate for `localhost`, both generated
-for these tests and valid for ten years. The compose file starts a second server
-with `ssl=on` using them, on a port of its own.
+The TLS server in the compose file generates its own certificate authority and
+a `localhost` certificate signed by it when it starts, and writes both
+certificates into `test/certs`, which git ignores. The private keys never leave
+the container: a key committed to a repository is a key somebody has to reason
+about, and generating one costs a second.
+
+The suite verifies against that CA, which is what a deployment with a private CA
+does.
 
 The server is the judge of whether the session is encrypted:
 `pg_stat_ssl` reports it per backend, so the suite asks the server rather than
@@ -155,8 +160,7 @@ the_certificate_hash_is_the_one_the_server_computes(_Config) ->
     {ok, Conn} = minato_conn:connect(verified()),
     Hash = minato_conn:channel_binding(Conn),
     ok = minato_conn:close(Conn),
-    {ok, Pem} = file:read_file(certificate("server.crt")),
-    [{'Certificate', Der, not_encrypted}] = public_key:pem_decode(Pem),
+    [{'Certificate', Der, not_encrypted}] = public_key:pem_decode(pem()),
     ?assertEqual(crypto:hash(sha256, Der), Hash).
 
 %%----------------------------------------------------------------------
@@ -178,6 +182,10 @@ verified() ->
 cacerts() ->
     {ok, Pem} = file:read_file(certificate("ca.crt")),
     [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)].
+
+pem() ->
+    {ok, Pem} = file:read_file(certificate("server.crt")),
+    Pem.
 
 certificate(Name) ->
     Directory = code:lib_dir(minato),

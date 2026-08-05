@@ -1,26 +1,18 @@
 # Test certificates
 
-A certificate authority and a server certificate for `localhost`, generated for
-these tests and valid for ten years.
+Empty on purpose.
 
-**These are not secrets.** The private keys are in this repository on purpose:
-the TLS suite needs a server certificate it can verify against a CA it knows,
-and the compose file starts a PostgreSQL with them. They are trusted by nothing
-except `minato_tls_SUITE`, they name only `localhost`, and anybody can generate
-an identical set in ten seconds.
+The TLS server in `docker-compose.yml` generates a certificate authority and a
+`localhost` certificate signed by it when it starts, and writes `ca.crt` and
+`server.crt` here. `minato_tls_SUITE` verifies against `ca.crt`, which is what a
+deployment with a private CA does.
 
-To regenerate:
+**The private keys never leave the container.** A key committed to a repository
+is a key somebody has to reason about: a scanner flags it, a reader wonders, and
+the answer is always "it is only a test key", which is a sentence nobody should
+have to read. Generating them at start up costs a second and removes the
+question.
 
-```
-openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-    -keyout ca.key -out ca.crt -subj "/CN=minato test CA" \
-    -addext "basicConstraints=critical,CA:TRUE"
-
-openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
-    -subj "/CN=localhost"
-
-printf "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" > server.ext
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-    -out server.crt -days 3650 -sha256 -extfile server.ext
-rm server.csr server.ext ca.srl
-```
+`*.crt` and `*.key` here are ignored by git. `docker compose -f
+test/docker-compose.yml rm -sf postgres-tls` and a fresh `up` gives you a new
+pair.
