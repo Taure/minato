@@ -90,6 +90,55 @@ username_escaping_does_not_escape_its_own_escapes_test() ->
 %% The server nonce must extend the client nonce
 %%----------------------------------------------------------------------
 
+%%----------------------------------------------------------------------
+%% Channel binding
+%%----------------------------------------------------------------------
+
+no_binding_advertises_n_test() ->
+    {Message, _Client} = minato_scram:client_first(?USERNAME, ?CLIENT_NONCE, #{}),
+    ?assertMatch(<<"n,,", _Rest/binary>>, iolist_to_binary(Message)).
+
+an_unoffered_binding_advertises_y_test() ->
+    Opts = #{channel_binding => unoffered},
+    {Message, _Client} = minato_scram:client_first(?USERNAME, ?CLIENT_NONCE, Opts),
+    ?assertMatch(<<"y,,", _Rest/binary>>, iolist_to_binary(Message)).
+
+a_bound_exchange_advertises_the_binding_type_test() ->
+    Opts = #{channel_binding => {tls_server_end_point, ~"hash"}},
+    {Message, _Client} = minato_scram:client_first(?USERNAME, ?CLIENT_NONCE, Opts),
+    ?assertMatch(<<"p=tls-server-end-point,,", _Rest/binary>>, iolist_to_binary(Message)).
+
+the_binding_data_is_in_the_channel_binding_field_test() ->
+    Hash = crypto:strong_rand_bytes(32),
+    Opts = #{channel_binding => {tls_server_end_point, Hash}},
+    ?assertEqual(
+        base64:encode(<<"p=tls-server-end-point,,", Hash/binary>>),
+        channel_binding_field(Opts)
+    ).
+
+an_unbound_exchange_puts_only_the_header_in_the_field_test() ->
+    ?assertEqual(base64:encode(~"n,,"), channel_binding_field(#{})).
+
+the_binding_is_covered_by_the_proof_test() ->
+    Bound = #{channel_binding => {tls_server_end_point, ~"one"}},
+    Other = #{channel_binding => {tls_server_end_point, ~"two"}},
+    ?assertNotEqual(proof(Bound), proof(Other)).
+
+channel_binding_field(Opts) ->
+    [<<"c=", Field/binary>> | _Rest] = binary:split(final(Opts), ~",", [global]),
+    Field.
+
+proof(Opts) ->
+    [<<"p=", Proof/binary>> | _Rest] = lists:reverse(binary:split(final(Opts), ~",", [global])),
+    Proof.
+
+final(Opts) ->
+    {_First, Client} = minato_scram:client_first(?USERNAME, ?CLIENT_NONCE, Opts),
+    ServerFirst =
+        <<"r=", (?CLIENT_NONCE)/binary, "more,s=", (base64:encode(~"salt"))/binary, ",i=4096">>,
+    {Message, _Next} = minato_scram:client_final(ServerFirst, ~"pencil", Client),
+    iolist_to_binary(Message).
+
 server_nonce_that_replaces_the_client_nonce_is_rejected_test() ->
     ?assertError(
         {minato_scram, #{reason := server_nonce_does_not_extend_client_nonce}},

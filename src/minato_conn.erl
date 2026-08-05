@@ -48,6 +48,14 @@ told explicitly on a socket upgrade. Anything passed in `ssl_options` replaces
 the default for that option and nothing else, so turning verification off is
 possible and has to be written down.
 
+Under TLS the SCRAM exchange is bound to the session by default:
+`SCRAM-SHA-256-PLUS` with `tls-server-end-point`, which puts the hash of the
+server's certificate inside the material the client proof covers. A man in the
+middle holding a certificate the client accepts can otherwise relay the whole
+exchange and keep the session; with binding, the hash it bound to is not the one
+the real server sees, and the proof is refused. `channel_binding => require`
+refuses to connect without it.
+
 ## Cleartext passwords
 
 A server may ask for the password in the clear. minato answers only when the
@@ -82,6 +90,7 @@ the server issued is the whole of the authorisation.
     handle_message/2,
     parameters/1,
     parameter/2,
+    channel_binding/1,
     transaction_status/1,
     backend_key/1,
     timeout/1
@@ -93,9 +102,12 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_TLS_DEPTH, 3).
 
+-include_lib("public_key/include/public_key.hrl").
+
 -record(conn, {
     transport :: transport(),
     socket :: socket(),
+    binding :: binary() | undefined,
     buffer = ~"" :: binary(),
     pending = [] :: [minato_protocol:backend()],
     parameters = #{} :: #{binary() => binary()},
@@ -118,6 +130,7 @@ How to reach a server and who to be.
   parameters => #{binary() => binary()},
   ssl => boolean(),
   ssl_options => [ssl:tls_client_option()],
+  channel_binding => minato_auth:channel_binding(),
   auth => [method()],
   connect_timeout => timeout(),
   timeout => timeout(),
@@ -140,6 +153,11 @@ mojibake in a binary rather than raise; and `DateStyle` is `ISO, MDY`, because
 the text format for dates and timestamps is only unambiguous under ISO. Neither
 affects the binary format.
 
+`channel_binding` decides whether SCRAM is tied to the TLS session. It defaults
+to `prefer` under `ssl => true` and `disable` without it, since there is nothing
+to bind to on a plain socket. `require` refuses to connect at all unless the
+server offers `SCRAM-SHA-256-PLUS`.
+
 `timeout` is the per read timeout and applies for the life of the connection.
 `connect_timeout` covers the TCP connect and the TLS handshake.
 """.
@@ -152,6 +170,7 @@ affects the binary format.
     parameters => #{binary() => binary()},
     ssl => boolean(),
     ssl_options => [ssl:tls_client_option()],
+    channel_binding => minato_auth:channel_binding(),
     auth => [method()],
     connect_timeout => timeout(),
     timeout => timeout(),
@@ -500,6 +519,7 @@ new(Transport, Socket, Opts) ->
     #conn{
         transport = Transport,
         socket = Socket,
+        binding = binding(Transport, Socket),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         opts = maps:remove(password, Opts)
@@ -510,7 +530,7 @@ start(Conn, Opts) ->
     User = maps:get(user, Opts),
     Startup = {startup, startup_parameters(User, Opts)},
     case send(Conn, Startup) of
-        ok -> guarded(Conn, credentials(User, Opts));
+        ok -> guarded(Conn, credentials(Conn, User, Opts));
         {error, Reason} -> closing(Conn, Reason)
     end.
 
@@ -521,13 +541,64 @@ startup_parameters(User, Opts) ->
     Base = #{~"user" => User, ~"database" => maps:get(database, Opts, User)},
     maps:merge(maps:merge(Defaults, Given), Base).
 
--spec credentials(binary(), opts()) -> minato_auth:credentials().
-credentials(User, Opts) ->
+-spec credentials(conn(), binary(), opts()) -> minato_auth:credentials().
+credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->
+    bound(secret(User, Opts), Hash, maps:get(channel_binding, Opts, prefer(Transport))).
+
+-spec secret(binary(), opts()) -> minato_auth:credentials().
+secret(User, Opts) ->
     case maps:get(password, Opts, undefined) of
         undefined -> #{user => User};
         Password when is_function(Password, 0) -> #{user => User, password => Password()};
         Password -> #{user => User, password => Password}
     end.
+
+-spec bound(minato_auth:credentials(), binary() | undefined, minato_auth:channel_binding()) ->
+    minato_auth:credentials().
+bound(Credentials, undefined, Binding) ->
+    Credentials#{channel_binding => Binding};
+bound(Credentials, Hash, Binding) ->
+    Credentials#{channel_binding => Binding, channel_binding_data => Hash}.
+
+-spec prefer(transport()) -> minato_auth:channel_binding().
+prefer(ssl) -> prefer;
+prefer(gen_tcp) -> disable.
+
+-doc """
+The `tls-server-end-point` binding data for this connection, or `undefined`.
+
+The hash of the server's certificate, taken with the hash the certificate was
+signed with, which is what RFC 5929 defines and what PostgreSQL computes on its
+side. SHA-1 and MD5 signatures are hashed with SHA-256 instead, because the
+binding must not be weaker than the mechanism it is bound to.
+
+There is nothing to bind to on a plain socket, so it is `undefined` there.
+""".
+-spec channel_binding(conn()) -> binary() | undefined.
+channel_binding(#conn{binding = Hash}) ->
+    Hash.
+
+-spec binding(transport(), socket()) -> binary() | undefined.
+binding(gen_tcp, _Socket) ->
+    undefined;
+binding(ssl, Socket) ->
+    case ssl:peercert(Socket) of
+        {ok, Der} -> fingerprint(Der);
+        {error, _Reason} -> undefined
+    end.
+
+-spec fingerprint(binary()) -> binary().
+fingerprint(Der) ->
+    Certificate = public_key:pkix_decode_cert(Der, otp),
+    #'OTPCertificate'{signatureAlgorithm = #'SignatureAlgorithm'{algorithm = Oid}} = Certificate,
+    {Digest, _Signature} = public_key:pkix_sign_types(Oid),
+    crypto:hash(strengthened(Digest), Der).
+
+-spec strengthened(atom()) -> crypto:sha2().
+strengthened(sha224) -> sha224;
+strengthened(sha384) -> sha384;
+strengthened(sha512) -> sha512;
+strengthened(_Weaker) -> sha256.
 
 -spec guarded(conn(), minato_auth:credentials()) -> {ok, conn()} | {error, error()}.
 guarded(Conn, Credentials) ->

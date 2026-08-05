@@ -77,18 +77,26 @@ authentication message at all raises here, for the same reason.
 
 ## Channel binding
 
-`SCRAM-SHA-256-PLUS` is not implemented, so it is not chosen even when the
-server offers it. Choosing it would need the server certificate from the TLS
-session, which lives with the connection rather than here. `m:minato_scram`
-documents what that leaves open.
+`SCRAM-SHA-256-PLUS` is chosen when the server offers it and the caller supplied
+`channel_binding_data`, which is the hash of the server's certificate and comes
+from the connection layer, since only it has the TLS session.
+
+`channel_binding => require` refuses to authenticate at all without it. `prefer`
+takes it when both sides have it, and falls back to plain SCRAM with a `y,,`
+header, which tells a server that does support binding that its mechanism list
+was stripped on the way. `disable` never binds. See `m:minato_scram` for what
+each header means.
 """.
 
 -export([init/1, step/2]).
 
 -define(SCRAM_SHA_256, ~"SCRAM-SHA-256").
+-define(SCRAM_SHA_256_PLUS, ~"SCRAM-SHA-256-PLUS").
 
 -record(state, {
     user :: binary(),
+    binding = disable :: channel_binding(),
+    binding_data :: binary() | undefined,
     password :: binary() | undefined,
     scram_opts :: minato_scram:opts(),
     sasl :: sasl()
@@ -113,8 +121,23 @@ away from its iteration count defaults.
 -type credentials() :: #{
     user := binary(),
     password => binary(),
-    scram => minato_scram:opts()
+    scram => minato_scram:opts(),
+    channel_binding => channel_binding(),
+    channel_binding_data => binary()
 }.
+
+-doc """
+What to do about channel binding.
+
+`prefer` uses `SCRAM-SHA-256-PLUS` when the server offers it and there is
+binding data to use, and plain SCRAM otherwise. `require` refuses to
+authenticate without it. `disable` never binds.
+
+`prefer` still tells the truth in the gs2 header: a client with binding data
+whose server did not offer `-PLUS` sends `y,,`, which is how a server that did
+offer it detects the mechanism list being stripped on the way.
+""".
+-type channel_binding() :: prefer | require | disable.
 
 -doc "The exchange so far. Never holds anything derived from the password.".
 -opaque state() :: #state{}.
@@ -128,7 +151,7 @@ away from its iteration count defaults.
 -doc "The map carried by an `error({minato_auth, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
 
--export_type([credentials/0, state/0, step/0, report/0]).
+-export_type([credentials/0, channel_binding/0, state/0, step/0, report/0]).
 
 -doc """
 Begin an authentication exchange.
@@ -140,6 +163,8 @@ wants, and every method but one needs something from it first.
 init(#{user := User} = Credentials) ->
     #state{
         user = User,
+        binding = maps:get(channel_binding, Credentials, disable),
+        binding_data = maps:get(channel_binding_data, Credentials, undefined),
         password = maps:get(password, Credentials, undefined),
         scram_opts = maps:get(scram, Credentials, #{}),
         sasl = none
@@ -191,8 +216,9 @@ md5(_Sasl, Salt, #state{user = User} = State) ->
 sasl({pending, _Client}, _Mechanisms, #state{user = User}) ->
     bad(authentication_sasl, method_changed_mid_exchange, User);
 sasl(_Sasl, Mechanisms, #state{user = User} = State) ->
-    Mechanism = mechanism(Mechanisms, User),
-    {Message, Client} = minato_scram:client_first(User, State#state.scram_opts),
+    {Mechanism, Binding} = mechanism(Mechanisms, State),
+    Opts = (State#state.scram_opts)#{channel_binding => Binding},
+    {Message, Client} = minato_scram:client_first(User, Opts),
     {send, {sasl_initial_response, Mechanism, Message}, State#state{sasl = {pending, Client}}}.
 
 -spec sasl_continue(sasl(), binary(), state()) -> step().
@@ -210,12 +236,32 @@ sasl_final({pending, Client}, Data, State) ->
 sasl_final(_Sasl, _Data, #state{user = User}) ->
     bad(authentication_sasl_final, no_sasl_exchange_in_progress, User).
 
--spec mechanism([binary()], binary()) -> binary().
-mechanism(Mechanisms, User) ->
+-spec mechanism([binary()], state()) -> {binary(), minato_scram:binding()}.
+mechanism(Mechanisms, #state{user = User} = State) ->
+    Offered = lists:member(?SCRAM_SHA_256_PLUS, Mechanisms),
+    case bindable(State) of
+        {ok, Hash} when Offered ->
+            {?SCRAM_SHA_256_PLUS, {tls_server_end_point, Hash}};
+        {ok, _Hash} ->
+            plain(Mechanisms, State, unoffered);
+        required ->
+            bad(authentication_sasl, {channel_binding_not_offered, Mechanisms}, User);
+        none ->
+            plain(Mechanisms, State, none)
+    end.
+
+-spec plain([binary()], state(), minato_scram:binding()) -> {binary(), minato_scram:binding()}.
+plain(Mechanisms, #state{user = User}, Binding) ->
     case lists:member(?SCRAM_SHA_256, Mechanisms) of
-        true -> ?SCRAM_SHA_256;
+        true -> {?SCRAM_SHA_256, Binding};
         false -> bad(authentication_sasl, {no_supported_mechanism, Mechanisms}, User)
     end.
+
+-spec bindable(state()) -> {ok, binary()} | required | none.
+bindable(#state{binding = disable}) -> none;
+bindable(#state{binding_data = undefined, binding = require}) -> required;
+bindable(#state{binding_data = undefined}) -> none;
+bindable(#state{binding_data = Hash}) -> {ok, Hash}.
 
 -spec password(state(), atom()) -> binary().
 password(#state{password = undefined, user = User}, Message) ->
