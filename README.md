@@ -375,6 +375,24 @@ Point it at another server with `MINATO_PG_HOST`, `MINATO_PG_PORT`,
 than fails when nothing answers. `MINATO_DIFF_SCALAR_CASES` and
 `MINATO_DIFF_ARRAY_CASES` set how many values are generated per type.
 
+### Round trips and properties
+
+`minato_roundtrip_SUITE` runs the same corpus the codec differential suite uses -
+every type, fixed cases and generated ones - through minato's own connection,
+parameters and pool rather than through `pgo`. Each value goes out as a bound
+parameter and comes back as a decoded row, both as `SELECT $1::type` and as an
+`INSERT ... RETURNING`, because a value can survive the parameter path and still
+be wrong through a column.
+
+`minato_prop_SUITE` asks the questions that are about shape rather than value,
+against the real server: a result set of any size, any number of parameters,
+nulls in any position, UTF-8 of any content, a `bytea` of any size, the same
+query as tuples and as maps, a prepared statement against an unprepared one, and
+a refused statement followed by a working one. Shape is where a protocol client
+goes wrong - framing is fine until a result set spans enough reads, a parameter
+list is fine until it is longer than the one in the test. `MINATO_PROP_TESTS`
+sets how many times each property runs; the default is CI-small.
+
 ### Soak
 
 `minato_soak_SUITE` runs concurrent workers against a pool for a bounded time,
