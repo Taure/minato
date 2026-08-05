@@ -111,8 +111,10 @@ the_connection_can_run_a_statement(_Config) ->
 
 -spec a_running_statement_can_be_cancelled([{atom(), term()}]) -> ok.
 a_running_statement_can_be_cancelled(_Config) ->
-    {ok, Conn} = minato_conn:connect(opts(#{})),
+    Named = opts(#{parameters => #{~"application_name" => ~"minato_cancel_test"}}),
+    {ok, Conn} = minato_conn:connect(Named),
     ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(30)"}),
+    ok = running(100),
     ok = minato_conn:cancel(Conn),
     Reported = until_error(Conn),
     ok = minato_conn:close(Conn),
@@ -138,7 +140,26 @@ until_error(Conn) ->
     case minato_conn:next(Conn) of
         {ok, {error_response, Fields}, _Read} -> Fields;
         {ok, {ready_for_query, _Status}, _Read} -> not_cancelled;
-        {ok, _Message, Read} -> until_error(Read)
+        {ok, _Message, Read} -> until_error(Read);
+        {error, Reason} -> {no_answer, Reason}
+    end.
+
+running(0) ->
+    {error, never_started};
+running(Attempts) ->
+    {ok, Conn} = minato_conn:connect(opts(#{})),
+    Sql = <<
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 ",
+        "AND state = 'active' AND query LIKE 'SELECT pg_sleep%'"
+    >>,
+    {ok, #{rows := [{Count}]}, Read} = minato_query:query(Conn, Sql, [~"minato_cancel_test"]),
+    ok = minato_conn:close(Read),
+    case Count > 0 of
+        true ->
+            ok;
+        false ->
+            timer:sleep(20),
+            running(Attempts - 1)
     end.
 
 %%----------------------------------------------------------------------
