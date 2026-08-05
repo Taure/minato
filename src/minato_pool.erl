@@ -373,14 +373,25 @@ connect(Opts) ->
 -spec connected(pid(), minato_conn:opts()) -> ok.
 connected(Pool, Opts) ->
     case minato_conn:connect(Opts) of
-        {ok, Conn} ->
-            ok = minato_conn:give_away(Conn, Pool),
+        {ok, Conn} -> handed(Pool, Conn);
+        {error, Reason} -> refused(Pool, Reason)
+    end.
+
+-spec handed(pid(), minato_conn:conn()) -> ok.
+handed(Pool, Conn) ->
+    case minato_conn:give_away(Conn, Pool) of
+        ok ->
             Pool ! {connected, Conn},
             ok;
         {error, Reason} ->
-            Pool ! {connect_failed, Reason},
-            ok
+            ok = minato_conn:close(Conn),
+            refused(Pool, Reason)
     end.
+
+-spec refused(pid(), term()) -> ok.
+refused(Pool, Reason) ->
+    Pool ! {connect_failed, Reason},
+    ok.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

@@ -89,7 +89,7 @@ a_payload_arrives_unchanged(_Config) ->
 -spec two_subscribers_both_get_it([{atom(), term()}]) -> ok.
 two_subscribers_both_get_it(_Config) ->
     Test = self(),
-    Other = spawn_link(fun() ->
+    Other = spawn(fun() ->
         ok = minato:listen(?LISTENER, ~"minato_events"),
         Test ! subscribed,
         Test ! {other, waited()}
