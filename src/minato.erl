@@ -52,6 +52,7 @@ statements inside a transaction have to run on that one.
     simple/3,
     transaction/2,
     with/2,
+    give_away/3,
     stats/1
 ]).
 
@@ -187,6 +188,18 @@ with(Pool, Fun) ->
         {ok, Conn} -> used(Pool, Conn, Fun);
         {error, Reason} -> {error, Reason}
     end.
+
+-doc """
+Hand a borrowed connection to another process.
+
+The socket moves and the pool starts watching the new owner instead of the
+caller, so a connection outlives the process that borrowed it when that is what
+was meant. The connection term is the caller's to send on; a receiver that is
+sent one without this call holds a term whose socket is somebody else's.
+""".
+-spec give_away(pool(), conn(), pid()) -> ok | {error, term()}.
+give_away(Pool, Conn, Pid) ->
+    minato_pool:give_away(Pool, Conn, Pid).
 
 -doc "What the pool holds and what it has done.".
 -spec stats(pool()) -> minato_pool:stats().

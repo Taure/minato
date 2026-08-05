@@ -314,6 +314,10 @@ with the connection, `checkin/2` hands it back, and `m:minato` wraps both.
   joining a transaction it did not open.
 - **A caller that gives up waiting is removed from the queue**, rather than being
   handed a connection nobody is waiting for.
+- **A connection can be handed to another process.** `minato:give_away/3` moves
+  the socket and the pool's monitor together, so a connection can outlive the
+  process that borrowed it when that is what was meant, and the pool watches
+  whoever holds it now. The connection term is the caller's to send on.
 - **The queue is a plain FIFO for now.** A CoDel queue is what belongs here, and
   it needs a load to measure against before it is worth writing.
 

@@ -27,7 +27,10 @@ Skips when no server answers.
     a_checkout_with_nothing_free_waits/1,
     a_checkout_that_waits_too_long_gives_up/1,
     a_pool_with_no_server_stays_up/1,
-    the_stats_count_what_happened/1
+    the_stats_count_what_happened/1,
+    a_connection_can_be_handed_to_another_process/1,
+    the_process_it_was_handed_to_is_the_one_watched/1,
+    a_connection_nobody_borrowed_cannot_be_handed_on/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -45,7 +48,10 @@ all() ->
         a_checkout_with_nothing_free_waits,
         a_checkout_that_waits_too_long_gives_up,
         a_pool_with_no_server_stays_up,
-        the_stats_count_what_happened
+        the_stats_count_what_happened,
+        a_connection_can_be_handed_to_another_process,
+        the_process_it_was_handed_to_is_the_one_watched,
+        a_connection_nobody_borrowed_cannot_be_handed_on
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -182,9 +188,78 @@ the_stats_count_what_happened(_Config) ->
         #{size := 2, borrowed := 0, checkouts := Count} when Count >= 1, minato:stats(?POOL)
     ).
 
+-spec a_connection_can_be_handed_to_another_process([{atom(), term()}]) -> ok.
+a_connection_can_be_handed_to_another_process(_Config) ->
+    Test = self(),
+    Owner = spawn_link(fun() ->
+        receive
+            {conn, Conn} ->
+                {ok, #{rows := [{7}]}, Used} = minato_query:query(Conn, ~"SELECT 7", []),
+                ok = minato_pool:checkin(?POOL, Used),
+                Test ! used
+        end
+    end),
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = minato:give_away(?POOL, Conn, Owner),
+    Owner ! {conn, Conn},
+    receive
+        used -> ok
+    after ?TIMEOUT -> error(never_used)
+    end,
+    ok = settled(2, 200),
+    ?assertMatch(#{borrowed := 0, disconnects := 0}, minato:stats(?POOL)).
+
+-spec the_process_it_was_handed_to_is_the_one_watched([{atom(), term()}]) -> ok.
+the_process_it_was_handed_to_is_the_one_watched(_Config) ->
+    Test = self(),
+    Owner = spawn(fun() ->
+        receive
+            {conn, _Conn} -> Test ! holding
+        end,
+        receive
+            never -> ok
+        end
+    end),
+    Borrower = spawn(fun() ->
+        {ok, Conn} = minato_pool:checkout(?POOL, ?TIMEOUT),
+        ok = minato:give_away(?POOL, Conn, Owner),
+        Owner ! {conn, Conn}
+    end),
+    receive
+        holding -> ok
+    after ?TIMEOUT -> error(never_handed_over)
+    end,
+    ok = buried([Borrower], 200),
+    ?assertMatch(#{borrowed := 1}, minato:stats(?POOL)),
+    true = exit(Owner, kill),
+    ok = settled(2, 500),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])).
+
+-spec a_connection_nobody_borrowed_cannot_be_handed_on([{atom(), term()}]) -> ok.
+a_connection_nobody_borrowed_cannot_be_handed_on(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = minato_pool:checkin(?POOL, Conn),
+    ?assertEqual({error, not_borrowed}, minato:give_away(?POOL, Conn, self())).
+
 %%----------------------------------------------------------------------
 %% Waiting for the pool to be ready
 %%----------------------------------------------------------------------
+
+settled(Size, Attempts) ->
+    filled(?POOL, Size, Attempts).
+
+buried([], _Attempts) ->
+    ok;
+buried(_Pids, 0) ->
+    {error, still_alive};
+buried(Pids, Attempts) ->
+    case [Pid || Pid <- Pids, is_process_alive(Pid)] of
+        [] ->
+            ok;
+        Alive ->
+            timer:sleep(20),
+            buried(Alive, Attempts - 1)
+    end.
 
 filled(_Pool, _Size, 0) ->
     {error, never_filled};
