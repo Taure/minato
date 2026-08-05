@@ -39,8 +39,22 @@ that is hurting and guessing.
 | option | default | |
 | --- | --- | --- |
 | `connection` | required | the map above |
-| `size` | `10` | connections kept |
+| `size` | `10` | the most connections this pool will hold |
+| `min_size` | `1` | how many it opens before anybody asks |
+| `disconnected` | `fail` | what a checkout gets when the pool is empty and cannot connect |
 | `max_age` | `infinity` | retire a connection checked in older than this |
+
+`min_size` is one because a node with twenty pools should not want a hundred
+connections the moment it boots, and one is still enough for the pool to prove
+it can connect and complain at start up rather than at the first query. The rest
+open when a caller finds none free. Set it to `size` for a pool that must be
+warm on the first request, and to `0` for one that may never be used at all.
+
+`disconnected` is `fail`: a checkout against a pool that holds nothing and whose
+last attempt to connect failed answers `{error, disconnected}` immediately.
+During an outage the alternative is every caller holding a process for the whole
+checkout timeout to learn the same thing, and a queue that outlives the outage.
+`wait` queues anyway, for work that would rather be slow than fail.
 
 `size` is not a throughput dial. A pool larger than the database can serve moves
 the queue from your application to the server, where you cannot see it; a pool
@@ -52,6 +66,28 @@ indefinitely, and churning connections is work nobody asked for. Set it when
 something sits in the middle - a proxy, a load balancer, a NAT - since those
 have limits of their own and a connection one of them cut is otherwise found by
 a query failing on it.
+
+### How many connections is that
+
+`size` per pool, times the pools on the node, times the nodes, against the
+server's `max_connections`. Nobody does that multiplication until PostgreSQL
+starts refusing, so minato does it: the first connection a pool opens asks the
+server for its limit, and a pool that alone wants a quarter of it says so once,
+at `warning`, with `event => connection_budget`.
+
+The arithmetic bites hardest in test suites, where every module tends to start a
+pool and none of them stop one. See the [testing](#pools-in-tests) note below.
+
+### Pools in tests
+
+A test suite that starts a pool per module and stops none of them is asking for
+`sorry, too many clients already`, and it will get it sooner with minato than
+with a client that opens connections lazily, unless `min_size` is low.
+
+Three things that keep it quiet: start one pool for the suite rather than one
+per module; use `min_size => 1` and a small `size`, since tests are rarely
+concurrent enough to need more; and stop the pool when the suite ends -
+`minato:stop_pool/1` closes every connection it holds.
 
 ## A listener
 
