@@ -104,7 +104,8 @@ Decoding options, plus how long the statement may run.
   return_rows_as_maps => boolean(),
   column_name_as_atom => boolean(),
   uuid_format => string | binary,
-  datetime_format => datetime | microseconds}
+  datetime_format => datetime | microseconds,
+  numeric_format => binary | float}
 ```
 
 Everything but `timeout` is passed to `m:minato_protocol` unchanged. `timeout`
@@ -119,7 +120,8 @@ statement that outlives that costs a statement rather than a connection. See
     return_rows_as_maps => boolean(),
     column_name_as_atom => boolean(),
     uuid_format => string | binary,
-    datetime_format => datetime | microseconds
+    datetime_format => datetime | microseconds,
+    numeric_format => binary | float
 }.
 
 -export_type([opts/0]).
@@ -323,7 +325,8 @@ decoding(Opts) ->
         return_rows_as_maps => maps:get(return_rows_as_maps, Opts, false),
         column_name_as_atom => maps:get(column_name_as_atom, Opts, false),
         uuid_format => maps:get(uuid_format, Opts, string),
-        datetime_format => maps:get(datetime_format, Opts, datetime)
+        datetime_format => maps:get(datetime_format, Opts, datetime),
+        numeric_format => maps:get(numeric_format, Opts, binary)
     }.
 
 -doc """
@@ -467,7 +470,7 @@ encoded([Oid | Oids], [Value | Values], Opts) ->
 
 -spec codec_opts(minato_protocol:opts()) -> minato_codec:opts().
 codec_opts(Opts) ->
-    maps:with([uuid_format, datetime_format], Opts).
+    maps:with([uuid_format, datetime_format, numeric_format], Opts).
 
 -spec executed(conn(), [minato_protocol:field()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
