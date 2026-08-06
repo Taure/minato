@@ -314,10 +314,11 @@ init({Name, Opts}) ->
 
 -spec handle_call(request(), gen_server:from(), #state{}) ->
     {reply, term(), #state{}} | {noreply, #state{}}.
-handle_call(checkout, {Pid, _Tag}, #state{idle = [{Conn, _Since} | Rest]} = State) ->
-    lending(State#state{idle = Rest}, Conn, Pid);
-handle_call(checkout, From, State) ->
-    asked(State, From);
+handle_call(checkout, {Pid, _Tag} = From, State) ->
+    case lendable(State) of
+        {ok, Conn, Ready} -> lending(Ready, Conn, Pid);
+        {none, Ready} -> asked(Ready, From)
+    end;
 handle_call({give_away, From, To}, _From, State) ->
     handed_over(State, From, To);
 handle_call(stats, _From, State) ->
@@ -376,6 +377,23 @@ terminate(_Reason, #state{idle = Idle}) ->
 %%----------------------------------------------------------------------
 %% Lending
 %%----------------------------------------------------------------------
+
+-doc """
+The first idle connection a caller can actually use, dropping any that died.
+
+A connection can die while it sits in the pool and nothing announces it, so
+handing one over without asking turns a server restart into one failed
+statement per pooled connection, for callers that did nothing wrong.
+""".
+-spec lendable(#state{}) -> {ok, minato_conn:conn(), #state{}} | {none, #state{}}.
+lendable(#state{idle = []} = State) ->
+    {none, State};
+lendable(#state{idle = [{Conn, _Since} | Rest]} = State) ->
+    Ready = State#state{idle = Rest},
+    case minato_conn:usable(Conn) of
+        true -> {ok, Conn, Ready};
+        false -> lendable(discarded(Ready, Conn))
+    end.
 
 -spec lending(#state{}, minato_conn:conn(), pid()) -> {reply, term(), #state{}}.
 lending(State, Conn, Pid) ->
