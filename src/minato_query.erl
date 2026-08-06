@@ -474,16 +474,22 @@ codec_opts(Opts) ->
 
 -spec executed(conn(), minato_protocol:decoder(), minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-executed(Conn, Decoder, Opts) ->
+executed(Conn, Decoder, _Opts) ->
+    executed(Conn, Decoder, [], {unknown, undefined}).
+
+-spec executed(conn(), minato_protocol:decoder(), [minato_protocol:row()], minato_protocol:tag()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+executed(Conn, Decoder, Rows, Tag) ->
     case minato_conn:next(Conn) of
         {ok, {data_row, Columns}, Read} ->
-            keep(minato_protocol:decode_row(Decoder, Columns), executed(Read, Decoder, Opts));
+            Row = minato_protocol:decode_row(Decoder, Columns),
+            executed(Read, Decoder, [Row | Rows], Tag);
         {ok, {command_complete, Complete}, Read} ->
-            stamp(Complete, executed(Read, Decoder, Opts));
+            executed(Read, Decoder, Rows, Complete);
         {ok, empty_query_response, Read} ->
-            stamp({empty, undefined}, executed(Read, Decoder, Opts));
+            executed(Read, Decoder, Rows, {empty, undefined});
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, minato_protocol:result({unknown, undefined}, []), Read};
+            {ok, minato_protocol:result(Tag, reversed(Rows, [])), Read};
         {ok, {error_response, Reported}, Read} ->
             failed(Read, {pgsql_error, Reported});
         {ok, Message, _Read} when
@@ -493,24 +499,10 @@ executed(Conn, Decoder, Opts) ->
         ->
             unexpected(Message, execute);
         {ok, _Message, Read} ->
-            executed(Read, Decoder, Opts);
+            executed(Read, Decoder, Rows, Tag);
         {error, Reason} ->
             {error, Reason}
     end.
-
--spec keep(minato_protocol:row(), Answer) -> Answer when
-    Answer :: {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-keep(Row, {ok, #{rows := Rows} = Result, Conn}) ->
-    {ok, Result#{rows := [Row | Rows]}, Conn};
-keep(_Row, Failed) ->
-    Failed.
-
--spec stamp(minato_protocol:tag(), Answer) -> Answer when
-    Answer :: {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-stamp({Command, NumRows}, {ok, Result, Conn}) ->
-    {ok, Result#{command := Command, num_rows := NumRows}, Conn};
-stamp(_Complete, Failed) ->
-    Failed.
 
 %%----------------------------------------------------------------------
 %% The simple protocol
@@ -519,45 +511,55 @@ stamp(_Complete, Failed) ->
 -spec collect(conn(), minato_protocol:opts(), minato_protocol:decoder()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 collect(Conn, Opts, Decoder) ->
+    collect(Conn, Opts, Decoder, [], [], undefined).
+
+-spec collect(
+    conn(),
+    minato_protocol:opts(),
+    minato_protocol:decoder(),
+    [minato_protocol:row()],
+    [result()],
+    error() | undefined
+) ->
+    {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
+collect(Conn, Opts, Decoder, Rows, Results, Failure) ->
     case minato_conn:next(Conn) of
         {ok, {row_description, Described}, Read} ->
-            collect(Read, Opts, minato_protocol:decoder(Described, Opts));
+            collect(Read, Opts, minato_protocol:decoder(Described, Opts), Rows, Results, Failure);
         {ok, {data_row, Columns}, Read} ->
-            first(minato_protocol:decode_row(Decoder, Columns), collect(Read, Opts, Decoder));
+            Row = minato_protocol:decode_row(Decoder, Columns),
+            collect(Read, Opts, Decoder, [Row | Rows], Results, Failure);
         {ok, {command_complete, Complete}, Read} ->
-            began(Complete, collect(Read, Opts, Decoder));
+            collect(Read, Opts, Decoder, [], [completed(Complete, Rows) | Results], Failure);
         {ok, empty_query_response, Read} ->
-            began({empty, undefined}, collect(Read, Opts, Decoder));
+            Empty = completed({empty, undefined}, Rows),
+            collect(Read, Opts, Decoder, [], [Empty | Results], Failure);
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, [], Read};
+            finished(Read, Results, Failure);
         {ok, {error_response, Reported}, Read} ->
-            refused({pgsql_error, Reported}, collect(Read, Opts, Decoder));
+            collect(Read, Opts, Decoder, Rows, Results, {pgsql_error, Reported});
         {ok, _Message, Read} ->
-            collect(Read, Opts, Decoder);
+            collect(Read, Opts, Decoder, Rows, Results, Failure);
         {error, Reason} ->
             {error, Reason}
     end.
 
--spec first(minato_protocol:row(), Answer) -> Answer when
-    Answer :: {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
-first(Row, {ok, [#{rows := Rows} = Result | Results], Conn}) ->
-    {ok, [Result#{rows := [Row | Rows]} | Results], Conn};
-first(_Row, Answer) ->
-    Answer.
+-spec completed(minato_protocol:tag(), [minato_protocol:row()]) -> result().
+completed(Complete, Rows) ->
+    minato_protocol:result(Complete, reversed(Rows, [])).
 
--spec began(minato_protocol:tag(), Answer) -> Answer when
-    Answer :: {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
-began(Complete, {ok, Results, Conn}) ->
-    {ok, [minato_protocol:result(Complete, []) | Results], Conn};
-began(_Complete, Failed) ->
-    Failed.
+-spec finished(conn(), [result()], error() | undefined) ->
+    {ok, [result()], conn()} | {error, error(), conn()}.
+finished(Conn, Results, undefined) ->
+    {ok, reversed(Results, []), Conn};
+finished(Conn, _Results, Failure) ->
+    {error, Failure, Conn}.
 
--spec refused(error(), {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}) ->
-    {error, error(), conn()} | {error, error()}.
-refused(Reason, {ok, _Results, Conn}) ->
-    {error, Reason, Conn};
-refused(_Reason, Failed) ->
-    Failed.
+-spec reversed([Item], [Item]) -> [Item].
+reversed([], Acc) ->
+    Acc;
+reversed([Item | Rest], Acc) ->
+    reversed(Rest, [Item | Acc]).
 
 %%----------------------------------------------------------------------
 %% Getting back to a ready connection

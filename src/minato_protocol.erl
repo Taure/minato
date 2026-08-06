@@ -581,13 +581,18 @@ decoded_tuple([], 0, ~"") ->
     [];
 decoded_tuple([_Column | Columns], Remaining, <<-1:32/signed, Rest/binary>>) when Remaining > 0 ->
     [null | decoded_tuple(Columns, Remaining - 1, Rest)];
-decoded_tuple([{_Key, Decoder} | Columns], Remaining, <<Length:32/signed, Rest/binary>>) when
+decoded_tuple(
+    [{_Key, Decoder} | Columns], Remaining, <<Length:32/signed, Value:Length/binary, Rest/binary>>
+) when
     Remaining > 0, Length >= 0
 ->
-    {Value, Tail} = cut(Length, Rest),
-    [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Remaining - 1, Tail)];
-decoded_tuple(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>) when Remaining > 0 ->
+    [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Remaining - 1, Rest)];
+decoded_tuple(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>) when
+    Remaining > 0, Length < 0
+->
     bad(data_row, {negative_column_length, Length}, Length);
+decoded_tuple(_Columns, Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0 ->
+    bad(data_row, column_longer_than_the_message, {Length, byte_size(Rest)});
 decoded_tuple(Columns, Remaining, _Payload) ->
     bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
 
@@ -600,13 +605,21 @@ decoded_map([{Key, _Skipped} | Columns], Remaining, <<-1:32/signed, Rest/binary>
     Remaining > 0
 ->
     decoded_map(Columns, Remaining - 1, Rest, Row#{Key => null});
-decoded_map([{Key, Decoder} | Columns], Remaining, <<Length:32/signed, Rest/binary>>, Row) when
+decoded_map(
+    [{Key, Decoder} | Columns],
+    Remaining,
+    <<Length:32/signed, Value:Length/binary, Rest/binary>>,
+    Row
+) when
     Remaining > 0, Length >= 0
 ->
-    {Value, Tail} = cut(Length, Rest),
-    decoded_map(Columns, Remaining - 1, Tail, Row#{Key => minato_codec:decode(Decoder, Value)});
-decoded_map(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>, _Row) when Remaining > 0 ->
+    decoded_map(Columns, Remaining - 1, Rest, Row#{Key => minato_codec:decode(Decoder, Value)});
+decoded_map(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>, _Row) when
+    Remaining > 0, Length < 0
+->
     bad(data_row, {negative_column_length, Length}, Length);
+decoded_map(_Columns, Remaining, <<Length:32/signed, Rest/binary>>, _Row) when Remaining > 0 ->
+    bad(data_row, column_longer_than_the_message, {Length, byte_size(Rest)});
 decoded_map(Columns, Remaining, _Payload, _Row) ->
     bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
 
