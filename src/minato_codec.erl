@@ -82,6 +82,8 @@ and the array type of each of them.
 """.
 
 -export([
+    decoder/3,
+    decode/2,
     encode/3,
     encode/4,
     decode/3,
@@ -128,7 +130,13 @@ and the array type of each of them.
 -doc "The map carried by an `error({minato_codec, Report})` exception.".
 -type report() :: #{type := term(), reason := term(), value := term()}.
 
--export_type([format/0, value/0, opts/0, date/0, time/0, datetime/0, report/0]).
+-doc "One column's type resolution, from `decoder/3`.".
+-opaque decoder() ::
+    {scalar, minato_oid:name(), format(), opts()}
+    | {array, minato_oid:oid(), format(), opts()}
+    | {unknown, minato_oid:oid(), format()}.
+
+-export_type([format/0, value/0, opts/0, decoder/0, date/0, time/0, datetime/0, report/0]).
 
 -doc "`encode/4` with the default options.".
 -spec encode(minato_oid:oid(), term(), format()) -> iodata() | null.
@@ -180,6 +188,30 @@ decode(Oid, Bin, Format, Opts) ->
         {array, _Element} -> minato_codec_array:decode(Oid, Bin, Format, Opts);
         Name -> decode_named(Name, Bin, Format, Opts)
     end.
+
+-doc """
+A decoder is the type resolution for one column, done once.
+
+`decode/4` asks `minato_oid:name/1` what a type is on every value, which for a
+result set is the same answer per column repeated once per row: a thousand rows
+of two columns resolve the same two types two thousand times. The column types
+are fixed by the `RowDescription` before the first row arrives, so they can be
+resolved there instead, and `decode/2` applies the answer.
+""".
+-spec decoder(minato_oid:oid(), format(), opts()) -> decoder().
+decoder(Oid, Format, Opts) ->
+    case minato_oid:name(Oid) of
+        undefined -> {unknown, Oid, Format};
+        {array, _Element} -> {array, Oid, Format, Opts};
+        Name -> {scalar, Name, Format, Opts}
+    end.
+
+-doc "Decode one value with a decoder from `decoder/3`.".
+-spec decode(decoder(), binary() | null) -> value().
+decode(_Decoder, null) -> null;
+decode({scalar, Name, Format, Opts}, Bin) -> decode_named(Name, Bin, Format, Opts);
+decode({array, Oid, Format, Opts}, Bin) -> minato_codec_array:decode(Oid, Bin, Format, Opts);
+decode({unknown, Oid, Format}, Bin) -> decode_unknown(Oid, Bin, Format).
 
 -doc "Whether minato has a codec for this OID.".
 -spec supports(minato_oid:oid()) -> boolean().
