@@ -165,7 +165,8 @@ prop_data_row_roundtrip() ->
             {Fields, Columns} = int4_row(Values),
             Bytes = minato_backend_writer:write({data_row, Columns}),
             {[{data_row, Raw}], ~""} = minato_protocol:frame(Bytes),
-            list_to_tuple(Values) =:= minato_protocol:row(Fields, Raw, #{})
+            Decoder = minato_protocol:decoder(Fields, #{}),
+            list_to_tuple(Values) =:= minato_protocol:decode_row(Decoder, Raw)
         end
     ).
 
@@ -246,8 +247,24 @@ chunks(Bytes, [Size | Rest]) ->
 
 decoded({command_complete, Tag}) ->
     {command_complete, parsed_tag(Tag)};
+decoded({data_row, Columns}) when is_list(Columns) ->
+    %% A DataRow is generated as its columns and decodes to the payload that
+    %% carries them, because splitting is the reader's job now.
+    {data_row, payload_of(Columns)};
 decoded(Message) ->
     Message.
+
+payload_of(Columns) ->
+    iolist_to_binary([
+        <<(length(Columns)):16>>,
+        [
+            case Column of
+                null -> <<-1:32/signed>>;
+                Value -> <<(byte_size(Value)):32, Value/binary>>
+            end
+         || Column <- Columns
+        ]
+    ]).
 
 command_tags() ->
     [

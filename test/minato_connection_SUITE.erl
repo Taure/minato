@@ -129,7 +129,8 @@ collect(Conn, Fields, Rows) ->
         {ok, {row_description, Described}, Read} ->
             collect(Read, Described, Rows);
         {ok, {data_row, Columns}, Read} ->
-            collect(Read, Fields, [minato_protocol:row(Fields, Columns, #{}) | Rows]);
+            Decoded = minato_protocol:decode_row(minato_protocol:decoder(Fields, #{}), Columns),
+            collect(Read, Fields, [Decoded | Rows]);
         {ok, {ready_for_query, _Status}, Read} ->
             {lists:reverse(Rows), Read};
         {ok, _Message, Read} ->

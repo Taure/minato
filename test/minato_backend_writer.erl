@@ -22,7 +22,10 @@ A decoded backend message, except that `CommandComplete` carries its tag as the
 text a server puts on the wire rather than the parsed form, because parsing it
 is one of the things under test.
 """.
--type message() :: minato_protocol:backend() | {command_complete, binary()}.
+-type message() ::
+    minato_protocol:backend()
+    | {command_complete, binary()}
+    | {data_row, [binary() | null]}.
 
 -export_type([message/0]).
 
@@ -48,7 +51,9 @@ write({ready_for_query, Status}) ->
     typed($Z, <<(status(Status))>>);
 write({row_description, Fields}) ->
     typed($T, <<(length(Fields)):16, (fields(Fields))/binary>>);
-write({data_row, Columns}) ->
+write({data_row, Payload}) when is_binary(Payload) ->
+    typed($D, Payload);
+write({data_row, Columns}) when is_list(Columns) ->
     typed($D, <<(length(Columns)):16, (columns(Columns))/binary>>);
 write({command_complete, Tag}) when is_binary(Tag) ->
     typed($C, <<Tag/binary, 0>>);

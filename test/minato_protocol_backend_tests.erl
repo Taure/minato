@@ -227,28 +227,28 @@ row_description_rejects_an_unknown_format_code_test() ->
 
 data_row_test() ->
     ?assertEqual(
-        {data_row, [<<0, 0, 0, 42>>, ~"minato"]},
+        {data_row, columns_of([<<0, 0, 0, 42>>, ~"minato"])},
         dec($D, <<2:16, 4:32, 0, 0, 0, 42, 6:32, "minato">>)
     ).
 
 data_row_with_nulls_test() ->
     ?assertEqual(
-        {data_row, [null, <<0, 0, 0, 42>>, null]},
+        {data_row, columns_of([null, <<0, 0, 0, 42>>, null])},
         dec($D, <<3:16, -1:32/signed, 4:32, 0, 0, 0, 42, -1:32/signed>>)
     ).
 
 data_row_that_is_entirely_null_test() ->
     ?assertEqual(
-        {data_row, [null, null]},
+        {data_row, columns_of([null, null])},
         dec($D, <<2:16, -1:32/signed, -1:32/signed>>)
     ).
 
 empty_data_row_test() ->
-    ?assertEqual({data_row, []}, dec($D, <<0:16>>)).
+    ?assertEqual({data_row, columns_of([])}, dec($D, <<0:16>>)).
 
 data_row_tells_an_empty_value_from_null_test() ->
     ?assertEqual(
-        {data_row, [~"", null]},
+        {data_row, columns_of([~"", null])},
         dec($D, <<2:16, 0:32, -1:32/signed>>)
     ).
 
@@ -256,24 +256,24 @@ data_row_rejects_a_count_that_disagrees_test() ->
     [
         ?assertError(
             {minato_protocol, #{message := data_row}},
-            dec($D, <<3:16, 4:32, 0, 0, 0, 42>>)
+            minato_protocol:columns(<<3:16, 4:32, 0, 0, 0, 42>>)
         ),
         ?assertError(
             {minato_protocol, #{message := data_row}},
-            dec($D, <<1:16, 4:32, 0, 0, 0, 42, 4:32, 0, 0, 0, 43>>)
+            minato_protocol:columns(<<1:16, 4:32, 0, 0, 0, 42, 4:32, 0, 0, 0, 43>>)
         )
     ].
 
 data_row_rejects_a_column_longer_than_the_message_test() ->
     ?assertError(
         {minato_protocol, #{message := data_row}},
-        dec($D, <<1:16, 8:32, 0, 0, 0, 42>>)
+        minato_protocol:columns(<<1:16, 8:32, 0, 0, 0, 42>>)
     ).
 
 data_row_rejects_a_negative_length_that_is_not_null_test() ->
     ?assertError(
         {minato_protocol, #{reason := {negative_column_length, -2}}},
-        dec($D, <<1:16, -2:32/signed>>)
+        minato_protocol:columns(<<1:16, -2:32/signed>>)
     ).
 
 %%----------------------------------------------------------------------
@@ -514,3 +514,15 @@ an_unmodelled_message_does_not_lose_the_stream_test() ->
         {[{unsupported, $G, <<0, 1, 0, 0>>}, bind_complete], ~""},
         minato_protocol:frame(Buffer)
     ).
+
+columns_of(Columns) ->
+    iolist_to_binary([
+        <<(length(Columns)):16>>,
+        [
+            case Column of
+                null -> <<-1:32/signed>>;
+                Value -> <<(byte_size(Value)):32, Value/binary>>
+            end
+         || Column <- Columns
+        ]
+    ]).

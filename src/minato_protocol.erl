@@ -60,10 +60,10 @@ PostgreSQL at all.
 
 ## Binary retention
 
-The messages share the buffer's bytes. `{data_row, Columns}` hands back column
-sub-binaries rather than copies, which is what makes framing a large result set
+The messages share the buffer's bytes. `{data_row, Payload}` hands back the
+row's bytes rather than a copy, which is what makes framing a large result set
 cheap: nothing in a five thousand row buffer is copied on the way out, and the
-columns are consumed by `row/3` and dropped a row later.
+payload is consumed by `decode_row/2` and dropped a row later.
 
 The cost of that is the usual one. A sub-binary keeps the whole buffer it points
 into alive, so a column value the application keeps holds the megabyte it
@@ -103,16 +103,22 @@ server itself announced are a bug, not a condition to branch on.
 
 ## Rows
 
-`{data_row, Columns}` carries the raw column bytes, because a `DataRow` cannot
-be read on its own: the type OID and wire format of each column live in the
-`RowDescription` that preceded it. `row/3` takes that dependency as an argument
-and decodes the columns through `m:minato_codec`.
+`{data_row, Payload}` carries the row's bytes undivided, because a `DataRow`
+cannot be read on its own: the type OID and wire format of each column live in
+the `RowDescription` that preceded it. `decoder/2` turns that description into
+the answer once, and `decode_row/2` walks the payload cutting and decoding each
+column in the same pass - which is the whole reason the payload is not split
+here.
 
 ```erlang
 {[{row_description, Fields}], _} = minato_protocol:frame(Bytes),
-{[{data_row, Columns}], _} = minato_protocol:frame(MoreBytes),
-minato_protocol:row(Fields, Columns, #{}).
+{[{data_row, Payload}], _} = minato_protocol:frame(MoreBytes),
+Decoder = minato_protocol:decoder(Fields, #{}),
+minato_protocol:decode_row(Decoder, Payload).
 ```
+
+`columns/1` splits a payload into the raw column bytes for a caller that wants
+them without decoding.
 
 ## Options
 
@@ -154,8 +160,10 @@ over without losing the stream.
     ssl_response/1,
     row/3,
     rows/3,
+    columns/1,
     decoder/2,
     decode_row/2,
+    decode_columns/2,
     result/2,
     server_error/1,
     bad/3
@@ -200,7 +208,7 @@ over without losing the stream.
     | {parameter_status, Name :: binary(), Value :: binary()}
     | {ready_for_query, transaction_status()}
     | {row_description, [field()]}
-    | {data_row, [binary() | null]}
+    | {data_row, Payload :: binary()}
     | {command_complete, tag()}
     | empty_query_response
     | {error_response, fields()}
@@ -463,7 +471,7 @@ column's bytes do not fit the type the description gave it.
 """.
 -spec row([field()], [binary() | null], opts()) -> row().
 row(Fields, Columns, Opts) ->
-    decode_row(decoder(Fields, Opts), Columns).
+    decode_columns(decoder(Fields, Opts), Columns).
 
 -doc """
 Work out how to read a row, once, from the description of its columns.
@@ -487,40 +495,126 @@ decoder(Fields, Opts) ->
     ],
     {maps:get(return_rows_as_maps, Opts, false), Columns}.
 
--doc "Decode one `DataRow`'s columns with a decoder from `decoder/2`.".
--spec decode_row(decoder(), [binary() | null]) -> row().
-decode_row({false, Columns}, Values) ->
-    list_to_tuple(decoded_tuple(Columns, Values));
-decode_row({true, Columns}, Values) ->
-    decoded_map(Columns, Values, #{}).
+-doc """
+Decode one `DataRow` payload with a decoder from `decoder/2`.
 
--spec decoded_tuple([{atom() | binary(), minato_codec:decoder()}], [binary() | null]) ->
+One pass: each column's length is read, its bytes are cut, and the value is
+decoded, without building the list of sub-binaries in between. That list was
+one allocation per column per row and existed only to be walked immediately
+afterwards.
+""".
+-spec decode_row(decoder(), binary()) -> row().
+decode_row({false, Columns}, <<Count:16, Payload/binary>>) ->
+    list_to_tuple(decoded_tuple(Columns, Count, Payload));
+decode_row({true, Columns}, <<Count:16, Payload/binary>>) ->
+    decoded_map(Columns, Count, Payload, #{});
+decode_row(_Decoder, Payload) ->
+    bad(data_row, malformed, Payload).
+
+-doc """
+Decode a row from column bytes already split out, for a caller that has them.
+
+The payload form in `decode_row/2` is what a result set uses, because splitting
+and decoding in one pass is the point. This is for `row/3` and `rows/3`, whose
+callers hold columns rather than a message.
+""".
+-spec decode_columns(decoder(), [binary() | null]) -> row().
+decode_columns({false, Columns}, Values) ->
+    list_to_tuple(listed_tuple(Columns, Values));
+decode_columns({true, Columns}, Values) ->
+    listed_map(Columns, Values, #{}).
+
+-spec listed_tuple([{atom() | binary(), minato_codec:decoder()}], [binary() | null]) ->
     [minato_codec:value()].
-decoded_tuple([], []) ->
+listed_tuple([], []) ->
     [];
-decoded_tuple([_Column | Columns], [null | Values]) ->
-    [null | decoded_tuple(Columns, Values)];
-decoded_tuple([{_Key, Decoder} | Columns], [Value | Values]) ->
-    [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Values)];
-decoded_tuple(Columns, Values) ->
+listed_tuple([_Column | Columns], [null | Values]) ->
+    [null | listed_tuple(Columns, Values)];
+listed_tuple([{_Key, Decoder} | Columns], [Value | Values]) ->
+    [minato_codec:decode(Decoder, Value) | listed_tuple(Columns, Values)];
+listed_tuple(Columns, Values) ->
     bad(data_row, column_count_mismatch, {length(Columns), length(Values)}).
 
--spec decoded_map([{atom() | binary(), minato_codec:decoder()}], [binary() | null], row_map()) ->
+-spec listed_map([{atom() | binary(), minato_codec:decoder()}], [binary() | null], row_map()) ->
     row_map().
-decoded_map([], [], Row) ->
+listed_map([], [], Row) ->
     Row;
-decoded_map([{Key, _Skipped} | Columns], [null | Values], Row) ->
-    decoded_map(Columns, Values, Row#{Key => null});
-decoded_map([{Key, Decoder} | Columns], [Value | Values], Row) ->
-    decoded_map(Columns, Values, Row#{Key => minato_codec:decode(Decoder, Value)});
-decoded_map(Columns, Values, _Row) ->
+listed_map([{Key, _Skipped} | Columns], [null | Values], Row) ->
+    listed_map(Columns, Values, Row#{Key => null});
+listed_map([{Key, Decoder} | Columns], [Value | Values], Row) ->
+    listed_map(Columns, Values, Row#{Key => minato_codec:decode(Decoder, Value)});
+listed_map(Columns, Values, _Row) ->
     bad(data_row, column_count_mismatch, {length(Columns), length(Values)}).
+
+-doc "Split a `DataRow` payload into its raw column bytes, without decoding.".
+-spec columns(binary()) -> [binary() | null].
+columns(<<Count:16, Payload/binary>>) ->
+    raw(Count, Payload);
+columns(Payload) ->
+    bad(data_row, malformed, Payload).
+
+-spec raw(non_neg_integer(), binary()) -> [binary() | null].
+raw(0, ~"") ->
+    [];
+raw(Remaining, <<-1:32/signed, Rest/binary>>) when Remaining > 0 ->
+    [null | raw(Remaining - 1, Rest)];
+raw(Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0, Length >= 0 ->
+    {Value, Tail} = cut(Length, Rest),
+    [Value | raw(Remaining - 1, Tail)];
+raw(_Remaining, <<Length:32/signed, _Rest/binary>>) ->
+    bad(data_row, {negative_column_length, Length}, Length);
+raw(_Remaining, Payload) ->
+    bad(data_row, malformed, Payload).
+
+-doc false.
+-spec cut(non_neg_integer(), binary()) -> {binary(), binary()}.
+cut(Length, Payload) when byte_size(Payload) >= Length ->
+    <<Value:Length/binary, Tail/binary>> = Payload,
+    {Value, Tail};
+cut(Length, Payload) ->
+    bad(data_row, column_longer_than_the_message, {Length, byte_size(Payload)}).
+
+-spec decoded_tuple(
+    [{atom() | binary(), minato_codec:decoder()}], non_neg_integer(), binary()
+) -> [minato_codec:value()].
+decoded_tuple([], 0, ~"") ->
+    [];
+decoded_tuple([_Column | Columns], Remaining, <<-1:32/signed, Rest/binary>>) when Remaining > 0 ->
+    [null | decoded_tuple(Columns, Remaining - 1, Rest)];
+decoded_tuple([{_Key, Decoder} | Columns], Remaining, <<Length:32/signed, Rest/binary>>) when
+    Remaining > 0, Length >= 0
+->
+    {Value, Tail} = cut(Length, Rest),
+    [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Remaining - 1, Tail)];
+decoded_tuple(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>) when Remaining > 0 ->
+    bad(data_row, {negative_column_length, Length}, Length);
+decoded_tuple(Columns, Remaining, _Payload) ->
+    bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
+
+-spec decoded_map(
+    [{atom() | binary(), minato_codec:decoder()}], non_neg_integer(), binary(), row_map()
+) -> row_map().
+decoded_map([], 0, ~"", Row) ->
+    Row;
+decoded_map([{Key, _Skipped} | Columns], Remaining, <<-1:32/signed, Rest/binary>>, Row) when
+    Remaining > 0
+->
+    decoded_map(Columns, Remaining - 1, Rest, Row#{Key => null});
+decoded_map([{Key, Decoder} | Columns], Remaining, <<Length:32/signed, Rest/binary>>, Row) when
+    Remaining > 0, Length >= 0
+->
+    {Value, Tail} = cut(Length, Rest),
+    decoded_map(Columns, Remaining - 1, Tail, Row#{Key => minato_codec:decode(Decoder, Value)});
+decoded_map(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>, _Row) when Remaining > 0 ->
+    bad(data_row, {negative_column_length, Length}, Length);
+decoded_map(Columns, Remaining, _Payload, _Row) ->
+    bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
 
 -doc "`row/3` over every row of a result set.".
 -spec rows([field()], [[binary() | null]], opts()) -> [row()].
 rows(Fields, Rows, Opts) ->
     Decoder = decoder(Fields, Opts),
-    [decode_row(Decoder, Columns) || Columns <- Rows].
+    [decode_columns(Decoder, Columns) || Columns <- Rows].
 
 -doc """
 Assemble what a completed query produced from its `CommandComplete` tag and its

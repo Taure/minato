@@ -51,7 +51,7 @@ decode($K, Payload) -> backend_key_data(Payload);
 decode($S, Payload) -> parameter_status(Payload);
 decode($Z, Payload) -> ready_for_query(Payload);
 decode($T, Payload) -> {row_description, row_description(Payload)};
-decode($D, Payload) -> {data_row, data_row(Payload)};
+decode($D, Payload) -> {data_row, Payload};
 decode($C, Payload) -> {command_complete, command_complete(Payload)};
 decode($I, Payload) -> empty(empty_query_response, Payload);
 decode($E, Payload) -> {error_response, error_fields(Payload)};
@@ -182,31 +182,6 @@ described_fields(_Remaining, Payload) ->
 format(_Message, 0) -> text;
 format(_Message, 1) -> binary;
 format(Message, Code) -> minato_protocol:bad(Message, {unknown_format_code, Code}, Code).
-
--spec data_row(binary()) -> [binary() | null].
-data_row(<<Count:16, Rest/binary>>) ->
-    columns(Count, Rest);
-data_row(Payload) ->
-    minato_protocol:bad(data_row, malformed, Payload).
-
--spec columns(non_neg_integer(), binary()) -> [binary() | null].
-columns(0, ~"") ->
-    [];
-columns(Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0 ->
-    column(Remaining, Length, Rest);
-columns(_Remaining, Payload) ->
-    minato_protocol:bad(data_row, malformed, Payload).
-
--spec column(pos_integer(), integer(), binary()) -> [binary() | null].
-column(Remaining, -1, Rest) ->
-    [null | columns(Remaining - 1, Rest)];
-column(Remaining, Length, Rest) when Length >= 0 ->
-    case Rest of
-        <<Value:Length/binary, Tail/binary>> -> [Value | columns(Remaining - 1, Tail)];
-        _ -> minato_protocol:bad(data_row, malformed, Rest)
-    end;
-column(_Remaining, Length, _Rest) ->
-    minato_protocol:bad(data_row, {negative_column_length, Length}, Length).
 
 -spec parameter_description(binary()) -> [minato_oid:oid()].
 parameter_description(<<Count:16, Rest/binary>>) ->
