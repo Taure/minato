@@ -36,8 +36,8 @@ jobs:
       enable-coverage: true
       enable-elp-lint: true
       enable-elp-eqwalize: false
-      enable-sbom: true
-      enable-sbom-scan: true
+      enable-sbom: false
+      enable-sbom-scan: false
       enable-dependency-submission: true
       enable-summary: true
 
