@@ -521,7 +521,7 @@ executed(Conn, Decoder, Runs, Tag) ->
 -spec collect(conn(), minato_protocol:opts(), minato_protocol:decoder()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 collect(Conn, Opts, Decoder) ->
-    collect(plain(Conn), Opts, Decoder, [], [], undefined).
+    collect(minato_conn:decoding_opts(plain(Conn), Opts), Opts, Decoder, [], [], undefined).
 
 -spec collect(
     conn(),
@@ -563,9 +563,13 @@ completed(Complete, Rows) ->
 -spec finished(conn(), [result()], error() | undefined) ->
     {ok, [result()], conn()} | {error, error(), conn()}.
 finished(Conn, Results, undefined) ->
-    {ok, reversed(Results, []), Conn};
+    {ok, reversed(Results, []), settled(Conn)};
 finished(Conn, _Results, Failure) ->
-    {error, Failure, Conn}.
+    {error, Failure, settled(Conn)}.
+
+-spec settled(conn()) -> conn().
+settled(Conn) ->
+    minato_conn:decoding_opts(Conn, undefined).
 
 -spec plain(conn()) -> conn().
 plain(Conn) ->
