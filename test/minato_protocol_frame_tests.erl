@@ -329,8 +329,8 @@ name(Message) ->
 result_set() ->
     [
         {row_description, [field(~"id", 23, binary), field(~"email", 25, text)]},
-        {data_row, [<<0, 0, 0, 1>>, ~"a@b.c"]},
-        {data_row, [<<0, 0, 0, 2>>, null]},
+        {data_row, columns_of([<<0, 0, 0, 1>>, ~"a@b.c"])},
+        {data_row, columns_of([<<0, 0, 0, 2>>, null])},
         {command_complete, ~"SELECT 2"},
         {ready_for_query, idle}
     ].
@@ -364,7 +364,7 @@ samples() ->
         {parameter_status, ~"server_version", ~"17.2"},
         {ready_for_query, idle},
         {row_description, [field(~"id", 23, binary)]},
-        {data_row, [<<0, 0, 0, 42>>, null]},
+        {data_row, columns_of([<<0, 0, 0, 42>>, null])},
         {command_complete, ~"SELECT 5"},
         empty_query_response,
         {error_response, #{code => ~"23505", message => ~"duplicate key"}},
@@ -377,3 +377,15 @@ samples() ->
         portal_suspended,
         {notification_response, 42, ~"chan", ~"hello"}
     ].
+
+columns_of(Columns) ->
+    iolist_to_binary([
+        <<(length(Columns)):16>>,
+        [
+            case Column of
+                null -> <<-1:32/signed>>;
+                Value -> <<(byte_size(Value)):32, Value/binary>>
+            end
+         || Column <- Columns
+        ]
+    ]).

@@ -250,7 +250,7 @@ collect(Socket, Buffer, Fields, Rows) ->
     end.
 
 columns(Fields, Columns) ->
-    case minato_protocol:row(Fields, Columns, #{}) of
+    case minato_protocol:decode_row(minato_protocol:decoder(Fields, #{}), Columns) of
         Row when is_tuple(Row) -> tuple_to_list(Row)
     end.
 
