@@ -87,6 +87,7 @@ the server issued is the whole of the authorisation.
     next/2,
     decoding/2,
     decoding_opts/2,
+    usable/1,
     activate/1,
     deactivate/1,
     handle_message/2,
@@ -411,6 +412,27 @@ decoding_opts(#conn{frame_opts = Opts} = Conn, undefined) ->
     Conn#conn{frame_opts = maps:remove(decode_opts, maps:remove(decoder, Opts))};
 decoding_opts(#conn{frame_opts = Opts} = Conn, DecodeOpts) ->
     Conn#conn{frame_opts = Opts#{decode_opts => DecodeOpts}}.
+
+-doc """
+Whether this connection is still worth handing to a caller.
+
+A pooled connection can die while nobody is holding it: the server restarts,
+an administrator ends the backend, a failover moves the database. Nothing tells
+the pool, so without asking it lends a connection that is already gone and the
+caller gets a socket error for a statement that never reached a server.
+
+Asking costs one non-blocking read. No bytes waiting means the connection is
+idle and healthy, which is the answer for a pooled connection. A closed socket
+is the case this exists for. Bytes waiting means the server said something
+nobody read, so the session is not in the state a caller would assume, and it
+is cheaper to open a new connection than to work out what it said.
+""".
+-spec usable(conn()) -> boolean().
+usable(#conn{transport = Transport, socket = Socket}) ->
+    case Transport:recv(Socket, 0, 0) of
+        {error, timeout} -> true;
+        _Closed_or_unread -> false
+    end.
 
 -spec noted(minato_protocol:backend(), conn()) -> conn().
 noted({ready_for_query, Status}, #conn{frame_opts = Opts} = Conn) ->

@@ -24,6 +24,7 @@ Skips when no server answers.
     a_rolled_back_transaction_reports_its_reason/1,
     a_connection_given_back_mid_transaction_is_reset/1,
     a_borrower_that_dies_is_replaced/1,
+    a_connection_the_server_ended_is_not_handed_out/1,
     a_checkout_with_nothing_free_waits/1,
     a_checkout_that_waits_too_long_gives_up/1,
     a_pool_with_no_server_stays_up/1,
@@ -55,6 +56,7 @@ all() ->
         a_rolled_back_transaction_reports_its_reason,
         a_connection_given_back_mid_transaction_is_reset,
         a_borrower_that_dies_is_replaced,
+        a_connection_the_server_ended_is_not_handed_out,
         a_checkout_with_nothing_free_waits,
         a_checkout_that_waits_too_long_gives_up,
         a_pool_with_no_server_stays_up,
@@ -484,6 +486,31 @@ schema() ->
     DROP TABLE IF EXISTS minato_pool_rows;
     CREATE TABLE minato_pool_rows (name text PRIMARY KEY)
     """.
+
+-doc """
+A pooled connection can die where nobody is holding it, and nothing says so.
+
+Ending every backend from another session is what a restart or a failover
+looks like from the pool's side: connections that are idle, healthy as far as
+anyone knew, and gone. Before the pool asked, each one was handed out once and
+cost a caller a statement that never reached a server.
+""".
+-spec a_connection_the_server_ended_is_not_handed_out([{atom(), term()}]) -> ok.
+a_connection_the_server_ended_is_not_handed_out(_Config) ->
+    ok = ended_every_other_backend(),
+    Answers = [minato:query(?POOL, ~"SELECT 1", []) || _Each <- lists:seq(1, 6)],
+    ?assertEqual([{ok, one_row} || _Each <- lists:seq(1, 6)], [shaped(A) || A <- Answers]).
+
+shaped({ok, #{rows := [{1}]}}) -> {ok, one_row};
+shaped(Other) -> Other.
+
+ended_every_other_backend() ->
+    {ok, Admin} = minato_conn:connect(connection()),
+    SQL =
+        ~"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
+    {ok, _Result, Used} = minato_query:query(Admin, SQL, []),
+    ok = minato_conn:close(Used),
+    timer:sleep(200).
 
 connection() ->
     #{
