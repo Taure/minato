@@ -154,6 +154,8 @@ over without losing the stream.
     ssl_response/1,
     row/3,
     rows/3,
+    decoder/2,
+    decode_row/2,
     result/2,
     server_error/1,
     bad/3
@@ -280,6 +282,9 @@ table}`.
 -doc "A row returned under `return_rows_as_maps`, keyed by column name.".
 -type row_map() :: #{atom() | binary() => minato_codec:value()}.
 
+-doc "How to read a row, from `decoder/2`.".
+-opaque decoder() :: {boolean(), [{atom() | binary(), minato_codec:decoder()}]}.
+
 -doc "One decoded row, a tuple by default and a `t:row_map/0` under `return_rows_as_maps`.".
 -type row() :: tuple() | row_map().
 
@@ -320,6 +325,7 @@ most PostgreSQL can send asks for `1073741823`.
     field/0,
     fields/0,
     tag/0,
+    decoder/0,
     row/0,
     row_map/0,
     result/0,
@@ -457,19 +463,64 @@ column's bytes do not fit the type the description gave it.
 """.
 -spec row([field()], [binary() | null], opts()) -> row().
 row(Fields, Columns, Opts) ->
+    decode_row(decoder(Fields, Opts), Columns).
+
+-doc """
+Work out how to read a row, once, from the description of its columns.
+
+`row/3` answers the same questions for every row of a result set: what type is
+this column, is it an array, what are the decode options, is the caller taking
+maps, are the keys atoms. None of those change between rows, and a thousand
+rows asked them a thousand times. A decoder answers them once, at the
+`RowDescription`, and `decode_row/2` applies the answer.
+
+`row/3` still exists and now builds one of these per call, which is the right
+cost for a caller decoding a single row.
+""".
+-spec decoder([field()], opts()) -> decoder().
+decoder(Fields, Opts) ->
     CodecOpts = codec_opts(Opts),
-    case maps:get(return_rows_as_maps, Opts, false) of
-        true ->
-            AtomKeys = maps:get(column_name_as_atom, Opts, false),
-            row_map(Fields, Columns, AtomKeys, CodecOpts, #{});
-        false ->
-            list_to_tuple(row_tuple(Fields, Columns, CodecOpts))
-    end.
+    Atoms = maps:get(column_name_as_atom, Opts, false),
+    Columns = [
+        {key(Field, Atoms), minato_codec:decoder(Oid, Format, CodecOpts)}
+     || #{type_oid := Oid, format := Format} = Field <- Fields
+    ],
+    {maps:get(return_rows_as_maps, Opts, false), Columns}.
+
+-doc "Decode one `DataRow`'s columns with a decoder from `decoder/2`.".
+-spec decode_row(decoder(), [binary() | null]) -> row().
+decode_row({false, Columns}, Values) ->
+    list_to_tuple(decoded_tuple(Columns, Values));
+decode_row({true, Columns}, Values) ->
+    decoded_map(Columns, Values, #{}).
+
+-spec decoded_tuple([{atom() | binary(), minato_codec:decoder()}], [binary() | null]) ->
+    [minato_codec:value()].
+decoded_tuple([], []) ->
+    [];
+decoded_tuple([_Column | Columns], [null | Values]) ->
+    [null | decoded_tuple(Columns, Values)];
+decoded_tuple([{_Key, Decoder} | Columns], [Value | Values]) ->
+    [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Values)];
+decoded_tuple(Columns, Values) ->
+    bad(data_row, column_count_mismatch, {length(Columns), length(Values)}).
+
+-spec decoded_map([{atom() | binary(), minato_codec:decoder()}], [binary() | null], row_map()) ->
+    row_map().
+decoded_map([], [], Row) ->
+    Row;
+decoded_map([{Key, _Skipped} | Columns], [null | Values], Row) ->
+    decoded_map(Columns, Values, Row#{Key => null});
+decoded_map([{Key, Decoder} | Columns], [Value | Values], Row) ->
+    decoded_map(Columns, Values, Row#{Key => minato_codec:decode(Decoder, Value)});
+decoded_map(Columns, Values, _Row) ->
+    bad(data_row, column_count_mismatch, {length(Columns), length(Values)}).
 
 -doc "`row/3` over every row of a result set.".
 -spec rows([field()], [[binary() | null]], opts()) -> [row()].
 rows(Fields, Rows, Opts) ->
-    [row(Fields, Columns, Opts) || Columns <- Rows].
+    Decoder = decoder(Fields, Opts),
+    [decode_row(Decoder, Columns) || Columns <- Rows].
 
 -doc """
 Assemble what a completed query produced from its `CommandComplete` tag and its
@@ -543,27 +594,6 @@ remainder(Rest, BufferSize) when
     binary:copy(Rest);
 remainder(Rest, _BufferSize) ->
     Rest.
-
--spec row_tuple([field()], [binary() | null], minato_codec:opts()) -> [minato_codec:value()].
-row_tuple([], [], _CodecOpts) ->
-    [];
-row_tuple([#{type_oid := Oid, format := Format} | Fields], [Column | Columns], CodecOpts) ->
-    [
-        minato_codec:decode(Oid, Column, Format, CodecOpts)
-        | row_tuple(Fields, Columns, CodecOpts)
-    ];
-row_tuple(Fields, Columns, _CodecOpts) ->
-    bad(data_row, column_count_mismatch, {length(Fields), length(Columns)}).
-
--spec row_map([field()], [binary() | null], boolean(), minato_codec:opts(), row_map()) -> row_map().
-row_map([], [], _AtomKeys, _CodecOpts, Acc) ->
-    Acc;
-row_map([Field | Fields], [Column | Columns], AtomKeys, CodecOpts, Acc) ->
-    #{type_oid := Oid, format := Format} = Field,
-    Value = minato_codec:decode(Oid, Column, Format, CodecOpts),
-    row_map(Fields, Columns, AtomKeys, CodecOpts, Acc#{key(Field, AtomKeys) => Value});
-row_map(Fields, Columns, _AtomKeys, _CodecOpts, _Acc) ->
-    bad(data_row, column_count_mismatch, {length(Fields), length(Columns)}).
 
 -spec key(field(), boolean()) -> atom() | binary().
 % elp:ignore W0023 - opt in, and the caller is told what it costs

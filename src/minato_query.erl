@@ -150,7 +150,7 @@ simple(Conn, Sql, Opts) ->
     Decoding = decoding(Opts),
     observed(simple, Sql, fun() ->
         case minato_conn:send(Bounded, {query, Sql}) of
-            ok -> collect(Bounded, Decoding, []);
+            ok -> collect(Bounded, Decoding, minato_protocol:decoder([], Decoding));
             {error, Reason} -> {error, Reason}
         end
     end).
@@ -450,7 +450,7 @@ run(Conn, #statement{} = Statement, Parameters, Opts) ->
         {bind, ?UNNAMED, Name, [minato_codec:preferred_format(Oid) || Oid <- Oids], Encoded,
             Formats},
     case minato_conn:send(Conn, [Bind, {execute, ?UNNAMED, 0}, sync]) of
-        ok -> executed(Conn, Fields, Opts);
+        ok -> executed(Conn, minato_protocol:decoder(Fields, Opts), Opts);
         {error, Reason} -> {error, Reason}
     end.
 
@@ -472,16 +472,16 @@ encoded([Oid | Oids], [Value | Values], Opts) ->
 codec_opts(Opts) ->
     maps:with([uuid_format, datetime_format, numeric_format], Opts).
 
--spec executed(conn(), [minato_protocol:field()], minato_protocol:opts()) ->
+-spec executed(conn(), minato_protocol:decoder(), minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-executed(Conn, Fields, Opts) ->
+executed(Conn, Decoder, Opts) ->
     case minato_conn:next(Conn) of
         {ok, {data_row, Columns}, Read} ->
-            keep(minato_protocol:row(Fields, Columns, Opts), executed(Read, Fields, Opts));
+            keep(minato_protocol:decode_row(Decoder, Columns), executed(Read, Decoder, Opts));
         {ok, {command_complete, Complete}, Read} ->
-            stamp(Complete, executed(Read, Fields, Opts));
+            stamp(Complete, executed(Read, Decoder, Opts));
         {ok, empty_query_response, Read} ->
-            stamp({empty, undefined}, executed(Read, Fields, Opts));
+            stamp({empty, undefined}, executed(Read, Decoder, Opts));
         {ok, {ready_for_query, _Status}, Read} ->
             {ok, minato_protocol:result({unknown, undefined}, []), Read};
         {ok, {error_response, Reported}, Read} ->
@@ -493,7 +493,7 @@ executed(Conn, Fields, Opts) ->
         ->
             unexpected(Message, execute);
         {ok, _Message, Read} ->
-            executed(Read, Fields, Opts);
+            executed(Read, Decoder, Opts);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -516,24 +516,24 @@ stamp(_Complete, Failed) ->
 %% The simple protocol
 %%----------------------------------------------------------------------
 
--spec collect(conn(), minato_protocol:opts(), [minato_protocol:field()]) ->
+-spec collect(conn(), minato_protocol:opts(), minato_protocol:decoder()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
-collect(Conn, Opts, Fields) ->
+collect(Conn, Opts, Decoder) ->
     case minato_conn:next(Conn) of
         {ok, {row_description, Described}, Read} ->
-            collect(Read, Opts, Described);
+            collect(Read, Opts, minato_protocol:decoder(Described, Opts));
         {ok, {data_row, Columns}, Read} ->
-            first(minato_protocol:row(Fields, Columns, Opts), collect(Read, Opts, Fields));
+            first(minato_protocol:decode_row(Decoder, Columns), collect(Read, Opts, Decoder));
         {ok, {command_complete, Complete}, Read} ->
-            began(Complete, collect(Read, Opts, []));
+            began(Complete, collect(Read, Opts, Decoder));
         {ok, empty_query_response, Read} ->
-            began({empty, undefined}, collect(Read, Opts, []));
+            began({empty, undefined}, collect(Read, Opts, Decoder));
         {ok, {ready_for_query, _Status}, Read} ->
             {ok, [], Read};
         {ok, {error_response, Reported}, Read} ->
-            refused({pgsql_error, Reported}, collect(Read, Opts, []));
+            refused({pgsql_error, Reported}, collect(Read, Opts, Decoder));
         {ok, _Message, Read} ->
-            collect(Read, Opts, Fields);
+            collect(Read, Opts, Decoder);
         {error, Reason} ->
             {error, Reason}
     end.
