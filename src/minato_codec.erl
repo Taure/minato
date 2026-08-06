@@ -130,9 +130,19 @@ and the array type of each of them.
 -doc "The map carried by an `error({minato_codec, Report})` exception.".
 -type report() :: #{type := term(), reason := term(), value := term()}.
 
--doc "One column's type resolution, from `decoder/3`.".
+-doc """
+One column's type resolution, from `decoder/3`.
+
+The tag names the codec module rather than the shape of the type, because
+choosing between them is the only work left once the name is known, and a
+result set asks the same question once per value. Resolving it here means
+`decode/2` is one call rather than a walk through every name that needs a
+codec of its own.
+""".
 -opaque decoder() ::
     {scalar, minato_oid:name(), format(), opts()}
+    | {numeric, format(), opts()}
+    | {datetime, date | time | timestamp | timestamptz, format(), opts()}
     | {array, minato_oid:oid(), format(), opts()}
     | {unknown, minato_oid:oid(), format()}.
 
@@ -203,15 +213,33 @@ decoder(Oid, Format, Opts) ->
     case minato_oid:name(Oid) of
         undefined -> {unknown, Oid, Format};
         {array, _Element} -> {array, Oid, Format, Opts};
-        Name -> {scalar, Name, Format, Opts}
+        Name -> resolved(Name, Format, Opts)
     end.
+
+-spec resolved(minato_oid:name(), format(), opts()) -> decoder().
+resolved(numeric, Format, Opts) ->
+    {numeric, Format, Opts};
+resolved(Name, Format, Opts) when
+    Name =:= date; Name =:= time; Name =:= timestamp; Name =:= timestamptz
+->
+    {datetime, Name, Format, Opts};
+resolved(Name, Format, Opts) ->
+    {scalar, Name, Format, Opts}.
 
 -doc "Decode one value with a decoder from `decoder/3`.".
 -spec decode(decoder(), binary() | null) -> value().
-decode(_Decoder, null) -> null;
-decode({scalar, Name, Format, Opts}, Bin) -> decode_named(Name, Bin, Format, Opts);
-decode({array, Oid, Format, Opts}, Bin) -> minato_codec_array:decode(Oid, Bin, Format, Opts);
-decode({unknown, Oid, Format}, Bin) -> decode_unknown(Oid, Bin, Format).
+decode(_Decoder, null) ->
+    null;
+decode({scalar, Name, Format, Opts}, Bin) ->
+    minato_codec_scalar:decode(Name, Bin, Format, Opts);
+decode({numeric, Format, Opts}, Bin) ->
+    minato_codec_numeric:decode(numeric, Bin, Format, Opts);
+decode({datetime, Name, Format, Opts}, Bin) ->
+    minato_codec_datetime:decode(Name, Bin, Format, Opts);
+decode({array, Oid, Format, Opts}, Bin) ->
+    minato_codec_array:decode(Oid, Bin, Format, Opts);
+decode({unknown, Oid, Format}, Bin) ->
+    decode_unknown(Oid, Bin, Format).
 
 -doc "Whether minato has a codec for this OID.".
 -spec supports(minato_oid:oid()) -> boolean().
