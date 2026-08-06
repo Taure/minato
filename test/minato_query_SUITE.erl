@@ -41,7 +41,9 @@ Skips when no server answers.
     a_transaction_survives_a_cancelled_statement/1,
     a_second_statement_is_not_decoded_with_the_first_ones_plan/1,
     a_failed_statement_does_not_leave_a_decoder_behind/1,
-    a_simple_query_after_a_row_returning_one_is_decoded_correctly/1
+    a_simple_query_after_a_row_returning_one_is_decoded_correctly/1,
+    each_statement_of_a_simple_query_is_decoded_with_its_own_columns/1,
+    a_simple_query_mixing_shapes_and_nulls_decodes_each_statement/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -70,7 +72,9 @@ all() ->
         a_transaction_survives_a_cancelled_statement,
         a_second_statement_is_not_decoded_with_the_first_ones_plan,
         a_failed_statement_does_not_leave_a_decoder_behind,
-        a_simple_query_after_a_row_returning_one_is_decoded_correctly
+        a_simple_query_after_a_row_returning_one_is_decoded_correctly,
+        each_statement_of_a_simple_query_is_decoded_with_its_own_columns,
+        a_simple_query_mixing_shapes_and_nulls_decodes_each_statement
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -125,6 +129,28 @@ a_simple_query_after_a_row_returning_one_is_decoded_correctly(Config) ->
     {ok, _Result, Read} = minato_query:query(conn(Config), ~"SELECT 1, 'ok'", []),
     {ok, [Simple], _Conn} = minato_query:simple(Read, ~"SELECT 'plain', 9"),
     ?assertMatch(#{rows := [{~"plain", 9}]}, Simple).
+
+-spec each_statement_of_a_simple_query_is_decoded_with_its_own_columns([{atom(), term()}]) -> ok.
+each_statement_of_a_simple_query_is_decoded_with_its_own_columns(Config) ->
+    SQL = ~"SELECT 1, 'one'; SELECT 'two', 2, true; SELECT 3.5::float8; SELECT 4",
+    {ok, Results, _Conn} = minato_query:simple(conn(Config), SQL),
+    ?assertEqual(
+        [[{1, ~"one"}], [{~"two", 2, true}], [{3.5}], [{4}]],
+        [Rows || #{rows := Rows} <- Results]
+    ).
+
+-spec a_simple_query_mixing_shapes_and_nulls_decodes_each_statement([{atom(), term()}]) -> ok.
+a_simple_query_mixing_shapes_and_nulls_decodes_each_statement(Config) ->
+    Wide = ~"SELECT g, repeat('x', 4) FROM generate_series(1, 200) g; ",
+    Nulls = ~"SELECT NULL::int4, NULL::text; ",
+    Narrow = ~"SELECT g::int8 FROM generate_series(1, 200) g",
+    SQL = <<Wide/binary, Nulls/binary, Narrow/binary>>,
+    {ok, [First, Middle, Last], _Conn} = minato_query:simple(conn(Config), SQL),
+    ?assertEqual(200, length(maps:get(rows, First))),
+    ?assertEqual({1, ~"xxxx"}, hd(maps:get(rows, First))),
+    ?assertEqual([{null, null}], maps:get(rows, Middle)),
+    ?assertEqual(200, length(maps:get(rows, Last))),
+    ?assertEqual({200}, lists:last(maps:get(rows, Last))).
 
 -spec a_simple_query_returns_rows([{atom(), term()}]) -> ok.
 a_simple_query_returns_rows(Config) ->

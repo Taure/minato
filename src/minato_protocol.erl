@@ -321,7 +321,9 @@ and defaults to 64 MiB. See the module documentation for what it is for and when
 to raise it. There is no value that turns the bound off; a caller that wants the
 most PostgreSQL can send asks for `1073741823`.
 """.
--type frame_opts() :: #{max_message_length => pos_integer(), decoder => decoder()}.
+-type frame_opts() :: #{
+    max_message_length => pos_integer(), decoder => decoder(), decode_opts => opts()
+}.
 
 -doc "The map carried by an `error({minato_protocol, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
@@ -430,7 +432,12 @@ has to clear it. `m:minato_conn` does that through `minato_conn:decoding/2`.
 """.
 -spec frame(binary(), frame_opts()) -> {[backend()], binary()}.
 frame(Buffer, Opts) ->
-    framed(Buffer, max_message_length(Opts), maps:get(decoder, Opts, undefined)).
+    framed(
+        Buffer,
+        max_message_length(Opts),
+        maps:get(decoder, Opts, undefined),
+        maps:get(decode_opts, Opts, undefined)
+    ).
 
 -doc """
 The bound `frame/2` and `decode/2` will apply to these options.
@@ -679,30 +686,44 @@ bad(Message, Reason, Data) ->
 
 -spec framed(binary(), pos_integer()) -> {[backend()], binary()}.
 framed(Buffer, Max) ->
-    framed(Buffer, Max, undefined).
+    framed(Buffer, Max, undefined, undefined).
 
--spec framed(binary(), pos_integer(), decoder() | undefined) -> {[backend()], binary()}.
-framed(Buffer, Max, Decoder) ->
-    {Messages, Rest} = messages(Buffer, Max, Decoder),
+-spec framed(binary(), pos_integer(), decoder() | undefined, opts() | undefined) ->
+    {[backend()], binary()}.
+framed(Buffer, Max, Decoder, DecodeOpts) ->
+    {Messages, Rest} = messages(Buffer, Max, Decoder, DecodeOpts),
     {Messages, remainder(Rest, byte_size(Buffer))}.
 
--spec messages(binary(), pos_integer(), decoder() | undefined) -> {[backend()], binary()}.
-messages(<<$D, _/binary>> = Buffer, Max, Decoder) when Decoder =/= undefined ->
+-spec messages(binary(), pos_integer(), decoder() | undefined, opts() | undefined) ->
+    {[backend()], binary()}.
+messages(<<$D, _/binary>> = Buffer, Max, Decoder, DecodeOpts) when Decoder =/= undefined ->
     case run(Buffer, Max, Decoder) of
         {[], _Rest} ->
             {[], Buffer};
         {Run, Rest} ->
-            {Messages, Remaining} = messages(Rest, Max, Decoder),
+            {Messages, Remaining} = messages(Rest, Max, Decoder, DecodeOpts),
             {[{rows, Run} | Messages], Remaining}
     end;
-messages(Buffer, Max, Decoder) ->
+messages(Buffer, Max, Decoder, DecodeOpts) ->
     case message(Buffer, Max) of
         {ok, Message, Rest} ->
-            {Messages, Remaining} = messages(Rest, Max, Decoder),
+            Next = following(Message, Decoder, DecodeOpts),
+            {Messages, Remaining} = messages(Rest, Max, Next, DecodeOpts),
             {[Message | Messages], Remaining};
         incomplete ->
             {[], Buffer}
     end.
+
+-doc false.
+-spec following(backend(), decoder() | undefined, opts() | undefined) -> decoder() | undefined.
+following(_Message, Decoder, undefined) ->
+    Decoder;
+following({row_description, Fields}, _Decoder, DecodeOpts) ->
+    decoder(Fields, DecodeOpts);
+following({command_complete, _Tag}, _Decoder, _DecodeOpts) ->
+    undefined;
+following(_Message, Decoder, _DecodeOpts) ->
+    Decoder.
 
 -spec run(binary(), pos_integer(), decoder()) -> {[row()], binary()}.
 run(<<$D, Length:32/signed, _/binary>>, Max, _Decoder) when Length > Max ->

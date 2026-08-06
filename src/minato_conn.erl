@@ -86,6 +86,7 @@ the server issued is the whole of the authorisation.
     next/1,
     next/2,
     decoding/2,
+    decoding_opts/2,
     activate/1,
     deactivate/1,
     handle_message/2,
@@ -394,11 +395,40 @@ decoding(#conn{frame_opts = Opts} = Conn, undefined) ->
 decoding(#conn{frame_opts = Opts} = Conn, Decoder) ->
     Conn#conn{frame_opts = Opts#{decoder => Decoder}}.
 
+-doc """
+Build a decoder from each `RowDescription` that arrives, with `Opts`, or stop.
+
+`decoding/2` is for a statement whose columns are known before its rows are
+read. A simple query is not that: it may carry several statements, each
+describing its own columns partway through the stream. Setting a decoder from
+the layer above cannot work there, because the rows of the next statement may
+already have been framed by the time that layer sees the description. Framing
+therefore rebuilds the decoder itself as it passes each one, and drops it at
+the `CommandComplete` that ends the statement.
+""".
+-spec decoding_opts(conn(), minato_protocol:opts() | undefined) -> conn().
+decoding_opts(#conn{frame_opts = Opts} = Conn, undefined) ->
+    Conn#conn{frame_opts = maps:remove(decode_opts, maps:remove(decoder, Opts))};
+decoding_opts(#conn{frame_opts = Opts} = Conn, DecodeOpts) ->
+    Conn#conn{frame_opts = Opts#{decode_opts => DecodeOpts}}.
+
 -spec noted(minato_protocol:backend(), conn()) -> conn().
-noted({ready_for_query, Status}, Conn) ->
-    Conn#conn{status = Status};
+noted({ready_for_query, Status}, #conn{frame_opts = Opts} = Conn) ->
+    Conn#conn{status = Status, frame_opts = maps:remove(decoder, Opts)};
+noted({row_description, Fields}, #conn{frame_opts = Opts} = Conn) ->
+    described(Fields, maps:get(decode_opts, Opts, undefined), Conn);
+noted({command_complete, _Tag}, #conn{frame_opts = #{decode_opts := _} = Opts} = Conn) ->
+    Conn#conn{frame_opts = maps:remove(decoder, Opts)};
 noted(_Message, Conn) ->
     Conn.
+
+-spec described(
+    [minato_protocol:field()], minato_protocol:opts() | undefined, conn()
+) -> conn().
+described(_Fields, undefined, Conn) ->
+    Conn;
+described(Fields, DecodeOpts, #conn{frame_opts = Opts} = Conn) ->
+    Conn#conn{frame_opts = Opts#{decoder => minato_protocol:decoder(Fields, DecodeOpts)}}.
 
 -spec budget(conn(), timeout()) -> timeout().
 budget(#conn{deadline = infinity}, Timeout) ->
