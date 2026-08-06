@@ -483,21 +483,23 @@ decoding(Conn, [], _Opts) ->
 decoding(Conn, Fields, Opts) ->
     minato_conn:decoding(Conn, minato_protocol:decoder(Fields, Opts)).
 
--spec executed(conn(), minato_protocol:decoder(), [minato_protocol:row()], minato_protocol:tag()) ->
+-spec executed(
+    conn(), minato_protocol:decoder(), [[minato_protocol:row()]], minato_protocol:tag()
+) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-executed(Conn, Decoder, Rows, Tag) ->
+executed(Conn, Decoder, Runs, Tag) ->
     case minato_conn:next(Conn) of
         {ok, {rows, Run}, Read} ->
-            executed(Read, Decoder, reversed(Run, Rows), Tag);
+            executed(Read, Decoder, [Run | Runs], Tag);
         {ok, {data_row, Columns}, Read} ->
             Row = minato_protocol:decode_row(Decoder, Columns),
-            executed(Read, Decoder, [Row | Rows], Tag);
+            executed(Read, Decoder, [[Row] | Runs], Tag);
         {ok, {command_complete, Complete}, Read} ->
-            executed(Read, Decoder, Rows, Complete);
+            executed(Read, Decoder, Runs, Complete);
         {ok, empty_query_response, Read} ->
-            executed(Read, Decoder, Rows, {empty, undefined});
+            executed(Read, Decoder, Runs, {empty, undefined});
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, minato_protocol:result(Tag, reversed(Rows, [])), plain(Read)};
+            {ok, minato_protocol:result(Tag, joined(Runs, [])), plain(Read)};
         {ok, {error_response, Reported}, Read} ->
             failed(plain(Read), {pgsql_error, Reported});
         {ok, Message, _Read} when
@@ -507,7 +509,7 @@ executed(Conn, Decoder, Rows, Tag) ->
         ->
             unexpected(Message, execute);
         {ok, _Message, Read} ->
-            executed(Read, Decoder, Rows, Tag);
+            executed(Read, Decoder, Runs, Tag);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -568,6 +570,12 @@ finished(Conn, _Results, Failure) ->
 -spec plain(conn()) -> conn().
 plain(Conn) ->
     minato_conn:decoding(Conn, undefined).
+
+-spec joined([[Item]], [Item]) -> [Item].
+joined([], Rows) ->
+    Rows;
+joined([Run | Runs], Rows) ->
+    joined(Runs, Run ++ Rows).
 
 -spec reversed([Item], [Item]) -> [Item].
 reversed([], Acc) ->
