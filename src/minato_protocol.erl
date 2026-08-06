@@ -209,6 +209,7 @@ over without losing the stream.
     | {ready_for_query, transaction_status()}
     | {row_description, [field()]}
     | {data_row, Payload :: binary()}
+    | {rows, [row()]}
     | {command_complete, tag()}
     | empty_query_response
     | {error_response, fields()}
@@ -320,7 +321,7 @@ and defaults to 64 MiB. See the module documentation for what it is for and when
 to raise it. There is no value that turns the bound off; a caller that wants the
 most PostgreSQL can send asks for `1073741823`.
 """.
--type frame_opts() :: #{max_message_length => pos_integer()}.
+-type frame_opts() :: #{max_message_length => pos_integer(), decoder => decoder()}.
 
 -doc "The map carried by an `error({minato_protocol, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
@@ -413,10 +414,23 @@ Where a message list is split across calls makes no difference to what comes
 out: framing a buffer, then framing its remainder prepended to the next read,
 gives the same messages in the same order as framing the whole stream at once,
 whatever byte boundaries the reads happened to fall on.
+
+With a `decoder` in `Opts`, a contiguous run of `DataRow` messages comes back
+as one `{rows, Rows}` message with the rows already decoded, instead of one
+`{data_row, Payload}` for each. A result set is mostly such a run, and framing
+it into a list for the layer above to walk again costs an allocation and a
+traversal per row. Anything that is not a row is unaffected, and a run is ended
+by the first message that is not one, so a `NoticeResponse` arriving between
+rows splits the run rather than being swallowed by it.
+
+The decoder describes one statement's rows. Framing a different statement's
+rows with it would decode them against the wrong plan, which is wrong data
+rather than an error, so a reader that keeps frame options across statements
+has to clear it. `m:minato_conn` does that through `minato_conn:decoding/2`.
 """.
 -spec frame(binary(), frame_opts()) -> {[backend()], binary()}.
 frame(Buffer, Opts) ->
-    framed(Buffer, max_message_length(Opts)).
+    framed(Buffer, max_message_length(Opts), maps:get(decoder, Opts, undefined)).
 
 -doc """
 The bound `frame/2` and `decode/2` will apply to these options.
@@ -665,18 +679,50 @@ bad(Message, Reason, Data) ->
 
 -spec framed(binary(), pos_integer()) -> {[backend()], binary()}.
 framed(Buffer, Max) ->
-    {Messages, Rest} = messages(Buffer, Max),
+    framed(Buffer, Max, undefined).
+
+-spec framed(binary(), pos_integer(), decoder() | undefined) -> {[backend()], binary()}.
+framed(Buffer, Max, Decoder) ->
+    {Messages, Rest} = messages(Buffer, Max, Decoder),
     {Messages, remainder(Rest, byte_size(Buffer))}.
 
--spec messages(binary(), pos_integer()) -> {[backend()], binary()}.
-messages(Buffer, Max) ->
+-spec messages(binary(), pos_integer(), decoder() | undefined) -> {[backend()], binary()}.
+messages(<<$D, _/binary>> = Buffer, Max, Decoder) when Decoder =/= undefined ->
+    case run(Buffer, Max, Decoder) of
+        {[], _Rest} ->
+            {[], Buffer};
+        {Run, Rest} ->
+            {Messages, Remaining} = messages(Rest, Max, Decoder),
+            {[{rows, Run} | Messages], Remaining}
+    end;
+messages(Buffer, Max, Decoder) ->
     case message(Buffer, Max) of
         {ok, Message, Rest} ->
-            {Messages, Remaining} = messages(Rest, Max),
+            {Messages, Remaining} = messages(Rest, Max, Decoder),
             {[Message | Messages], Remaining};
         incomplete ->
             {[], Buffer}
     end.
+
+-spec run(binary(), pos_integer(), decoder()) -> {[row()], binary()}.
+run(<<$D, Length:32/signed, _/binary>>, Max, _Decoder) when Length > Max ->
+    bad(header, message_too_long, {$D, Length, Max});
+run(<<$D, Length:32/signed, _/binary>>, _Max, _Decoder) when
+    Length < ?SMALLEST_MESSAGE_LENGTH
+->
+    bad(header, length_below_minimum, {$D, Length});
+run(<<$D, Length:32/signed, Body/binary>> = Buffer, Max, Decoder) ->
+    Size = Length - ?SMALLEST_MESSAGE_LENGTH,
+    case Body of
+        <<Payload:Size/binary, Tail/binary>> ->
+            Row = decode_row(Decoder, Payload),
+            {Rows, Remaining} = run(Tail, Max, Decoder),
+            {[Row | Rows], Remaining};
+        _ ->
+            {[], Buffer}
+    end;
+run(Buffer, _Max, _Decoder) ->
+    {[], Buffer}.
 
 -spec message(binary(), pos_integer()) -> {ok, backend(), binary()} | incomplete.
 message(<<Type, Length:32/signed, _/binary>>, Max) when Length > Max ->

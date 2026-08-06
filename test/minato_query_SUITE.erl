@@ -38,7 +38,10 @@ Skips when no server answers.
     a_statement_past_its_deadline_is_cancelled/1,
     a_cancelled_statement_leaves_the_connection_usable/1,
     the_connection_timeout_is_the_default_deadline/1,
-    a_transaction_survives_a_cancelled_statement/1
+    a_transaction_survives_a_cancelled_statement/1,
+    a_second_statement_is_not_decoded_with_the_first_ones_plan/1,
+    a_failed_statement_does_not_leave_a_decoder_behind/1,
+    a_simple_query_after_a_row_returning_one_is_decoded_correctly/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -64,7 +67,10 @@ all() ->
         a_statement_past_its_deadline_is_cancelled,
         a_cancelled_statement_leaves_the_connection_usable,
         the_connection_timeout_is_the_default_deadline,
-        a_transaction_survives_a_cancelled_statement
+        a_transaction_survives_a_cancelled_statement,
+        a_second_statement_is_not_decoded_with_the_first_ones_plan,
+        a_failed_statement_does_not_leave_a_decoder_behind,
+        a_simple_query_after_a_row_returning_one_is_decoded_correctly
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -97,6 +103,28 @@ init_per_testcase(_Case, Config) ->
 -spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
 end_per_testcase(_Case, Config) ->
     minato_conn:close(conn(Config)).
+
+-spec a_second_statement_is_not_decoded_with_the_first_ones_plan([{atom(), term()}]) -> ok.
+a_second_statement_is_not_decoded_with_the_first_ones_plan(Config) ->
+    {ok, First, Read} = minato_query:query(conn(Config), ~"SELECT 1, 'ok'", []),
+    ?assertMatch(#{rows := [{1, ~"ok"}]}, First),
+    {ok, Second, Next} = minato_query:query(Read, ~"SELECT 'text', 2, true", []),
+    ?assertMatch(#{rows := [{~"text", 2, true}]}, Second),
+    {ok, Third, _Conn} = minato_query:query(Next, ~"SELECT 3.5::float8", []),
+    ?assertMatch(#{rows := [{3.5}]}, Third).
+
+-spec a_failed_statement_does_not_leave_a_decoder_behind([{atom(), term()}]) -> ok.
+a_failed_statement_does_not_leave_a_decoder_behind(Config) ->
+    {ok, _First, Read} = minato_query:query(conn(Config), ~"SELECT 1, 'ok'", []),
+    {error, {pgsql_error, _Fields}, Recovered} = minato_query:query(Read, ~"SELECT nope", []),
+    {ok, After, _Conn} = minato_query:query(Recovered, ~"SELECT 'text', 2", []),
+    ?assertMatch(#{rows := [{~"text", 2}]}, After).
+
+-spec a_simple_query_after_a_row_returning_one_is_decoded_correctly([{atom(), term()}]) -> ok.
+a_simple_query_after_a_row_returning_one_is_decoded_correctly(Config) ->
+    {ok, _Result, Read} = minato_query:query(conn(Config), ~"SELECT 1, 'ok'", []),
+    {ok, [Simple], _Conn} = minato_query:simple(Read, ~"SELECT 'plain', 9"),
+    ?assertMatch(#{rows := [{~"plain", 9}]}, Simple).
 
 -spec a_simple_query_returns_rows([{atom(), term()}]) -> ok.
 a_simple_query_returns_rows(Config) ->

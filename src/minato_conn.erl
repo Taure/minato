@@ -85,6 +85,7 @@ the server issued is the whole of the authorisation.
     send/2,
     next/1,
     next/2,
+    decoding/2,
     activate/1,
     deactivate/1,
     handle_message/2,
@@ -374,6 +375,24 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
             Read = Conn#conn{buffer = Remainder, pending = Rest},
             {ok, Message, noted(Message, Read)}
     end.
+
+-doc """
+Decode data rows as they are framed, with `Decoder`, or stop doing so.
+
+A result set arrives as a run of `DataRow` messages, and framing them into a
+list only for the layer above to walk that list again costs an allocation and a
+traversal per row. With a decoder set, a contiguous run comes back as one
+`{rows, Rows}` message with the rows already decoded.
+
+The decoder belongs to one statement's result, so it must be cleared before the
+connection is used for anything else. A decoder left behind would be applied to
+the next statement's rows, which is wrong data rather than an error.
+""".
+-spec decoding(conn(), minato_protocol:decoder() | undefined) -> conn().
+decoding(#conn{frame_opts = Opts} = Conn, undefined) ->
+    Conn#conn{frame_opts = maps:remove(decoder, Opts)};
+decoding(#conn{frame_opts = Opts} = Conn, Decoder) ->
+    Conn#conn{frame_opts = Opts#{decoder => Decoder}}.
 
 -spec noted(minato_protocol:backend(), conn()) -> conn().
 noted({ready_for_query, Status}, Conn) ->

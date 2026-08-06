@@ -450,7 +450,7 @@ run(Conn, #statement{} = Statement, Parameters, Opts) ->
         {bind, ?UNNAMED, Name, [minato_codec:preferred_format(Oid) || Oid <- Oids], Encoded,
             Formats},
     case minato_conn:send(Conn, [Bind, {execute, ?UNNAMED, 0}, sync]) of
-        ok -> executed(Conn, minato_protocol:decoder(Fields, Opts), Opts);
+        ok -> executed(decoding(Conn, Fields, Opts), minato_protocol:decoder(Fields, Opts), Opts);
         {error, Reason} -> {error, Reason}
     end.
 
@@ -477,10 +477,18 @@ codec_opts(Opts) ->
 executed(Conn, Decoder, _Opts) ->
     executed(Conn, Decoder, [], {unknown, undefined}).
 
+-spec decoding(conn(), [minato_protocol:field()], minato_protocol:opts()) -> conn().
+decoding(Conn, [], _Opts) ->
+    Conn;
+decoding(Conn, Fields, Opts) ->
+    minato_conn:decoding(Conn, minato_protocol:decoder(Fields, Opts)).
+
 -spec executed(conn(), minato_protocol:decoder(), [minato_protocol:row()], minato_protocol:tag()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 executed(Conn, Decoder, Rows, Tag) ->
     case minato_conn:next(Conn) of
+        {ok, {rows, Run}, Read} ->
+            executed(Read, Decoder, reversed(Run, Rows), Tag);
         {ok, {data_row, Columns}, Read} ->
             Row = minato_protocol:decode_row(Decoder, Columns),
             executed(Read, Decoder, [Row | Rows], Tag);
@@ -489,9 +497,9 @@ executed(Conn, Decoder, Rows, Tag) ->
         {ok, empty_query_response, Read} ->
             executed(Read, Decoder, Rows, {empty, undefined});
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, minato_protocol:result(Tag, reversed(Rows, [])), Read};
+            {ok, minato_protocol:result(Tag, reversed(Rows, [])), plain(Read)};
         {ok, {error_response, Reported}, Read} ->
-            failed(Read, {pgsql_error, Reported});
+            failed(plain(Read), {pgsql_error, Reported});
         {ok, Message, _Read} when
             Message =:= parse_complete;
             Message =:= no_data;
@@ -511,7 +519,7 @@ executed(Conn, Decoder, Rows, Tag) ->
 -spec collect(conn(), minato_protocol:opts(), minato_protocol:decoder()) ->
     {ok, [result()], conn()} | {error, error(), conn()} | {error, error()}.
 collect(Conn, Opts, Decoder) ->
-    collect(Conn, Opts, Decoder, [], [], undefined).
+    collect(plain(Conn), Opts, Decoder, [], [], undefined).
 
 -spec collect(
     conn(),
@@ -526,6 +534,8 @@ collect(Conn, Opts, Decoder, Rows, Results, Failure) ->
     case minato_conn:next(Conn) of
         {ok, {row_description, Described}, Read} ->
             collect(Read, Opts, minato_protocol:decoder(Described, Opts), Rows, Results, Failure);
+        {ok, {rows, Run}, Read} ->
+            collect(Read, Opts, Decoder, reversed(Run, Rows), Results, Failure);
         {ok, {data_row, Columns}, Read} ->
             Row = minato_protocol:decode_row(Decoder, Columns),
             collect(Read, Opts, Decoder, [Row | Rows], Results, Failure);
@@ -554,6 +564,10 @@ finished(Conn, Results, undefined) ->
     {ok, reversed(Results, []), Conn};
 finished(Conn, _Results, Failure) ->
     {error, Failure, Conn}.
+
+-spec plain(conn()) -> conn().
+plain(Conn) ->
+    minato_conn:decoding(Conn, undefined).
 
 -spec reversed([Item], [Item]) -> [Item].
 reversed([], Acc) ->
