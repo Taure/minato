@@ -133,6 +133,7 @@ the server issued is the whole of the authorisation.
     frame_opts :: minato_protocol:frame_opts(),
     opened :: integer(),
     statements = #{} :: #{binary() => term()},
+    prefix :: binary() | undefined,
     prepared = 0 :: non_neg_integer(),
     limit :: non_neg_integer(),
     opts :: opts()
@@ -607,12 +608,28 @@ Take the next statement name this connection has room for, or `undefined`.
 Names never repeat, even after `forget/2`, because the statement a forgotten
 name refers to may still be parsed on the server, and parsing a second one under
 the same name is an error rather than a replacement.
+
+The name carries a random per-connection prefix, so it is unique to this
+connection rather than to a position in a sequence. A bare counter is only
+unique *within* one connection, which is enough exactly as long as one
+connection means one backend - and behind a transaction pooler it does not.
+PgBouncer and friends multiplex many connections onto few backends, so two
+connections both counting from zero hand the same backend `minato_30` twice and
+the second one is refused with `42P05`, `prepared statement already exists`.
+
+That failure is vicious in the field: which query dies depends on which server
+connection the pooler handed out, so it looks random, it moves between
+deployments sharing a pooler, and it clears and returns on its own. It cost a
+real production investigation (Taure/minato#40, widgrensit/asobi#419). Eight
+random bytes make it impossible instead of unlikely - a counter that only has
+to be unique per connection stays a counter, and the prefix does the rest.
 """.
 -spec claim(conn()) -> {binary() | undefined, conn()}.
 claim(#conn{prepared = Prepared, limit = Limit} = Conn) when Prepared >= Limit ->
     {undefined, Conn};
-claim(#conn{prepared = Prepared} = Conn) ->
-    {<<"minato_", (integer_to_binary(Prepared))/binary>>, Conn#conn{prepared = Prepared + 1}}.
+claim(#conn{prefix = Prefix, prepared = Prepared} = Conn) ->
+    Name = <<"minato_", Prefix/binary, "_", (integer_to_binary(Prepared))/binary>>,
+    {Name, Conn#conn{prepared = Prepared + 1}}.
 
 -doc """
 Drop what was kept under this SQL.
@@ -780,6 +797,7 @@ new(Transport, Socket, Opts) ->
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
         grace = maps:get(cancel_timeout, Opts, ?DEFAULT_CANCEL_TIMEOUT),
         limit = maps:get(prepared_statements, Opts, ?DEFAULT_STATEMENTS),
+        prefix = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         opts = maps:remove(password, Opts)
     }.
