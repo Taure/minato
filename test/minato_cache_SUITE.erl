@@ -30,7 +30,8 @@ Skips when no server answers.
     a_schema_change_under_a_cached_plan_is_recovered/1,
     a_full_cache_falls_back_to_unnamed/1,
     caching_can_be_turned_off/1,
-    a_pool_query_parses_each_statement_once/1
+    a_pool_query_parses_each_statement_once/1,
+    two_connections_never_claim_the_same_name/1
 ]).
 
 -define(TIMEOUT, 15000).
@@ -45,7 +46,8 @@ all() ->
         a_schema_change_under_a_cached_plan_is_recovered,
         a_full_cache_falls_back_to_unnamed,
         caching_can_be_turned_off,
-        a_pool_query_parses_each_statement_once
+        a_pool_query_parses_each_statement_once,
+        two_connections_never_claim_the_same_name
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -83,7 +85,7 @@ the_same_sql_is_parsed_once(_Config) ->
     {ok, #{rows := [{1}]}, First} = minato_query:cached(Conn, Sql, [1]),
     {ok, #{rows := [{2}]}, Second} = minato_query:cached(First, Sql, [2]),
     {ok, #{rows := [{3}]}, Third} = minato_query:cached(Second, Sql, [3]),
-    ?assertEqual([~"minato_0"], parsed(Third)),
+    ?assertEqual([~"0"], counters(Third)),
     ?assertEqual({1, 64}, minato_conn:statements(Third)),
     ok = minato_conn:close(Third).
 
@@ -92,8 +94,32 @@ different_sql_gets_different_names(_Config) ->
     {ok, Conn} = minato_conn:connect(connection(#{})),
     {ok, _One, First} = minato_query:cached(Conn, ~"SELECT 1", []),
     {ok, _Two, Second} = minato_query:cached(First, ~"SELECT 2", []),
-    ?assertEqual([~"minato_0", ~"minato_1"], parsed(Second)),
+    ?assertEqual([~"0", ~"1"], counters(Second)),
     ok = minato_conn:close(Second).
+
+%% Taure/minato#40. A counter alone is unique within one connection, which is
+%% enough only while one connection means one backend. Behind a transaction
+%% pooler it does not: many connections share few backends, so two of them
+%% counting from zero hand the same backend `minato_30` twice and the second is
+%% refused with 42P05. There is no pooler in this suite, so the property to pin
+%% is the one that makes a pooler safe - two connections, same SQL, same
+%% position in each one's sequence, and still different names on the wire.
+-spec two_connections_never_claim_the_same_name([{atom(), term()}]) -> ok.
+two_connections_never_claim_the_same_name(_Config) ->
+    Sql = ~"SELECT $1::int4",
+    {ok, A0} = minato_conn:connect(connection(#{})),
+    {ok, B0} = minato_conn:connect(connection(#{})),
+    {ok, _, A} = minato_query:cached(A0, Sql, [1]),
+    {ok, _, B} = minato_query:cached(B0, Sql, [1]),
+
+    [NameA] = parsed(A),
+    [NameB] = parsed(B),
+    ?assertEqual([~"0"], counters(A)),
+    ?assertEqual([~"0"], counters(B)),
+    ?assertNotEqual(NameA, NameB),
+
+    ok = minato_conn:close(A),
+    ok = minato_conn:close(B).
 
 -spec a_cached_statement_answers_like_an_uncached_one([{atom(), term()}]) -> ok.
 a_cached_statement_answers_like_an_uncached_one(_Config) ->
@@ -128,7 +154,7 @@ a_full_cache_falls_back_to_unnamed(_Config) ->
     {ok, _Two, Second} = minato_query:cached(First, ~"SELECT 2", []),
     {ok, #{rows := [{3}]}, Third} = minato_query:cached(Second, ~"SELECT 3", []),
     {ok, #{rows := [{3}]}, Fourth} = minato_query:cached(Third, ~"SELECT 3", []),
-    ?assertEqual([~"minato_0", ~"minato_1"], parsed(Fourth)),
+    ?assertEqual([~"0", ~"1"], counters(Fourth)),
     ?assertEqual({2, 2}, minato_conn:statements(Fourth)),
     ok = minato_conn:close(Fourth).
 
@@ -157,6 +183,13 @@ parsed(Conn) ->
     Sql = ~"SELECT name FROM pg_prepared_statements ORDER BY name",
     {ok, #{rows := Rows}, _Read} = minato_query:query(Conn, Sql, []),
     [Name || {Name} <- Rows].
+
+%% Statement names carry a random per-connection prefix, so a test that pinned
+%% the whole name would be pinning the randomness. The counter is the part these
+%% cases are actually about: that the same SQL reuses one, and different SQL
+%% takes the next.
+counters(Conn) ->
+    [lists:last(binary:split(Name, ~"_", [global])) || Name <- parsed(Conn)].
 
 connection(Extra) ->
     maps:merge(
