@@ -31,6 +31,11 @@ Left to `binary_to_atom/2` the first would raise `system_limit` and the second
 `badarg`, which would let whatever is on the far end of the socket choose an
 exception outside minato's own shape.
 
+The four tags every workload actually ends on are matched whole, because the
+general path splits the tag into a list, lowercases a copy of each word and
+looks each one up in the atom table, and that is a surprising amount of work to
+find out that a `SELECT` selected.
+
 ## Unrecognised messages
 
 A type byte minato does not model decodes to `{unsupported, Type, Payload}`.
@@ -203,11 +208,26 @@ parameter_oids(_Remaining, Payload) ->
 
 -spec command_complete(binary()) -> minato_protocol:tag().
 command_complete(Payload) ->
-    {Tag, Rest} = cstring(command_complete, Payload),
-    exhausted(command_complete, Rest),
-    tag(Tag).
+    Size = byte_size(Payload) - 1,
+    case Payload of
+        <<Tag:Size/binary, 0>> -> tag(Tag);
+        _Unterminated_or_trailing -> malformed_tag(Payload)
+    end.
+
+-spec malformed_tag(binary()) -> no_return().
+malformed_tag(Payload) ->
+    {_Tag, Rest} = cstring(command_complete, Payload),
+    minato_protocol:bad(command_complete, trailing_bytes, Rest).
 
 -spec tag(binary()) -> minato_protocol:tag().
+tag(<<"SELECT ", Rows/binary>>) ->
+    {select, count_or_word(Rows)};
+tag(<<"INSERT 0 ", Rows/binary>>) ->
+    {insert, count_or_word(Rows)};
+tag(<<"UPDATE ", Rows/binary>>) ->
+    {update, count_or_word(Rows)};
+tag(<<"DELETE ", Rows/binary>>) ->
+    {delete, count_or_word(Rows)};
 tag(Tag) ->
     case binary:split(Tag, ~" ", [global]) of
         [Command] -> {word(Command), undefined};

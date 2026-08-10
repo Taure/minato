@@ -65,11 +65,27 @@ query, so they belong with the pool that hands connections out.
 
 -define(UNNAMED, ~"").
 
+-define(DEFAULT_DECODING, #{
+    return_rows_as_maps => false,
+    column_name_as_atom => false,
+    uuid_format => string,
+    datetime_format => datetime,
+    numeric_format => binary
+}).
+
+-define(DEFAULT_CODEC, #{
+    uuid_format => string,
+    datetime_format => datetime,
+    numeric_format => binary
+}).
+
 -record(statement, {
     name :: binary(),
     parameters :: [minato_oid:oid()],
+    parameter_formats :: [minato_codec:format()],
     fields :: [minato_protocol:field()],
-    formats :: [minato_codec:format()]
+    formats :: [minato_codec:format()],
+    decoder :: minato_protocol:decoder()
 }).
 
 -doc """
@@ -320,6 +336,10 @@ bounded(Conn, Opts) ->
     minato_conn:deadline(Conn, maps:get(timeout, Opts, minato_conn:timeout(Conn))).
 
 -spec decoding(opts()) -> minato_protocol:opts().
+decoding(Opts) when map_size(Opts) =:= 0 ->
+    ?DEFAULT_DECODING;
+decoding(#{timeout := _} = Opts) when map_size(Opts) =:= 1 ->
+    ?DEFAULT_DECODING;
 decoding(Opts) ->
     #{
         return_rows_as_maps => maps:get(return_rows_as_maps, Opts, false),
@@ -406,11 +426,15 @@ described(Conn, Name, Parameters, Fields) ->
 -spec statement(binary(), [minato_oid:oid()] | undefined, [minato_protocol:field()]) ->
     statement().
 statement(Name, Parameters, Fields) ->
+    Oids = parameters(Parameters),
+    Described = [Field#{format => format(Field)} || Field <- Fields],
     #statement{
         name = Name,
-        parameters = parameters(Parameters),
-        fields = [Field#{format => format(Field)} || Field <- Fields],
-        formats = [format(Field) || Field <- Fields]
+        parameters = Oids,
+        parameter_formats = [minato_codec:preferred_format(Oid) || Oid <- Oids],
+        fields = Described,
+        formats = [format(Field) || Field <- Fields],
+        decoder = minato_protocol:decoder(Described, ?DEFAULT_DECODING)
     }.
 
 -spec format(minato_protocol:field()) -> minato_codec:format().
@@ -444,31 +468,52 @@ closed(Conn) ->
 -spec run(conn(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 run(Conn, #statement{} = Statement, Parameters, Opts) ->
-    #statement{name = Name, parameters = Oids, formats = Formats, fields = Fields} = Statement,
-    Encoded = encode(Conn, Oids, Parameters, Opts),
-    Bind =
-        {bind, ?UNNAMED, Name, [minato_codec:preferred_format(Oid) || Oid <- Oids], Encoded,
-            Formats},
+    #statement{
+        name = Name,
+        parameters = Oids,
+        parameter_formats = ParameterFormats,
+        formats = Formats,
+        fields = Fields
+    } = Statement,
+    Encoded = encode(Conn, Oids, ParameterFormats, Parameters, Opts),
+    Bind = {bind, ?UNNAMED, Name, ParameterFormats, Encoded, Formats},
+    Decoder = decoder(Statement, Opts),
     case minato_conn:send(Conn, [Bind, {execute, ?UNNAMED, 0}, sync]) of
-        ok -> executed(decoding(Conn, Fields, Opts), minato_protocol:decoder(Fields, Opts), Opts);
+        ok -> executed(decoding(Conn, Fields, Decoder), Decoder, Opts);
         {error, Reason} -> {error, Reason}
     end.
 
--spec encode(conn(), [minato_oid:oid()], [term()], minato_protocol:opts()) -> [iodata() | null].
-encode(_Conn, Oids, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
-    encoded(Oids, Parameters, codec_opts(Opts));
-encode(Conn, Oids, Parameters, _Opts) ->
+-spec decoder(statement(), minato_protocol:opts()) -> minato_protocol:decoder().
+decoder(#statement{decoder = Decoder}, #{
+    return_rows_as_maps := false,
+    column_name_as_atom := false,
+    uuid_format := string,
+    datetime_format := datetime,
+    numeric_format := binary
+}) ->
+    Decoder;
+decoder(#statement{fields = Fields}, Opts) ->
+    minato_protocol:decoder(Fields, Opts).
+
+-spec encode(
+    conn(), [minato_oid:oid()], [minato_codec:format()], [term()], minato_protocol:opts()
+) -> [iodata() | null].
+encode(_Conn, Oids, Formats, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
+    encoded(Oids, Formats, Parameters, codec_opts(Opts));
+encode(Conn, Oids, _Formats, Parameters, _Opts) ->
     ok = resync(Conn),
     bad(bind, parameter_count_mismatch, {length(Oids), length(Parameters)}).
 
--spec encoded([minato_oid:oid()], [term()], minato_codec:opts()) -> [iodata() | null].
-encoded([], [], _Opts) ->
+-spec encoded([minato_oid:oid()], [minato_codec:format()], [term()], minato_codec:opts()) ->
+    [iodata() | null].
+encoded([], [], [], _Opts) ->
     [];
-encoded([Oid | Oids], [Value | Values], Opts) ->
-    Encoded = minato_codec:encode(Oid, Value, minato_codec:preferred_format(Oid), Opts),
-    [Encoded | encoded(Oids, Values, Opts)].
+encoded([Oid | Oids], [Format | Formats], [Value | Values], Opts) ->
+    [minato_codec:encode(Oid, Value, Format, Opts) | encoded(Oids, Formats, Values, Opts)].
 
 -spec codec_opts(minato_protocol:opts()) -> minato_codec:opts().
+codec_opts(#{uuid_format := string, datetime_format := datetime, numeric_format := binary}) ->
+    ?DEFAULT_CODEC;
 codec_opts(Opts) ->
     maps:with([uuid_format, datetime_format, numeric_format], Opts).
 
@@ -477,11 +522,11 @@ codec_opts(Opts) ->
 executed(Conn, Decoder, _Opts) ->
     executed(Conn, Decoder, [], {unknown, undefined}).
 
--spec decoding(conn(), [minato_protocol:field()], minato_protocol:opts()) -> conn().
-decoding(Conn, [], _Opts) ->
+-spec decoding(conn(), [minato_protocol:field()], minato_protocol:decoder()) -> conn().
+decoding(Conn, [], _Decoder) ->
     Conn;
-decoding(Conn, Fields, Opts) ->
-    minato_conn:decoding(Conn, minato_protocol:decoder(Fields, Opts)).
+decoding(Conn, _Fields, Decoder) ->
+    minato_conn:decoding(Conn, Decoder).
 
 -spec executed(
     conn(), minato_protocol:decoder(), [[minato_protocol:row()]], minato_protocol:tag()
