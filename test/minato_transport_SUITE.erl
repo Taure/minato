@@ -37,6 +37,7 @@ Skips when no server answers.
     a_borrower_that_dies_does_not_take_the_pool_down/1,
     tls_runs_over_this_transport/1,
     a_notification_arrives_over_this_transport/1,
+    a_connection_asked_to_wait_twice_waits_once/1,
     a_connection_that_dies_while_waiting_says_so/1,
     a_connection_goes_back_to_reading_after_waiting/1,
     a_listener_runs_over_this_transport/1
@@ -67,6 +68,7 @@ cases() ->
         a_borrower_that_dies_does_not_take_the_pool_down,
         tls_runs_over_this_transport,
         a_notification_arrives_over_this_transport,
+        a_connection_asked_to_wait_twice_waits_once,
         a_connection_that_dies_while_waiting_says_so,
         a_connection_goes_back_to_reading_after_waiting,
         a_listener_runs_over_this_transport
@@ -239,6 +241,20 @@ a_notification_arrives_over_this_transport(Config) ->
         Notification
     ),
     ok = minato_conn:close(Waiting).
+
+%% A listener re-activates whenever anything about its subscribers changes, so a
+%% connection that is already waiting is asked to wait again. One wait is what
+%% it asked for both times.
+a_connection_asked_to_wait_twice_waits_once(Config) ->
+    Channel = channel(~"minato_transport_twice", Config),
+    Conn = connected(Config),
+    {ok, _Results, Listening} = minato_query:simple(Conn, <<"LISTEN ", Channel/binary>>),
+    {ok, Once} = minato_conn:activate(Listening),
+    {ok, Twice} = minato_conn:activate(Once),
+    ok = notify(Channel, ~"asked twice", Config),
+    {_Kind, Notification} = awaited(Twice),
+    ?assertMatch({notification_response, _Pid, Channel, ~"asked twice"}, Notification),
+    ok = minato_conn:close(Twice).
 
 %% The server going away while a wait is outstanding is not the same as a read
 %% finding a closed socket, and the machines do not agree on how it is said: a

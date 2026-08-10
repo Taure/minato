@@ -536,6 +536,13 @@ The connection is unusable for `next/1` until the messages stop coming, and the
 two must not be mixed on one connection.
 """.
 -spec activate(conn()) -> {ok, conn()} | {error, error()}.
+%% Asking twice is asking for the same thing: one message. `{active, once}`
+%% twice is harmless on the driver, but a second read on a socket handle is a
+%% second operation on the same handle, which a completion system refuses
+%% outright. A caller that re-activates on every subscriber - which is what a
+%% listener does - would otherwise work on POSIX and not on Windows.
+activate(#conn{transport = minato_socket, waiting = Waiting} = Conn) when Waiting =/= undefined ->
+    {ok, Conn};
 activate(#conn{transport = minato_socket} = Conn) ->
     case minato_socket:activate(handle(Conn)) of
         {ok, Data} -> {ok, delivered(Conn, Data)};
