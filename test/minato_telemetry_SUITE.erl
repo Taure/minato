@@ -83,7 +83,8 @@ end_per_testcase(Case, _Config) ->
 a_query_is_a_span(_Config) ->
     {ok, _Result} = minato:query(?POOL, ~"SELECT $1::int4", [7]),
     {_Start, StartMeta} = awaited([minato, query, start], #{path => cached}),
-    {Stop, StopMeta} = awaited([minato, query, stop]),
+    #{telemetry_span_context := Span} = StartMeta,
+    {Stop, StopMeta} = awaited([minato, query, stop], #{telemetry_span_context => Span}),
     ?assertMatch(#{path := cached}, StartMeta),
     ?assertMatch(#{duration := _Duration, monotonic_time := _When}, Stop),
     ?assertMatch(#{outcome := ok, command := select, num_rows := 1}, StopMeta).
@@ -190,8 +191,9 @@ awaited(Name) ->
 
 %% A pool opens connections when it needs them rather than up front, and the
 %% first connection of one asks the server how many it will allow. That is a
-%% query, and it is a span, so waiting for "the next start event" is waiting for
-%% whichever query got there first. This waits for the one the test ran.
+%% query, and it is a span, so waiting for "the next event" is waiting for
+%% whichever query got there first. This waits for the one the test ran, which
+%% for a stop event means the one carrying the start event's span context.
 awaited(Name, Wanted) ->
     {Measurements, Metadata} = awaited(Name),
     case maps:with(maps:keys(Wanted), Metadata) of
