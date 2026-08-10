@@ -202,10 +202,12 @@ to `prefer` under `ssl => true` and `disable` without it, since there is nothing
 to bind to on a plain socket. `require` refuses to connect at all unless the
 server offers `SCRAM-SHA-256-PLUS`.
 
-`transport` is `inet`, the driver every BEAM program uses, or `socket`, which is
-`m:minato_socket` over the socket NIFs. `socket` is experimental and faster per
-operation, by about a quarter on a query and about a half on a pooled one, and
-does everything the driver does on every machine minato runs on. See
+`transport` is `socket`, which is `m:minato_socket` over the socket NIFs, or
+`inet`, the driver every BEAM program uses. `socket` is the default: it does
+everything the driver does on every machine minato runs on, costs about a
+quarter less per query and about half less per pooled one, and holds more
+throughput at the same CPU once a pool is deep enough for per-operation cost to
+show. `inet` is there for a machine or a workload that disagrees. See
 `m:minato_socket`.
 
 `prepared_statements` is how many statements this connection will keep parsed on
@@ -316,8 +318,8 @@ opening(Opts) ->
     end.
 
 -spec transport(opts()) -> plain().
-transport(#{transport := socket}) -> minato_socket;
-transport(_Opts) -> gen_tcp.
+transport(#{transport := inet}) -> gen_tcp;
+transport(_Opts) -> minato_socket.
 
 -doc """
 Close a connection.
@@ -534,6 +536,13 @@ The connection is unusable for `next/1` until the messages stop coming, and the
 two must not be mixed on one connection.
 """.
 -spec activate(conn()) -> {ok, conn()} | {error, error()}.
+%% Asking twice is asking for the same thing: one message. `{active, once}`
+%% twice is harmless on the driver, but a second read on a socket handle is a
+%% second operation on the same handle, which a completion system refuses
+%% outright. A caller that re-activates on every subscriber - which is what a
+%% listener does - would otherwise work on POSIX and not on Windows.
+activate(#conn{transport = minato_socket, waiting = Waiting} = Conn) when Waiting =/= undefined ->
+    {ok, Conn};
 activate(#conn{transport = minato_socket} = Conn) ->
     case minato_socket:activate(handle(Conn)) of
         {ok, Data} -> {ok, delivered(Conn, Data)};
@@ -649,6 +658,21 @@ handle_message(
 handle_message(
     #conn{transport = minato_socket, socket = Socket, waiting = {completion_info, _Tag, Handle}},
     {'$socket', Socket, completion, {Handle, {error, Reason}}}
+) ->
+    {closed, Reason};
+%% The wait can also end with the machine taking it away rather than answering
+%% it: a peer that closes while a read is outstanding aborts it on Windows
+%% instead of completing it with an error. Ignoring that leaves an owner waiting
+%% on a socket that will never speak again, which is a listener that never
+%% reconnects.
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, waiting = {completion_info, _Tag, Handle}},
+    {'$socket', Socket, abort, {Handle, Reason}}
+) ->
+    {closed, Reason};
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, waiting = {select_info, _Tag, Handle}},
+    {'$socket', Socket, abort, {Handle, Reason}}
 ) ->
     {closed, Reason};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_closed, Socket}) ->

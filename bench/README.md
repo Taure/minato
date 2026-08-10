@@ -48,7 +48,11 @@ clients in the same run, and anything under about ten percent is noise.
 ## A run
 
 2000 iterations, OTP 29, PostgreSQL 17 in Docker on the same machine, times in
-microseconds per operation, mean.
+microseconds per operation, mean. The minato column is the `inet` transport,
+which is what the default was when the run was made; `minato_bench` takes the
+default, so a run made now is the `socket` transport and the whole column moves
+together. What that changes is the last two sections, not this one - a percent
+on a query against a local server is not where a transport shows up.
 
 | workload | minato | epgsql | pgo | node-postgres | postgres.js | asyncpg | psycopg3 |
 | --- | --- | --- | --- | --- | --- | --- | --- |

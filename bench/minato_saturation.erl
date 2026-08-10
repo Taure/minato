@@ -204,10 +204,8 @@ teardown({epgsql, _How}, Connections) ->
 
 sql() -> ~"SELECT $1::int4".
 
-connection(inet) ->
-    base();
-connection(socket) ->
-    (base())#{transport => socket}.
+connection(Transport) ->
+    (base())#{transport => Transport}.
 
 base() ->
     #{
