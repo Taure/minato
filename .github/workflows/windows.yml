@@ -27,6 +27,7 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       MINATO_PG_HOST: 127.0.0.1
       MINATO_PG_PORT: '5432'
@@ -108,5 +109,24 @@ jobs:
       - name: EUnit
         run: rebar3 eunit
 
+      # Split so that a suite which hangs rather than fails says which one it
+      # was. The TLS suites are last because they are the ones this runner
+      # gained when it gained a certificate.
       - name: Common Test
-        run: rebar3 ct
+        timeout-minutes: 6
+        run: >
+          rebar3 ct --suite
+          test/minato_authentication_SUITE,test/minato_connection_SUITE,test/minato_query_SUITE,test/minato_txn_SUITE,test/minato_pool_SUITE,test/minato_listener_SUITE,test/minato_cache_SUITE,test/minato_telemetry_SUITE,test/minato_soak_SUITE,test/minato_roundtrip_SUITE,test/minato_prop_SUITE,test/minato_differential_SUITE
+
+      - name: Common Test, the socket transport
+        timeout-minutes: 6
+        run: rebar3 ct --suite test/minato_socket_SUITE
+
+      - name: Common Test, TLS
+        timeout-minutes: 6
+        run: rebar3 ct --suite test/minato_tls_SUITE
+
+      - name: What the TLS server logged, if anything went wrong
+        if: failure()
+        shell: pwsh
+        run: Get-Content "$env:RUNNER_TEMP\tls.log" -Tail 50
