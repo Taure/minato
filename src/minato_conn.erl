@@ -133,7 +133,7 @@ the server issued is the whole of the authorisation.
     frame_opts :: minato_protocol:frame_opts(),
     opened :: integer(),
     statements = #{} :: #{binary() => term()},
-    prefix :: binary() | undefined,
+    prefix = ~"" :: binary(),
     prepared = 0 :: non_neg_integer(),
     limit :: non_neg_integer(),
     opts :: opts()
