@@ -115,7 +115,66 @@ statement on the server rather than abandoning the connection, and a lookup in
 the per-connection statement cache.
 
 `minato_profile:eprof(Workload)` runs one workload under `eprof`, for when the
-question is which function rather than how much.
+question is which function rather than how much. What the reductions are worth
+is the next section: they buy throughput rather than latency, and only once the
+pool has stopped being the constraint.
+
+## What it is worth, which is a different question
+
+Everything above measures one operation at a time. A client that costs less per
+operation only goes faster if the client was what the operations were waiting
+for, and against a database on the same machine it usually is not: most of a
+query is the round trip, and the numbers in the first table move by a percent or
+two for work that halved the client's share.
+
+`minato_saturation` asks the other question. A fixed pool, a growing number of
+callers, and a count of what comes back:
+
+```
+rebar3 as bench compile
+erl -noshell -pa _build/bench/lib/*/ebin _build/bench/lib/minato/bench \
+    -eval 'minato_saturation:run(), init:stop().'
+```
+
+Sixteen connections, which is a normal pool:
+
+| client | 1 | 8 | 32 | 64 | busy % at 64 |
+| --- | --- | --- | --- | --- | --- |
+| minato (inet) | 2476 | 12372 | 16591 | 16362 | 3.5 |
+| minato (socket) | 2446 | 11322 | 16104 | 16212 | 3.4 |
+| pgo | 1624 | 11229 | 15223 | 15048 | 4.9 |
+| epgsql | 1344 | 6446 | 12359 | 23588 | 7.0 |
+
+Every pooled client stops at about the same number, four percent of the machine
+is in use, and the client that is faster per operation is not faster here. **The
+first ceiling anybody meets is the size of their pool**, and no work on the
+client lifts it. epgsql is the tell: it has no pool, so this gives it a
+connection per caller, and past thirty-two callers it walks through the ceiling
+the others are sitting under.
+
+Sixty-four connections, so that the pool is not the answer:
+
+| client | 1 | 8 | 32 | 64 | busy % at 64 |
+| --- | --- | --- | --- | --- | --- |
+| minato (inet) | 2407 | 12960 | 23176 | 32610 | 7.8 |
+| minato (socket) | 2619 | 11977 | 24517 | **39263** | **6.6** |
+| pgo | 1486 | 11624 | 19312 | 13374 | 45.1 |
+| epgsql | 1516 | 6568 | 12414 | 24008 | 7.0 |
+
+Now the per-operation work shows up, and it shows up twice: the socket transport
+does about a fifth more queries a second than the driver and spends about a
+sixth less of the machine doing it. Both minato transports do half again what
+epgsql does.
+
+`pgo` is the whole argument in one row. It gets *slower* above thirty-two
+callers while taking half the machine, because reading a header and then a
+payload per message is CPU that is not there to spend once the connections stop
+being the constraint.
+
+Read in that order the two tables say something worth saying out loud: **per
+operation cost buys throughput, not latency, and only after the pool is no
+longer the thing in the way.** A percent on a query against a local server is
+not what any of this was for.
 
 ## Honesty about this benchmark
 
