@@ -109,17 +109,6 @@ jobs:
       - name: EUnit
         run: rebar3 eunit
 
-      # The TLS suites run first and alone, because they are what this runner
-      # gained when it gained a certificate, and a suite that hangs rather than
-      # fails should say which one it was.
-      - name: Common Test, TLS
-        timeout-minutes: 6
-        run: rebar3 ct --suite test/minato_tls_SUITE
-
-      - name: Common Test, the socket transport
-        timeout-minutes: 6
-        run: rebar3 ct --suite test/minato_socket_SUITE
-
       - name: Common Test
         timeout-minutes: 10
         run: rebar3 ct
