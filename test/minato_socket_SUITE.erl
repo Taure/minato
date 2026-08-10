@@ -54,10 +54,13 @@ all() ->
         a_listener_runs_over_this_transport
     ].
 
+%% Reachability is asked over the driver transport, so that a socket transport
+%% which cannot connect fails the suite instead of skipping it. A skip here
+%% would mean "no PostgreSQL", and it has to keep meaning only that.
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
 init_per_suite(Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    case minato_conn:connect(opts()) of
+    case minato_conn:connect(maps:remove(transport, opts())) of
         {ok, Conn} ->
             ok = minato_conn:close(Conn),
             Config;
@@ -167,10 +170,11 @@ a_notification_arrives_over_this_transport(_Config) ->
     Conn = connected(),
     {ok, _Results, Listening} = minato_query:simple(Conn, ~"LISTEN minato_socket_suite"),
     {ok, Waiting} = minato_conn:activate(Listening),
-    ok = notify(~"minato_socket_suite", ~"through a select"),
-    Notification = awaited(Waiting),
+    ok = notify(~"minato_socket_suite", ~"without a read outstanding"),
+    {Kind, Notification} = awaited(Waiting),
+    ?assertEqual(shape(os:type()), Kind),
     ?assertMatch(
-        {notification_response, _Pid, ~"minato_socket_suite", ~"through a select"},
+        {notification_response, _Pid, ~"minato_socket_suite", ~"without a read outstanding"},
         Notification
     ),
     ok = minato_conn:close(Waiting).
@@ -199,17 +203,30 @@ a_listener_runs_over_this_transport(_Config) ->
     end,
     ok = minato:stop_listener(Name).
 
+%% The kind is asserted rather than assumed, because it is the whole difference
+%% between the two machines: POSIX says the socket is readable and leaves the
+%% bytes in it, Windows completes the read and puts them in the message. A run
+%% that took the other path would otherwise pass without ever touching this one.
 awaited(Conn) ->
+    awaited(Conn, undefined).
+
+awaited(Conn, Kind) ->
     receive
         Message ->
             case minato_conn:handle_message(Conn, Message) of
-                {messages, [], _Again} -> awaited(Conn);
-                {messages, Messages, _Read} -> hd(Messages);
-                ignore -> awaited(Conn);
+                {messages, [], Again} -> awaited(Again, kind(Message, Kind));
+                {messages, Messages, _Read} -> {kind(Message, Kind), hd(Messages)};
+                ignore -> awaited(Conn, Kind);
                 {closed, Reason} -> ct:fail({closed, Reason})
             end
     after ?TIMEOUT -> ct:fail(no_notification)
     end.
+
+kind({'$socket', _Socket, Kind, _What}, _Seen) -> Kind;
+kind(_Sent_from_here, Seen) -> Seen.
+
+shape({win32, _Flavour}) -> completion;
+shape(_Posix) -> select.
 
 notify(Channel, Payload) ->
     {ok, Conn} = minato_conn:connect(opts()),

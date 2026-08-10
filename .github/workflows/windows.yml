@@ -1,0 +1,63 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# The socket transport waits for bytes differently here: Windows completes a
+# read and hands the bytes over in the message, where POSIX says the socket is
+# readable and leaves them in it. Nothing on a Linux runner exercises that path,
+# so it runs here or it is not tested at all.
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      MINATO_PG_HOST: 127.0.0.1
+      MINATO_PG_PORT: '5432'
+      MINATO_PG_USER: minato
+      MINATO_PG_PASSWORD: minato
+      MINATO_PG_DATABASE: minato_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3'
+
+      - name: Start the PostgreSQL the runner already has
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name 'postgresql*' | Select-Object -First 1
+          if (-not $service) { throw 'no PostgreSQL service on this runner' }
+          Set-Service -Name $service.Name -StartupType Manual
+          Start-Service -Name $service.Name
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\psql" -U postgres -c "CREATE USER minato WITH PASSWORD 'minato' SUPERUSER"
+          & "$env:PGBIN\psql" -U postgres -c "CREATE DATABASE minato_test OWNER minato"
+          & "$env:PGBIN\psql" -U postgres -c "SHOW server_version"
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Common Test
+        run: rebar3 ct

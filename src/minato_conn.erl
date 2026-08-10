@@ -139,7 +139,7 @@ the server issued is the whole of the authorisation.
     cancelled = false :: boolean(),
     grace :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
-    select :: socket:select_info() | undefined,
+    waiting :: minato_socket:waiting() | undefined,
     opened :: integer(),
     statements = #{} :: #{binary() => term()},
     prefix = ~"" :: binary(),
@@ -193,9 +193,9 @@ server offers `SCRAM-SHA-256-PLUS`.
 
 `transport` is `inet`, the driver every BEAM program uses, or `socket`, which is
 `m:minato_socket` over the socket NIFs. `socket` is experimental and faster per
-operation, by about a quarter on a query and about a half on a pooled one. It
-does everything the driver does, including TLS and `LISTEN`, except on Windows,
-where it cannot yet do `LISTEN`. See `m:minato_socket`.
+operation, by about a quarter on a query and about a half on a pooled one, and
+does everything the driver does on every machine minato runs on. See
+`m:minato_socket`.
 
 `prepared_statements` is how many statements this connection will keep parsed on
 the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
@@ -526,7 +526,7 @@ two must not be mixed on one connection.
 activate(#conn{transport = minato_socket} = Conn) ->
     case minato_socket:activate(handle(Conn)) of
         {ok, Data} -> {ok, delivered(Conn, Data)};
-        {waiting, Select} -> {ok, Conn#conn{select = Select}};
+        {waiting, Waiting} -> {ok, Conn#conn{waiting = Waiting}};
         {error, Reason} -> {error, {socket, Reason}}
     end;
 activate(#conn{transport = Transport, socket = Socket} = Conn) ->
@@ -538,7 +538,7 @@ activate(#conn{transport = Transport, socket = Socket} = Conn) ->
 -spec delivered(conn(), binary()) -> conn().
 delivered(#conn{socket = Socket} = Conn, Data) ->
     self() ! {minato_socket, Socket, Data},
-    Conn#conn{select = undefined}.
+    Conn#conn{waiting = undefined}.
 
 -doc """
 Go back to reading, after `activate/1`.
@@ -553,18 +553,27 @@ transport: cancelling the wait drops the message, not the socket's own buffer,
 so the next `next/1` reads them.
 """.
 -spec deactivate(conn()) -> {ok, conn()} | {error, error()}.
-deactivate(#conn{transport = minato_socket, select = Select} = Conn) ->
-    ok = waiting(handle(Conn), Select),
-    {ok, flushed(Conn#conn{select = undefined})};
+deactivate(#conn{transport = minato_socket, waiting = undefined} = Conn) ->
+    {ok, flushed(Conn)};
+deactivate(#conn{transport = minato_socket, waiting = Waiting} = Conn) ->
+    Settled = settled(Conn, minato_socket:cancel(handle(Conn), Waiting)),
+    {ok, flushed(Settled#conn{waiting = undefined})};
 deactivate(#conn{transport = Transport, socket = Socket} = Conn) ->
     case options(Transport, Socket, [{active, false}]) of
         ok -> {ok, flushed(Conn)};
         {error, Reason} -> {error, Reason}
     end.
 
--spec waiting(minato_socket:socket(), socket:select_info() | undefined) -> ok.
-waiting(_Socket, undefined) -> ok;
-waiting(Socket, Select) -> minato_socket:cancel(Socket, Select).
+-spec settled(conn(), ok | pending) -> conn().
+settled(Conn, ok) ->
+    Conn;
+settled(#conn{socket = Socket, timeout = Timeout} = Conn, pending) ->
+    receive
+        {'$socket', Delivered, _Kind, _What} = Message when Delivered =:= Socket ->
+            absorbed(Conn, Message)
+    after Timeout ->
+        Conn
+    end.
 
 -spec flushed(conn()) -> conn().
 flushed(#conn{transport = Transport, socket = Socket, buffer = Buffer} = Conn) ->
@@ -573,11 +582,21 @@ flushed(#conn{transport = Transport, socket = Socket, buffer = Buffer} = Conn) -
             Tag =:= Transport, Delivered =:= Socket, is_binary(Data)
         ->
             flushed(Conn#conn{buffer = <<Buffer/binary, Data/binary>>});
-        {'$socket', Delivered, select, _Handle} when Delivered =:= Socket ->
-            flushed(Conn)
+        {'$socket', Delivered, _Kind, _What} = Message when Delivered =:= Socket ->
+            flushed(absorbed(Conn, Message))
     after 0 ->
         Conn
     end.
+
+-spec absorbed(conn(), term()) -> conn().
+absorbed(
+    #conn{buffer = Buffer} = Conn, {'$socket', _Socket, completion, {_Handle, {ok, Data}}}
+) when
+    is_binary(Data)
+->
+    Conn#conn{buffer = <<Buffer/binary, Data/binary>>};
+absorbed(Conn, _Nothing_to_take) ->
+    Conn.
 
 -doc """
 Turn a socket message into the protocol messages it carried.
@@ -603,12 +622,24 @@ handle_message(#conn{transport = ssl, socket = Socket} = Conn, {ssl, Socket, Dat
 handle_message(#conn{transport = minato_socket, socket = Socket} = Conn, {Tag, Socket, Data}) when
     Tag =:= minato_socket, is_binary(Data)
 ->
-    arrived(Conn#conn{select = undefined}, Data);
+    arrived(Conn#conn{waiting = undefined}, Data);
 handle_message(
-    #conn{transport = minato_socket, socket = Socket, select = {select_info, _Tag, Handle}} = Conn,
+    #conn{transport = minato_socket, socket = Socket, waiting = {select_info, _Tag, Handle}} = Conn,
     {'$socket', Socket, select, Handle}
 ) ->
-    readable(Conn#conn{select = undefined});
+    readable(Conn#conn{waiting = undefined});
+handle_message(
+    #conn{
+        transport = minato_socket, socket = Socket, waiting = {completion_info, _Tag, Handle}
+    } = Conn,
+    {'$socket', Socket, completion, {Handle, {ok, Data}}}
+) when is_binary(Data) ->
+    arrived(Conn#conn{waiting = undefined}, Data);
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, waiting = {completion_info, _Tag, Handle}},
+    {'$socket', Socket, completion, {Handle, {error, Reason}}}
+) ->
+    {closed, Reason};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_closed, Socket}) ->
     {closed, closed};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_error, Socket, Reason}) ->
@@ -625,7 +656,7 @@ handle_message(_Conn, _Message) ->
 readable(Conn) ->
     case minato_socket:activate(handle(Conn)) of
         {ok, Data} -> arrived(Conn, Data);
-        {waiting, Select} -> {messages, [], Conn#conn{select = Select}};
+        {waiting, Waiting} -> {messages, [], Conn#conn{waiting = Waiting}};
         {error, closed} -> {closed, closed};
         {error, Reason} -> {closed, Reason}
     end.

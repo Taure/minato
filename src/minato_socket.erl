@@ -27,16 +27,15 @@ moving it at all.
 
 `m:socket` has no active mode, so `setopts/2` refuses `{active, once}` rather
 than pretending. What it has instead is `activate/1`: a read that either hands
-back what is already here or registers the caller for one
-`{'$socket', Socket, select, Handle}` message when the socket becomes readable.
+back what is already here or arranges one message for when there is something.
 That is the same arrangement `{active, once}` is - exactly one message, and the
 owner asks again - and it costs no process, because the message goes to whoever
 made the call rather than to a reader spawned to forward it.
 
-Windows completes reads rather than selecting on them, and this does not
-implement that shape. `activate/1` refuses it, so `LISTEN` over this transport
-is a POSIX arrangement until somebody with a Windows machine finishes it.
-Everything else here works on either.
+Windows completes reads rather than selecting on them: the wait answers with the
+bytes in the message rather than with permission to go and read them. Both
+shapes are here and `t:waiting/0` is either, because the difference belongs to
+whoever reads the message, not to whoever waits.
 
 ## TLS
 
@@ -65,7 +64,15 @@ when that process terminates.
 """.
 -type socket() :: socket:socket().
 
--export_type([socket/0]).
+-doc """
+What `activate/1` is waiting on, which is what `cancel/2` drops.
+
+A select token where the machine says the socket is readable, a completion token
+where it hands over the bytes.
+""".
+-type waiting() :: socket:select_info() | socket:completion_info().
+
+-export_type([socket/0, waiting/0]).
 
 -doc """
 Open a connection.
@@ -137,35 +144,43 @@ controlling_process(Socket, Pid) ->
 -doc """
 Take the bytes that are here, or arrange for a message when there are some.
 
-`{waiting, Select}` means the owner will be sent
-`{'$socket', Socket, select, Handle}` once the socket is readable, and the
-`Handle` in it is the one inside `Select`. Reading is then this call again,
-which is why there is one function rather than an arm and a take: a wakeup with
-nothing behind it re-arms rather than being mistaken for data.
+`{waiting, Waiting}` means one message will be sent to the caller, and which
+message depends on how the machine waits:
 
-The waiting is registered for the calling process, so whoever wants the message
-has to make the call.
+- `{'$socket', Socket, select, Handle}` says the socket is readable and the
+  bytes are still in it, so reading is this call again. A wakeup with nothing
+  behind it therefore re-arms rather than being mistaken for data, which is why
+  there is one function here and not an arm and a take.
+- `{'$socket', Socket, completion, {Handle, {ok, Data}}}` carries the bytes,
+  and calling again would ask for the next ones.
+
+The `Handle` is the one inside `Waiting` either way. The waiting is registered
+for the calling process, so whoever wants the message has to make the call.
 """.
--spec activate(socket()) ->
-    {ok, binary()} | {waiting, socket:select_info()} | {error, term()}.
+-spec activate(socket()) -> {ok, binary()} | {waiting, waiting()} | {error, term()}.
 activate(Socket) ->
     case socket:recv(Socket, 0, nowait) of
         {ok, Data} -> {ok, Data};
         {select, Select} -> {waiting, Select};
-        {completion, _Completion} -> {error, completion_mode_unsupported};
+        {completion, Completion} -> {waiting, Completion};
         {error, Reason} -> {error, Reason}
     end.
 
 -doc """
 Drop a waiting arranged by `activate/1`.
 
-Bytes that arrived are not lost by this: they are still in the socket, and the
-next `recv/3` reads them. What goes is the message that would have said so.
+`pending` means it was too late and the message is on its way, which matters
+where the message carries the bytes: dropping it there would drop them. `ok`
+means nothing is coming.
+
+Bytes still in the socket are not lost either way. The next `recv/3` reads them.
 """.
--spec cancel(socket(), socket:select_info()) -> ok.
-cancel(Socket, Select) ->
-    _ = socket:cancel(Socket, Select),
-    ok.
+-spec cancel(socket(), waiting()) -> ok | pending.
+cancel(Socket, Waiting) ->
+    case socket:cancel(Socket, Waiting) of
+        ok -> ok;
+        {error, _Too_late} -> pending
+    end.
 
 -doc "Set what can be set. `{active, _}` is refused; see the module note.".
 -spec setopts(socket(), [term()]) -> ok | {error, term()}.
