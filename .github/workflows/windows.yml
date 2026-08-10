@@ -1,0 +1,119 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# The socket transport waits for bytes differently here: Windows completes a
+# read and hands the bytes over in the message, where POSIX says the socket is
+# readable and leaves them in it. Nothing on a Linux runner exercises that path,
+# so it runs here or it is not tested at all.
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      MINATO_PG_HOST: 127.0.0.1
+      MINATO_PG_PORT: '5432'
+      MINATO_PG_USER: minato
+      MINATO_PG_PASSWORD: minato
+      MINATO_PG_DATABASE: minato_test
+      MINATO_TLS_HOST: localhost
+      MINATO_TLS_PORT: '55433'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3'
+
+      # The compose file gives Linux two servers, one plain and one with TLS on,
+      # and the suites are written against that. There is no compose here, so
+      # the runner's own server is the plain one and a second cluster is made
+      # for TLS rather than turning TLS on for both - a test that a server
+      # declining TLS is refused needs a server that declines.
+      - name: Certificates for the TLS server
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path test/certs | Out-Null
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes `
+            -keyout ca.key -out test/certs/ca.crt -subj "/CN=minato test CA" `
+            -addext "basicConstraints=critical,CA:TRUE"
+          openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr `
+            -subj "/CN=localhost"
+          Set-Content -Path server.ext -Value @(
+            'subjectAltName=DNS:localhost',
+            'basicConstraints=CA:FALSE',
+            'extendedKeyUsage=serverAuth'
+          )
+          openssl x509 -req -in server.csr -CA test/certs/ca.crt -CAkey ca.key `
+            -CAcreateserial -out test/certs/server.crt -days 3650 -sha256 -extfile server.ext
+
+      - name: Start the plain PostgreSQL the runner already has
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name 'postgresql*' | Select-Object -First 1
+          if (-not $service) { throw 'no PostgreSQL service on this runner' }
+          Set-Service -Name $service.Name -StartupType Manual
+          Start-Service -Name $service.Name
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\psql" -U postgres -c "CREATE USER minato WITH PASSWORD 'minato' SUPERUSER"
+          & "$env:PGBIN\psql" -U postgres -c "CREATE DATABASE minato_test OWNER minato"
+          & "$env:PGBIN\psql" -U postgres -c "SHOW ssl"
+
+      - name: Start a second PostgreSQL with TLS on
+        shell: pwsh
+        run: |
+          $data = "$env:RUNNER_TEMP\minato-tls"
+          Set-Content -Path "$env:RUNNER_TEMP\pw.txt" -Value 'root' -NoNewline
+          & "$env:PGBIN\initdb" -D $data -U postgres --auth=scram-sha-256 `
+            --pwfile="$env:RUNNER_TEMP\pw.txt" -E UTF8
+          Copy-Item test/certs/server.crt "$data\server.crt"
+          Copy-Item server.key "$data\server.key"
+          Add-Content -Path "$data\postgresql.conf" -Value @(
+            'ssl = on',
+            "ssl_cert_file = 'server.crt'",
+            "ssl_key_file = 'server.key'",
+            'port = 55433',
+            "timezone = 'UTC'"
+          )
+          & "$env:PGBIN\pg_ctl" -D $data -l "$env:RUNNER_TEMP\tls.log" start
+          Start-Sleep -Seconds 5
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\psql" -U postgres -h localhost -p 55433 `
+            -c "CREATE USER minato WITH PASSWORD 'minato' SUPERUSER"
+          & "$env:PGBIN\psql" -U postgres -h localhost -p 55433 `
+            -c "CREATE DATABASE minato_test OWNER minato"
+          & "$env:PGBIN\psql" -U postgres -h localhost -p 55433 -c "SHOW ssl"
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Common Test
+        timeout-minutes: 10
+        run: rebar3 ct
+
+      - name: What the TLS server logged, if anything went wrong
+        if: failure()
+        shell: pwsh
+        run: Get-Content "$env:RUNNER_TEMP\tls.log" -Tail 50

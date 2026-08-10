@@ -145,7 +145,11 @@ a_server_that_closes_during_startup_is_reported_test() ->
         {ok, Socket} = gen_tcp:accept(Listen, 5000),
         ok = gen_tcp:close(Socket)
     end),
-    ?assertEqual({error, {socket, closed}}, minato_conn:connect(opts(Port, #{}))),
+    %% Which word the machine uses for a peer that hung up mid-exchange is the
+    %% machine's: Linux says the socket closed, Windows says the connection was
+    %% aborted. What is being tested is that it is reported at all, and reported
+    %% as a socket failure rather than as a connection.
+    ?assertMatch({error, {socket, _Hung_up}}, minato_conn:connect(opts(Port, #{}))),
     ok = gen_tcp:close(Listen).
 
 what_the_server_sent_beyond_ready_is_readable_test() ->

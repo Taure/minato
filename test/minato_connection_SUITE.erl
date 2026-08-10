@@ -79,7 +79,16 @@ a_wrong_password_is_refused(_Config) ->
 -spec an_unknown_database_is_refused([{atom(), term()}]) -> ok.
 an_unknown_database_is_refused(_Config) ->
     Result = minato_conn:connect(opts(#{database => ~"no_such_database"})),
-    ?assertMatch({error, {pgsql_error, #{code := ~"3D000"}}}, Result).
+    ?assert(refused(Result)).
+
+%% The server writes its FATAL and then the backend exits. On Windows a socket
+%% closed with anything still unread is reset rather than shut down, and a reset
+%% discards what the other end had already received, so the message can be gone
+%% before it is read. What has to hold everywhere is that the connection is
+%% refused and that minato says why as far as it was told.
+refused({error, {pgsql_error, #{code := ~"3D000"}}}) -> true;
+refused({error, {socket, _Gone_before_it_was_read}}) -> os:type() =:= {win32, nt};
+refused(_Connected_or_something_else) -> false.
 
 -spec a_password_fun_is_called_at_connect_time([{atom(), term()}]) -> ok.
 a_password_fun_is_called_at_connect_time(_Config) ->
