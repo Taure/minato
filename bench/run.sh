@@ -32,11 +32,14 @@ else
     echo "skipping javascript: run 'cd bench/js && npm install' first"
 fi
 
-if python3 -c 'import asyncpg, psycopg' 2>/dev/null; then
+PYTHON=python3
+[ -x bench/py/.venv/bin/python ] && PYTHON=bench/py/.venv/bin/python
+
+if "$PYTHON" -c 'import asyncpg, psycopg' 2>/dev/null; then
     echo "running python: asyncpg, psycopg3"
-    python3 bench/py/bench.py | tail -1 >> "$RESULTS"
+    "$PYTHON" bench/py/bench.py | tail -1 >> "$RESULTS"
 else
-    echo "skipping python: needs asyncpg and psycopg[binary] (python3-venv or pip)"
+    echo "skipping python: run 'bench/py/install.sh' first"
 fi
 
 node bench/report.mjs "$RESULTS" "$ITERATIONS"
