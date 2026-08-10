@@ -64,7 +64,7 @@ jobs:
             'extendedKeyUsage=serverAuth'
           )
           openssl x509 -req -in server.csr -CA test/certs/ca.crt -CAkey ca.key `
-            -CAcreateserial -out server.crt -days 3650 -sha256 -extfile server.ext
+            -CAcreateserial -out test/certs/server.crt -days 3650 -sha256 -extfile server.ext
 
       - name: Start the plain PostgreSQL the runner already has
         shell: pwsh
@@ -85,7 +85,7 @@ jobs:
           Set-Content -Path "$env:RUNNER_TEMP\pw.txt" -Value 'root' -NoNewline
           & "$env:PGBIN\initdb" -D $data -U postgres --auth=scram-sha-256 `
             --pwfile="$env:RUNNER_TEMP\pw.txt" -E UTF8
-          Copy-Item server.crt "$data\server.crt"
+          Copy-Item test/certs/server.crt "$data\server.crt"
           Copy-Item server.key "$data\server.key"
           Add-Content -Path "$data\postgresql.conf" -Value @(
             'ssl = on',
