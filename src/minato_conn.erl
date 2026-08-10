@@ -156,6 +156,7 @@ How to reach a server and who to be.
   connect_timeout => timeout(),
   timeout => timeout(),
   socket_options => [gen_tcp:connect_option()],
+  transport => inet | socket,
   prepared_statements => non_neg_integer(),
   cancel_timeout => timeout(),
   frame_opts => minato_protocol:frame_opts()}
@@ -181,6 +182,12 @@ to `prefer` under `ssl => true` and `disable` without it, since there is nothing
 to bind to on a plain socket. `require` refuses to connect at all unless the
 server offers `SCRAM-SHA-256-PLUS`.
 
+`transport` is `inet`, the driver every BEAM program uses, or `socket`, which is
+`m:minato_socket` over the socket NIFs. `socket` is experimental: it is faster
+per operation and it cannot do TLS or `LISTEN`, so a connection asking for it
+and `ssl => true` is refused rather than quietly getting one of the two. See
+`m:minato_socket`.
+
 `prepared_statements` is how many statements this connection will keep parsed on
 the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
 off. See `m:minato_query` for what fills it.
@@ -204,6 +211,7 @@ given up on; see `deadline/2`.
     connect_timeout => timeout(),
     timeout => timeout(),
     socket_options => [gen_tcp:connect_option()],
+    transport => inet | socket,
     prepared_statements => non_neg_integer(),
     cancel_timeout => timeout(),
     frame_opts => minato_protocol:frame_opts()
@@ -228,6 +236,7 @@ An authentication method the server may ask for.
     | {socket, term()}
     | {tls, term()}
     | tls_refused
+    | tls_over_the_socket_transport
     | cleartext_password_refused
     | {auth_method_refused, method()}.
 
@@ -236,8 +245,8 @@ An authentication method the server may ask for.
 
 -export_type([conn/0, opts/0, method/0, key/0, error/0, report/0]).
 
--type transport() :: gen_tcp | ssl.
--type socket() :: gen_tcp:socket() | ssl:sslsocket().
+-type transport() :: gen_tcp | ssl | minato_socket.
+-type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
 
 -doc """
 Open a connection and complete the opening exchange.
@@ -280,10 +289,28 @@ opening(Opts) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    case gen_tcp:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> secure(Socket, Host, Timeout, Opts);
-        {error, Reason} -> {error, {socket, Reason}}
+    case transport(Opts) of
+        {ok, gen_tcp} ->
+            case gen_tcp:connect(Host, Port, socket_options(Opts), Timeout) of
+                {ok, Socket} -> secure(Socket, Host, Timeout, Opts);
+                {error, Reason} -> {error, {socket, Reason}}
+            end;
+        {ok, minato_socket} ->
+            case minato_socket:connect(Host, Port, socket_options(Opts), Timeout) of
+                {ok, Socket} -> start(new(minato_socket, Socket, Opts), Opts);
+                {error, Reason} -> {error, {socket, Reason}}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
+
+-spec transport(opts()) -> {ok, gen_tcp | minato_socket} | {error, error()}.
+transport(#{transport := socket, ssl := true}) ->
+    {error, tls_over_the_socket_transport};
+transport(#{transport := socket}) ->
+    {ok, minato_socket};
+transport(_Opts) ->
+    {ok, gen_tcp}.
 
 -doc """
 Close a connection.
@@ -572,8 +599,9 @@ options(Transport, Socket, Opts) ->
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
--spec options_module(transport()) -> inet | ssl.
+-spec options_module(transport()) -> inet | ssl | minato_socket.
 options_module(gen_tcp) -> inet;
+options_module(minato_socket) -> minato_socket;
 options_module(ssl) -> ssl.
 
 -doc """
@@ -839,7 +867,8 @@ bound(Credentials, Hash, Binding) ->
 
 -spec prefer(transport()) -> minato_auth:channel_binding().
 prefer(ssl) -> prefer;
-prefer(gen_tcp) -> disable.
+prefer(gen_tcp) -> disable;
+prefer(minato_socket) -> disable.
 
 -doc """
 The `tls-server-end-point` binding data for this connection, or `undefined`.
@@ -857,6 +886,8 @@ channel_binding(#conn{binding = Hash}) ->
 
 -spec binding(transport(), socket()) -> binary() | undefined.
 binding(gen_tcp, _Socket) ->
+    undefined;
+binding(minato_socket, _Socket) ->
     undefined;
 binding(ssl, Socket) ->
     case ssl:peercert(Socket) of
