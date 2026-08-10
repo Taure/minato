@@ -149,6 +149,18 @@ a_borrower_that_dies_does_not_take_the_pool_down(_Config) ->
 %%----------------------------------------------------------------------
 
 tls_runs_over_this_transport(_Config) ->
+    case reachable() of
+        false -> {skip, no_tls_server};
+        true -> over_tls()
+    end.
+
+%% The test certificates are made by the second compose service, so a machine
+%% running the suite without it has no CA to verify against and no server to
+%% verify. Reading the file first keeps that a skip rather than an enoent.
+reachable() ->
+    filelib:is_regular(certificate("ca.crt")).
+
+over_tls() ->
     case minato_conn:connect(secured()) of
         {ok, Conn} ->
             {ok, #{rows := [{42}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [42]),
