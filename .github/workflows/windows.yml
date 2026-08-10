@@ -109,22 +109,20 @@ jobs:
       - name: EUnit
         run: rebar3 eunit
 
-      # Split so that a suite which hangs rather than fails says which one it
-      # was. The TLS suites are last because they are the ones this runner
-      # gained when it gained a certificate.
-      - name: Common Test
+      # The TLS suites run first and alone, because they are what this runner
+      # gained when it gained a certificate, and a suite that hangs rather than
+      # fails should say which one it was.
+      - name: Common Test, TLS
         timeout-minutes: 6
-        run: >
-          rebar3 ct --suite
-          test/minato_authentication_SUITE,test/minato_connection_SUITE,test/minato_query_SUITE,test/minato_txn_SUITE,test/minato_pool_SUITE,test/minato_listener_SUITE,test/minato_cache_SUITE,test/minato_telemetry_SUITE,test/minato_soak_SUITE,test/minato_roundtrip_SUITE,test/minato_prop_SUITE,test/minato_differential_SUITE
+        run: rebar3 ct --suite test/minato_tls_SUITE
 
       - name: Common Test, the socket transport
         timeout-minutes: 6
         run: rebar3 ct --suite test/minato_socket_SUITE
 
-      - name: Common Test, TLS
-        timeout-minutes: 6
-        run: rebar3 ct --suite test/minato_tls_SUITE
+      - name: Common Test
+        timeout-minutes: 10
+        run: rebar3 ct
 
       - name: What the TLS server logged, if anything went wrong
         if: failure()
