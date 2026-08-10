@@ -653,6 +653,21 @@ handle_message(
     {'$socket', Socket, completion, {Handle, {error, Reason}}}
 ) ->
     {closed, Reason};
+%% The wait can also end with the machine taking it away rather than answering
+%% it: a peer that closes while a read is outstanding aborts it on Windows
+%% instead of completing it with an error. Ignoring that leaves an owner waiting
+%% on a socket that will never speak again, which is a listener that never
+%% reconnects.
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, waiting = {completion_info, _Tag, Handle}},
+    {'$socket', Socket, abort, {Handle, Reason}}
+) ->
+    {closed, Reason};
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, waiting = {select_info, _Tag, Handle}},
+    {'$socket', Socket, abort, {Handle, Reason}}
+) ->
+    {closed, Reason};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_closed, Socket}) ->
     {closed, closed};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_error, Socket, Reason}) ->

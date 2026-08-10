@@ -37,6 +37,7 @@ Skips when no server answers.
     a_borrower_that_dies_does_not_take_the_pool_down/1,
     tls_runs_over_this_transport/1,
     a_notification_arrives_over_this_transport/1,
+    a_connection_that_dies_while_waiting_says_so/1,
     a_connection_goes_back_to_reading_after_waiting/1,
     a_listener_runs_over_this_transport/1
 ]).
@@ -66,6 +67,7 @@ cases() ->
         a_borrower_that_dies_does_not_take_the_pool_down,
         tls_runs_over_this_transport,
         a_notification_arrives_over_this_transport,
+        a_connection_that_dies_while_waiting_says_so,
         a_connection_goes_back_to_reading_after_waiting,
         a_listener_runs_over_this_transport
     ].
@@ -237,6 +239,49 @@ a_notification_arrives_over_this_transport(Config) ->
         Notification
     ),
     ok = minato_conn:close(Waiting).
+
+%% The server going away while a wait is outstanding is not the same as a read
+%% finding a closed socket, and the machines do not agree on how it is said: a
+%% `select` that never becomes readable, a completion answered with an error, or
+%% the wait taken away entirely with an `abort`. All three have to reach the
+%% owner as a close, because an owner that hears nothing is a listener that
+%% never reconnects.
+a_connection_that_dies_while_waiting_says_so(Config) ->
+    Marker = atom_to_binary(named(dies, Config)),
+    {ok, Conn} = minato_conn:connect((opts(Config))#{
+        parameters => #{~"application_name" => Marker}
+    }),
+    {ok, Waiting} = minato_conn:activate(Conn),
+    ok = terminated(Marker, Config),
+    ?assertMatch({closed, _Reason}, closed(Waiting)).
+
+%% A wait is for one message, so what arrives before the close - the server's
+%% own `FATAL` on its way out - is read and the connection armed again, which is
+%% what a listener does between notifications.
+closed(Conn) ->
+    receive
+        Message ->
+            case minato_conn:handle_message(Conn, Message) of
+                {messages, _Any, Again} -> closed(rearmed(Again));
+                ignore -> closed(Conn);
+                {closed, Reason} -> {closed, Reason}
+            end
+    after ?TIMEOUT -> ct:fail(never_said_it_closed)
+    end.
+
+rearmed(Conn) ->
+    case minato_conn:activate(Conn) of
+        {ok, Armed} -> Armed;
+        {error, Reason} -> ct:fail({never_armed_again, Reason})
+    end.
+
+terminated(Marker, Config) ->
+    {ok, Conn} = minato_conn:connect(opts(Config)),
+    Sql = ~"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    {ok, #{rows := Rows}, Ready} = minato_query:query(Conn, Sql, [Marker]),
+    ok = minato_conn:close(Ready),
+    ?assertMatch([_Killed | _Rest], Rows),
+    ok.
 
 a_connection_goes_back_to_reading_after_waiting(Config) ->
     Conn = connected(Config),

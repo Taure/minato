@@ -162,11 +162,16 @@ for the calling process, so whoever wants the message has to make the call.
 """.
 -spec activate(socket()) -> {ok, binary()} | {waiting, waiting()} | {error, term()}.
 activate(Socket) ->
-    case socket:recv(Socket, 0, nowait) of
+    try socket:recv(Socket, 0, nowait) of
         {ok, Data} -> {ok, Data};
         {select, Select} -> {waiting, Select};
         {completion, Completion} -> {waiting, Completion};
         {error, Reason} -> {error, Reason}
+    catch
+        %% A socket whose read was aborted from under it has no state left to
+        %% read in, and Windows raises rather than answering. It is closed, and
+        %% the caller asked a question that has an answer.
+        error:{invalid, state} -> {error, closed}
     end.
 
 -doc """
