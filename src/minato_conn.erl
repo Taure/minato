@@ -56,6 +56,17 @@ exchange and keep the session; with binding, the hash it bound to is not the one
 the real server sees, and the proof is refused. `channel_binding => require`
 refuses to connect without it.
 
+## A refusal that arrives as a closed socket
+
+A server that refuses the startup exchange writes why and then the backend
+exits. On Windows a socket closed with anything still unread is reset rather
+than shut down, and a reset discards what the far end had already received, so
+the reason can be gone before it can be read: `connect/1` answers
+`{error, {socket, closed}}` or `{error, {socket, econnreset}}` where the same
+call on Linux answers `{error, {pgsql_error, #{code := <<"3D000">>}}}`. The
+connection is refused either way, and the server's log has the reason. Nothing
+on this side can recover a message the kernel threw away.
+
 ## Cleartext passwords
 
 A server may ask for the password in the clear. minato answers only when the
