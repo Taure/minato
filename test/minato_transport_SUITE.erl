@@ -273,12 +273,14 @@ a_connection_that_dies_while_waiting_says_so(Config) ->
 
 %% A wait is for one message, so what arrives before the close - the server's
 %% own `FATAL` on its way out - is read and the connection armed again, which is
-%% what a listener does between notifications.
+%% what a listener does between notifications. Arming a socket the server has
+%% already gone from is the close said in the other place it can be said, and
+%% which of the two happens is a race with the server's own shutdown.
 closed(Conn) ->
     receive
         Message ->
             case minato_conn:handle_message(Conn, Message) of
-                {messages, _Any, Again} -> closed(rearmed(Again));
+                {messages, _Any, Again} -> rearmed(Again);
                 ignore -> closed(Conn);
                 {closed, Reason} -> {closed, Reason}
             end
@@ -287,8 +289,8 @@ closed(Conn) ->
 
 rearmed(Conn) ->
     case minato_conn:activate(Conn) of
-        {ok, Armed} -> Armed;
-        {error, Reason} -> ct:fail({never_armed_again, Reason})
+        {ok, Armed} -> closed(Armed);
+        {error, Reason} -> {closed, Reason}
     end.
 
 terminated(Marker, Config) ->
