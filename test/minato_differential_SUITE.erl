@@ -295,6 +295,13 @@ accordingly. Neither is minato's defect and neither is a reason to stop testing
 the value: the reserved minimum is `-infinity`, not a date, on every version.
 """.
 -spec known(atom(), term(), #{atom() => term()}) -> {yes, atom()} | no.
+known(text_encode, Type, #{from_text := Text, from_binary := Binary}) when
+    is_binary(Text),
+    is_binary(Binary),
+    Type =:= float4 orelse Type =:= float8 orelse
+        Type =:= {array, float4} orelse Type =:= {array, float8}
+->
+    nan_payload(Type, Text, Binary);
 known(oracle_encode, Type, #{unsupported := no_null_encoding}) when
     Type =:= {array, bool};
     Type =:= {array, bytea};
@@ -440,6 +447,32 @@ trim_zeros(Mantissa, Exponent) ->
 zip([], _Other) -> [];
 zip(_Mine, []) -> [];
 zip([Mine | Rest], [Theirs | OtherRest]) -> [{Mine, Theirs} | zip(Rest, OtherRest)].
+
+-doc """
+Whether two encodings of the same float differ only in the bits of a NaN.
+
+IEEE 754 says nothing about the payload a NaN gets when one is made from the
+string "NaN", so a server whose C library writes `7fffffff` and one that writes
+`7fc00000` are both right and both mean NaN. The two are told apart from a real
+disagreement by decoding them: every NaN decodes to the atom, so bytes that
+differ and values that do not is the payload and nothing else.
+""".
+-spec nan_payload(minato_oid:name() | {array, minato_oid:name()}, binary(), binary()) ->
+    {yes, atom()} | no.
+nan_payload(Type, Text, Binary) ->
+    Oid = minato_oid:oid(Type),
+    case {value(Oid, Text), value(Oid, Binary)} of
+        {{ok, Same}, {ok, Same}} -> {yes, nan_payloads_are_not_specified};
+        _Really_different -> no
+    end.
+
+-spec value(minato_oid:oid(), binary()) -> {ok, term()} | error.
+value(Oid, Bytes) ->
+    try
+        {ok, minato_codec:decode(Oid, Bytes, binary, #{})}
+    catch
+        _Class:_Reason -> error
+    end.
 
 -spec worst([{yes, atom()} | no]) -> {yes, atom()} | no.
 worst([]) ->
@@ -730,11 +763,18 @@ stores whatever bit pattern it is handed.
 """.
 -spec minato_encodes_a_quiet_nan(ct_suite:ct_config()) -> ok.
 minato_encodes_a_quiet_nan(_Config) ->
-    ?assertEqual(<<16#7FC00000:32>>, server_binary(~"float4", ~"NaN")),
-    ?assertEqual(<<16#7FF8000000000000:64>>, server_binary(~"float8", ~"NaN")),
+    %% What minato writes is the canonical quiet NaN, and that is asserted
+    %% exactly. What the server writes is whatever its C library makes of the
+    %% string, which is `7fc00000` on glibc and `7fffffff` on Windows and is a
+    %% quiet NaN either way - the payload of a NaN is not specified, so only the
+    %% quietness is worth asserting.
     ?assertEqual(<<16#7FC00000:32>>, minato_corpus:encoded(700, nan, binary, #{})),
     ?assertEqual(
         <<16#7FF8000000000000:64>>, minato_corpus:encoded(701, nan, binary, #{})
+    ),
+    ?assertMatch(<<_Sign:1, 255:8, 1:1, _Payload:22>>, server_binary(~"float4", ~"NaN")),
+    ?assertMatch(
+        <<_Sign:1, 2047:11, 1:1, _Payload:51>>, server_binary(~"float8", ~"NaN")
     ),
     ok.
 

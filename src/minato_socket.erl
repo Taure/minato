@@ -213,6 +213,24 @@ opened(Domain, Address, Opts, Timeout) ->
 -spec started(socket(), socket:sockaddr(), [term()], timeout()) ->
     {ok, socket()} | {error, term()}.
 started(Socket, Address, Opts, Timeout) ->
+    case bound(Socket, Address) of
+        ok -> connecting(Socket, Address, Opts, Timeout);
+        {error, Reason} -> failed(Socket, Reason)
+    end.
+
+-doc false.
+-spec bound(socket(), socket:sockaddr()) -> ok | {error, term()}.
+%% Windows refuses to connect a socket that was never bound, and answers
+%% `not_bound` rather than binding it for you. Binding to the wildcard is what
+%% the driver does on every machine, and costs nothing where it was not needed.
+bound(Socket, #{family := Family}) when Family =:= inet; Family =:= inet6 ->
+    socket:bind(Socket, any);
+bound(_Socket, _Local) ->
+    ok.
+
+-spec connecting(socket(), socket:sockaddr(), [term()], timeout()) ->
+    {ok, socket()} | {error, term()}.
+connecting(Socket, Address, Opts, Timeout) ->
     case socket:connect(Socket, Address, Timeout) of
         ok -> tuned(Socket, Opts);
         {error, Reason} -> failed(Socket, Reason)
