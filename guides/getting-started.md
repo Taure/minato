@@ -6,7 +6,7 @@ to a query.
 ## Add it
 
 ```erlang
-{deps, [{minato, "~> 0.1"}]}.
+{deps, [{minato, "~> 1.0"}]}.
 ```
 
 And to your `.app.src`, so it starts before you use it:

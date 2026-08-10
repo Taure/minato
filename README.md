@@ -6,15 +6,21 @@ An independent PostgreSQL client for Erlang.
 
 ## Status
 
-Early, and usable end to end: codecs, protocol, authentication with channel
-binding, TLS, connections, queries, transactions, a pool, `LISTEN`/`NOTIFY`,
-telemetry and logs. Nothing runs on it in production yet, and the API is not
-stable. Read [the design guide](guides/design.md) before depending on it.
+1.0, which is a promise about the API rather than a claim about mileage: the
+surface is settled and a breaking change costs a major version from here.
+Codecs, protocol, authentication with channel binding, TLS, connections,
+queries, transactions, a pool, `LISTEN`/`NOTIFY`, telemetry and logs, over the
+socket NIFs or the inet driver, on Linux and on Windows.
+
+Its mileage is one operator and one workload: it runs in production under
+[asobi](https://asobi.dev)'s hosted game environments. Nobody else's traffic
+has been near it. Read [the design guide](guides/design.md) for the decisions
+you would be taking on.
 
 ## Install
 
 ```erlang
-{deps, [{minato, "~> 0.1"}]}.
+{deps, [{minato, "~> 1.0"}]}.
 ```
 
 ```erlang
