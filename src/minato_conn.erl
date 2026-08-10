@@ -117,6 +117,14 @@ the server issued is the whole of the authorisation.
 
 -include_lib("public_key/include/public_key.hrl").
 
+%% eqWAlizer cannot see that the transport field decides what the socket field
+%% holds, and `ssl:connect/3` is specified for the sockets that existed before
+%% it learned to take a handle from `m:socket`. Both are true at run time and
+%% neither is expressible, so the two crossings live here rather than spread
+%% through the module.
+-eqwalizer({nowarn_function, handle/1}).
+-eqwalizer({nowarn_function, upgraded/3}).
+
 -record(conn, {
     transport :: transport(),
     socket :: socket(),
@@ -131,6 +139,7 @@ the server issued is the whole of the authorisation.
     cancelled = false :: boolean(),
     grace :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
+    select :: socket:select_info() | undefined,
     opened :: integer(),
     statements = #{} :: #{binary() => term()},
     prefix = ~"" :: binary(),
@@ -183,10 +192,10 @@ to bind to on a plain socket. `require` refuses to connect at all unless the
 server offers `SCRAM-SHA-256-PLUS`.
 
 `transport` is `inet`, the driver every BEAM program uses, or `socket`, which is
-`m:minato_socket` over the socket NIFs. `socket` is experimental: it is faster
-per operation and it cannot do TLS or `LISTEN`, so a connection asking for it
-and `ssl => true` is refused rather than quietly getting one of the two. See
-`m:minato_socket`.
+`m:minato_socket` over the socket NIFs. `socket` is experimental and faster per
+operation, by about a quarter on a query and about a half on a pooled one. It
+does everything the driver does, including TLS and `LISTEN`, except on Windows,
+where it cannot yet do `LISTEN`. See `m:minato_socket`.
 
 `prepared_statements` is how many statements this connection will keep parsed on
 the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
@@ -236,7 +245,6 @@ An authentication method the server may ask for.
     | {socket, term()}
     | {tls, term()}
     | tls_refused
-    | tls_over_the_socket_transport
     | cleartext_password_refused
     | {auth_method_refused, method()}.
 
@@ -245,7 +253,8 @@ An authentication method the server may ask for.
 
 -export_type([conn/0, opts/0, method/0, key/0, error/0, report/0]).
 
--type transport() :: gen_tcp | ssl | minato_socket.
+-type transport() :: plain() | ssl.
+-type plain() :: gen_tcp | minato_socket.
 -type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
 
 -doc """
@@ -289,28 +298,15 @@ opening(Opts) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    case transport(Opts) of
-        {ok, gen_tcp} ->
-            case gen_tcp:connect(Host, Port, socket_options(Opts), Timeout) of
-                {ok, Socket} -> secure(Socket, Host, Timeout, Opts);
-                {error, Reason} -> {error, {socket, Reason}}
-            end;
-        {ok, minato_socket} ->
-            case minato_socket:connect(Host, Port, socket_options(Opts), Timeout) of
-                {ok, Socket} -> start(new(minato_socket, Socket, Opts), Opts);
-                {error, Reason} -> {error, {socket, Reason}}
-            end;
-        {error, Reason} ->
-            {error, Reason}
+    Transport = transport(Opts),
+    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
+        {ok, Socket} -> secure(Transport, Socket, Host, Timeout, Opts);
+        {error, Reason} -> {error, {socket, Reason}}
     end.
 
--spec transport(opts()) -> {ok, gen_tcp | minato_socket} | {error, error()}.
-transport(#{transport := socket, ssl := true}) ->
-    {error, tls_over_the_socket_transport};
-transport(#{transport := socket}) ->
-    {ok, minato_socket};
-transport(_Opts) ->
-    {ok, gen_tcp}.
+-spec transport(opts()) -> plain().
+transport(#{transport := socket}) -> minato_socket;
+transport(_Opts) -> gen_tcp.
 
 -doc """
 Close a connection.
@@ -338,8 +334,9 @@ cancel(#conn{key = {Pid, Secret}, opts = Opts}) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    case gen_tcp:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> cancel(Socket, Host, Timeout, {Pid, Secret}, Opts);
+    Transport = transport(Opts),
+    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
+        {ok, Socket} -> cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
@@ -511,32 +508,63 @@ cancelling(Conn, Deadline, Timeout) ->
 -doc """
 Ask for the next bytes to arrive as a message instead of a read.
 
-`{active, once}` on the socket, so exactly one message arrives and the owner
-asks again. That is the arrangement a process which has to wait for the server
-without a query outstanding needs - `LISTEN` is the only one there is - because
-`next/1` blocks, and a process blocked in a read answers nothing else.
+Exactly one message arrives and the owner asks again. That is the arrangement a
+process which has to wait for the server without a query outstanding needs -
+`LISTEN` is the only one there is - because `next/1` blocks, and a process
+blocked in a read answers nothing else.
+
+`{active, once}` on the driver transport; on the socket transport a read that
+either hands back what is already here, in which case the message is sent from
+here, or registers this process for one `select`. Either way it is one message
+to whoever called, which is why the connection comes back: what it is waiting
+for is part of it.
 
 The connection is unusable for `next/1` until the messages stop coming, and the
 two must not be mixed on one connection.
 """.
--spec activate(conn()) -> ok | {error, error()}.
-activate(#conn{transport = Transport, socket = Socket}) ->
-    options(Transport, Socket, [{active, once}]).
+-spec activate(conn()) -> {ok, conn()} | {error, error()}.
+activate(#conn{transport = minato_socket} = Conn) ->
+    case minato_socket:activate(handle(Conn)) of
+        {ok, Data} -> {ok, delivered(Conn, Data)};
+        {waiting, Select} -> {ok, Conn#conn{select = Select}};
+        {error, Reason} -> {error, {socket, Reason}}
+    end;
+activate(#conn{transport = Transport, socket = Socket} = Conn) ->
+    case options(Transport, Socket, [{active, once}]) of
+        ok -> {ok, Conn};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec delivered(conn(), binary()) -> conn().
+delivered(#conn{socket = Socket} = Conn, Data) ->
+    self() ! {minato_socket, Socket, Data},
+    Conn#conn{select = undefined}.
 
 -doc """
 Go back to reading, after `activate/1`.
 
-`{active, false}` on the socket, and then whatever the socket already delivered
-to the mailbox is taken back into the buffer, because those bytes have left the
-socket and `next/1` would otherwise wait for bytes it already has. A connection
-that has been switched back can be read with `next/1` as usual.
+Whatever the socket already delivered to the mailbox is taken back into the
+buffer, because those bytes have left the socket and `next/1` would otherwise
+wait for bytes it already has. A connection that has been switched back can be
+read with `next/1` as usual.
+
+Bytes that were waited for but never arrived are not lost on the socket
+transport: cancelling the wait drops the message, not the socket's own buffer,
+so the next `next/1` reads them.
 """.
 -spec deactivate(conn()) -> {ok, conn()} | {error, error()}.
+deactivate(#conn{transport = minato_socket, select = Select} = Conn) ->
+    ok = waiting(handle(Conn), Select),
+    {ok, flushed(Conn#conn{select = undefined})};
 deactivate(#conn{transport = Transport, socket = Socket} = Conn) ->
     case options(Transport, Socket, [{active, false}]) of
         ok -> {ok, flushed(Conn)};
         {error, Reason} -> {error, Reason}
     end.
+
+-spec waiting(minato_socket:socket(), socket:select_info() | undefined) -> ok.
+waiting(_Socket, undefined) -> ok;
+waiting(Socket, Select) -> minato_socket:cancel(Socket, Select).
 
 -spec flushed(conn()) -> conn().
 flushed(#conn{transport = Transport, socket = Socket, buffer = Buffer} = Conn) ->
@@ -544,7 +572,9 @@ flushed(#conn{transport = Transport, socket = Socket, buffer = Buffer} = Conn) -
         {Tag, Delivered, Data} when
             Tag =:= Transport, Delivered =:= Socket, is_binary(Data)
         ->
-            flushed(Conn#conn{buffer = <<Buffer/binary, Data/binary>>})
+            flushed(Conn#conn{buffer = <<Buffer/binary, Data/binary>>});
+        {'$socket', Delivered, select, _Handle} when Delivered =:= Socket ->
+            flushed(Conn)
     after 0 ->
         Conn
     end.
@@ -570,6 +600,15 @@ handle_message(#conn{transport = ssl, socket = Socket} = Conn, {ssl, Socket, Dat
     is_binary(Data)
 ->
     arrived(Conn, Data);
+handle_message(#conn{transport = minato_socket, socket = Socket} = Conn, {Tag, Socket, Data}) when
+    Tag =:= minato_socket, is_binary(Data)
+->
+    arrived(Conn#conn{select = undefined}, Data);
+handle_message(
+    #conn{transport = minato_socket, socket = Socket, select = {select_info, _Tag, Handle}} = Conn,
+    {'$socket', Socket, select, Handle}
+) ->
+    readable(Conn#conn{select = undefined});
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_closed, Socket}) ->
     {closed, closed};
 handle_message(#conn{transport = gen_tcp, socket = Socket}, {tcp_error, Socket, Reason}) ->
@@ -580,6 +619,16 @@ handle_message(#conn{transport = ssl, socket = Socket}, {ssl_error, Socket, Reas
     {closed, Reason};
 handle_message(_Conn, _Message) ->
     ignore.
+
+-spec readable(conn()) ->
+    {messages, [minato_protocol:backend()], conn()} | {closed, term()}.
+readable(Conn) ->
+    case minato_socket:activate(handle(Conn)) of
+        {ok, Data} -> arrived(Conn, Data);
+        {waiting, Select} -> {messages, [], Conn#conn{select = Select}};
+        {error, closed} -> {closed, closed};
+        {error, Reason} -> {closed, Reason}
+    end.
 
 -spec arrived(conn(), binary()) -> {messages, [minato_protocol:backend()], conn()}.
 arrived(#conn{buffer = Buffer, pending = Pending, frame_opts = FrameOpts} = Conn, Data) ->
@@ -767,53 +816,63 @@ with_timeout(Conn, Timeout) ->
 %% Opening
 %%----------------------------------------------------------------------
 
--spec secure(gen_tcp:socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secure(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, conn()} | {error, error()}.
-secure(Socket, Host, Timeout, Opts) ->
+secure(Transport, Socket, Host, Timeout, Opts) ->
     case maps:get(ssl, Opts, false) of
         false ->
-            start(new(gen_tcp, Socket, Opts), Opts);
+            start(new(Transport, Socket, Opts), Opts);
         true ->
-            case upgrade(Socket, Host, Timeout, Opts) of
+            case upgrade(Transport, Socket, Host, Timeout, Opts) of
                 {ok, Upgraded} -> start(new(ssl, Upgraded, Opts), Opts);
                 {error, Reason} -> {error, Reason}
             end
     end.
 
--spec upgrade(gen_tcp:socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec upgrade(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-upgrade(Socket, Host, Timeout, Opts) ->
-    case gen_tcp:send(Socket, minato_protocol:encode(ssl_request)) of
-        ok -> negotiate(Socket, Host, Timeout, Opts);
-        {error, Reason} -> closing(gen_tcp, Socket, {socket, Reason})
+upgrade(Transport, Socket, Host, Timeout, Opts) ->
+    case Transport:send(Socket, minato_protocol:encode(ssl_request)) of
+        ok -> negotiate(Transport, Socket, Host, Timeout, Opts);
+        {error, Reason} -> closing(Transport, Socket, {socket, Reason})
     end.
 
--spec negotiate(gen_tcp:socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec negotiate(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-negotiate(Socket, Host, Timeout, Opts) ->
-    case gen_tcp:recv(Socket, 1, Timeout) of
+negotiate(Transport, Socket, Host, Timeout, Opts) ->
+    case Transport:recv(Socket, 1, Timeout) of
         {ok, Answer} when is_binary(Answer) ->
-            answered(minato_protocol:ssl_response(Answer), Socket, Host, Timeout, Opts);
+            answered(minato_protocol:ssl_response(Answer), Transport, Socket, Host, Timeout, Opts);
         {error, Reason} ->
-            closing(gen_tcp, Socket, {socket, Reason})
+            closing(Transport, Socket, {socket, Reason})
     end.
 
 -spec answered(
     {ok, accepted | rejected | error_response, binary()} | incomplete,
-    gen_tcp:socket(),
+    plain(),
+    socket(),
     inet:socket_address() | inet:hostname(),
     timeout(),
     opts()
 ) -> {ok, ssl:sslsocket()} | {error, error()}.
-answered({ok, accepted, _Rest}, Socket, Host, Timeout, Opts) ->
-    case ssl:connect(Socket, tls_options(Host, Opts), Timeout) of
+answered({ok, accepted, _Rest}, Transport, Socket, Host, Timeout, Opts) ->
+    case upgraded(Socket, tls_options(Host, Opts), Timeout) of
         {ok, Upgraded} -> {ok, Upgraded};
-        {error, Reason} -> closing(gen_tcp, Socket, {tls, Reason})
+        {error, Reason} -> closing(Transport, Socket, {tls, Reason})
     end;
-answered({ok, _Refused, _Rest}, Socket, _Host, _Timeout, _Opts) ->
-    closing(gen_tcp, Socket, tls_refused);
-answered(incomplete, Socket, _Host, _Timeout, _Opts) ->
-    closing(gen_tcp, Socket, {socket, closed}).
+answered({ok, _Refused, _Rest}, Transport, Socket, _Host, _Timeout, _Opts) ->
+    closing(Transport, Socket, tls_refused);
+answered(incomplete, Transport, Socket, _Host, _Timeout, _Opts) ->
+    closing(Transport, Socket, {socket, closed}).
+
+-spec handle(conn()) -> minato_socket:socket().
+handle(#conn{socket = Socket}) ->
+    Socket.
+
+-spec upgraded(socket(), [ssl:tls_client_option()], timeout()) ->
+    {ok, ssl:sslsocket()} | {error, term()}.
+upgraded(Socket, Options, Timeout) ->
+    ssl:connect(Socket, Options, Timeout).
 
 -spec new(transport(), socket(), opts()) -> conn().
 new(Transport, Socket, Opts) ->
@@ -1010,10 +1069,10 @@ all_methods() ->
 %%----------------------------------------------------------------------
 
 -spec cancel(
-    gen_tcp:socket(), inet:socket_address() | inet:hostname(), timeout(), key(), opts()
+    plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), key(), opts()
 ) -> ok | {error, error()}.
-cancel(Socket, Host, Timeout, {Pid, Secret}, Opts) ->
-    case secured(Socket, Host, Timeout, Opts) of
+cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts) ->
+    case secured(Transport, Socket, Host, Timeout, Opts) of
         {ok, Transport, Secured} ->
             Sent = write(Transport, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
             _ = Transport:close(Secured),
@@ -1022,18 +1081,17 @@ cancel(Socket, Host, Timeout, {Pid, Secret}, Opts) ->
             {error, Reason}
     end.
 
--spec secured(gen_tcp:socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secured(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, transport(), socket()} | {error, error()}.
-secured(Socket, Host, Timeout, Opts) ->
-    case maps:get(ssl, Opts, false) of
-        false ->
-            {ok, gen_tcp, Socket};
-        true ->
-            case upgrade(Socket, Host, Timeout, Opts) of
-                {ok, Upgraded} -> {ok, ssl, Upgraded};
-                {error, Reason} -> {error, Reason}
-            end
-    end.
+secured(Transport, Socket, _Host, _Timeout, #{ssl := false}) ->
+    {ok, Transport, Socket};
+secured(Transport, Socket, Host, Timeout, #{ssl := true} = Opts) ->
+    case upgrade(Transport, Socket, Host, Timeout, Opts) of
+        {ok, Upgraded} -> {ok, ssl, Upgraded};
+        {error, Reason} -> {error, Reason}
+    end;
+secured(Transport, Socket, _Host, _Timeout, _Opts) ->
+    {ok, Transport, Socket}.
 
 %%----------------------------------------------------------------------
 %% The socket

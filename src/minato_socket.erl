@@ -10,8 +10,8 @@ the transport can be chosen per connection with nothing else changing.
 ## Why
 
 A send and a read through the inet driver cost about 323 reductions a round
-trip: `m:prim_inet` monitors the port, serialises a reference, hands the bytes
-to the driver and waits for a reply message. The same round trip through
+trip: the driver's own layer monitors the port, serialises a reference, hands
+the bytes over and waits for a reply message. The same round trip through
 `m:socket` costs about 97, because a NIF call is a function call.
 
 The other half is the pool. A driver port has a connected process and only that
@@ -23,19 +23,32 @@ ownership is a NIF call rather than a port reassignment, and a pool that decided
 a borrower's death should cost a reset rather than a connection could stop
 moving it at all.
 
-## What is different
+## Waiting for bytes without reading
 
-`{active, once}` is not implemented. `m:socket` has no active mode; it has
-`nowait` and a select token, which is a different shape and belongs with the
-listener that needs it rather than in a compatibility shim. `setopts/2` refuses
-it rather than pretending.
+`m:socket` has no active mode, so `setopts/2` refuses `{active, once}` rather
+than pretending. What it has instead is `activate/1`: a read that either hands
+back what is already here or registers the caller for one
+`{'$socket', Socket, select, Handle}` message when the socket becomes readable.
+That is the same arrangement `{active, once}` is - exactly one message, and the
+owner asks again - and it costs no process, because the message goes to whoever
+made the call rather than to a reader spawned to forward it.
 
-TLS is not here either. `m:ssl` wants an inet socket, so a connection asking
-for both TLS and this transport is refused by `m:minato_conn` rather than
-quietly getting one of the two.
+Windows completes reads rather than selecting on them, and this does not
+implement that shape. `activate/1` refuses it, so `LISTEN` over this transport
+is a POSIX arrangement until somebody with a Windows machine finishes it.
+Everything else here works on either.
+
+## TLS
+
+`ssl:connect/3` takes one of these handles, so a connection that asks for TLS
+sends its `SSLRequest` through this module and hands the upgraded socket to
+`m:ssl` exactly as the driver transport does. What comes back is an ordinary
+`t:ssl:sslsocket/0`, so nothing below TLS is this module's business afterwards -
+including the certificate hash SCRAM binds to.
 """.
 
 -export([connect/4, send/2, recv/3, close/1, controlling_process/2, setopts/2]).
+-export([activate/1, cancel/2]).
 
 %% eqWAlizer reads the eight words of an `inet:ip6_address()` as `integer()` and
 %% the eight of a `socket:in6_addr()` as `0..65535`, so a v6 address that came
@@ -43,7 +56,13 @@ quietly getting one of the two.
 %% this. The v4 half of the same function checks.
 -eqwalizer({nowarn_function, target/2}).
 
--doc "A socket handle. Unlike a port, it belongs to nobody.".
+-doc """
+A socket handle.
+
+Unlike a port it is not owned for the purpose of using it: any process holding
+one can read and write. It is owned for the purpose of living, and is closed
+when that process terminates.
+""".
 -type socket() :: socket:socket().
 
 -export_type([socket/0]).
@@ -114,6 +133,39 @@ reassignment.
 -spec controlling_process(socket(), pid()) -> ok | {error, term()}.
 controlling_process(Socket, Pid) ->
     socket:setopt(Socket, {otp, controlling_process}, Pid).
+
+-doc """
+Take the bytes that are here, or arrange for a message when there are some.
+
+`{waiting, Select}` means the owner will be sent
+`{'$socket', Socket, select, Handle}` once the socket is readable, and the
+`Handle` in it is the one inside `Select`. Reading is then this call again,
+which is why there is one function rather than an arm and a take: a wakeup with
+nothing behind it re-arms rather than being mistaken for data.
+
+The waiting is registered for the calling process, so whoever wants the message
+has to make the call.
+""".
+-spec activate(socket()) ->
+    {ok, binary()} | {waiting, socket:select_info()} | {error, term()}.
+activate(Socket) ->
+    case socket:recv(Socket, 0, nowait) of
+        {ok, Data} -> {ok, Data};
+        {select, Select} -> {waiting, Select};
+        {completion, _Completion} -> {error, completion_mode_unsupported};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-doc """
+Drop a waiting arranged by `activate/1`.
+
+Bytes that arrived are not lost by this: they are still in the socket, and the
+next `recv/3` reads them. What goes is the message that would have said so.
+""".
+-spec cancel(socket(), socket:select_info()) -> ok.
+cancel(Socket, Select) ->
+    _ = socket:cancel(Socket, Select),
+    ok.
 
 -doc "Set what can be set. `{active, _}` is refused; see the module note.".
 -spec setopts(socket(), [term()]) -> ok | {error, term()}.

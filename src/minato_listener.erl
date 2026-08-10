@@ -363,7 +363,7 @@ reactivated(#state{conn = undefined} = State) ->
     State;
 reactivated(#state{conn = Conn} = State) ->
     case minato_conn:activate(Conn) of
-        ok -> State;
+        {ok, Active} -> State#state{conn = Active};
         {error, _Reason} -> dropped(State)
     end.
 

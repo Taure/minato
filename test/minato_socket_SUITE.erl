@@ -7,9 +7,12 @@ of this suite is that everything above the transport cannot tell which one it
 got: the same authentication, the same query paths, the same errors leaving a
 connection usable, and the same pool lending it out and taking it back.
 
-The two differences it does have are proved rather than described. TLS is
-refused rather than silently downgraded, and `{active, once}` is refused rather
-than pretended, which is why a listener cannot run on this transport yet.
+The two hard parts are proved rather than described. `m:ssl` takes one of these
+handles directly, so TLS is the same exchange over a different socket and the
+certificate hash SCRAM binds to is the same hash. `m:socket` has no active mode,
+so `LISTEN` is a `select` registered by the owning process and answered in its
+own mailbox - no reader process between the socket and the connection - and a
+notification has to arrive through it.
 
 Skips when no server answers.
 """.
@@ -26,8 +29,10 @@ Skips when no server answers.
     a_pool_lends_a_connection_and_takes_it_back/1,
     a_pooled_connection_outlives_the_process_that_opened_it/1,
     a_borrower_that_dies_does_not_take_the_pool_down/1,
-    tls_over_this_transport_is_refused/1,
-    active_mode_is_refused/1
+    tls_runs_over_this_transport/1,
+    a_notification_arrives_over_this_transport/1,
+    a_connection_goes_back_to_reading_after_waiting/1,
+    a_listener_runs_over_this_transport/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -43,8 +48,10 @@ all() ->
         a_pool_lends_a_connection_and_takes_it_back,
         a_pooled_connection_outlives_the_process_that_opened_it,
         a_borrower_that_dies_does_not_take_the_pool_down,
-        tls_over_this_transport_is_refused,
-        active_mode_is_refused
+        tls_runs_over_this_transport,
+        a_notification_arrives_over_this_transport,
+        a_connection_goes_back_to_reading_after_waiting,
+        a_listener_runs_over_this_transport
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -135,26 +142,106 @@ a_borrower_that_dies_does_not_take_the_pool_down(_Config) ->
     _ = minato:stop_pool(Name).
 
 %%----------------------------------------------------------------------
-%% What this transport will not do
+%% TLS, which ssl does over one of these handles unchanged
 %%----------------------------------------------------------------------
 
-tls_over_this_transport_is_refused(_Config) ->
-    ?assertEqual(
-        {error, tls_over_the_socket_transport},
-        minato_conn:connect((opts())#{ssl => true})
-    ).
+tls_runs_over_this_transport(_Config) ->
+    case minato_conn:connect(secured()) of
+        {ok, Conn} ->
+            {ok, #{rows := [{42}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [42]),
+            ?assertNotEqual(undefined, minato_conn:channel_binding(Ready)),
+            {ok, #{rows := [{true}]}, Read} =
+                minato_query:query(
+                    Ready, ~"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()", []
+                ),
+            ok = minato_conn:close(Read);
+        {error, Reason} ->
+            {skip, {no_tls_server, Reason}}
+    end.
 
-active_mode_is_refused(_Config) ->
+%%----------------------------------------------------------------------
+%% Waiting for the server without a read outstanding
+%%----------------------------------------------------------------------
+
+a_notification_arrives_over_this_transport(_Config) ->
     Conn = connected(),
-    ?assertEqual({error, {socket, active_mode_unsupported}}, minato_conn:activate(Conn)),
-    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
+    {ok, _Results, Listening} = minato_query:simple(Conn, ~"LISTEN minato_socket_suite"),
+    {ok, Waiting} = minato_conn:activate(Listening),
+    ok = notify(~"minato_socket_suite", ~"through a select"),
+    Notification = awaited(Waiting),
+    ?assertMatch(
+        {notification_response, _Pid, ~"minato_socket_suite", ~"through a select"},
+        Notification
+    ),
+    ok = minato_conn:close(Waiting).
+
+a_connection_goes_back_to_reading_after_waiting(_Config) ->
+    Conn = connected(),
+    {ok, Waiting} = minato_conn:activate(Conn),
+    {ok, Passive} = minato_conn:deactivate(Waiting),
+    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Passive, ~"SELECT $1::int4", [1]),
     ok = minato_conn:close(Ready).
+
+a_listener_runs_over_this_transport(_Config) ->
+    Name = minato_socket_suite_listener,
+    {ok, _Pid} = minato:start_listener(Name, #{connection => opts()}),
+    ok = minato:listen(Name, ~"minato_socket_listener"),
+    ok = notify(~"minato_socket_listener", ~"all the way up"),
+    receive
+        {minato_notification, ~"minato_socket_listener", ~"all the way up", _From} -> ok
+    after ?TIMEOUT -> ct:fail(no_notification)
+    end,
+    ok = minato:listen(Name, ~"minato_socket_listener_again"),
+    ok = notify(~"minato_socket_listener_again", ~"and again"),
+    receive
+        {minato_notification, ~"minato_socket_listener_again", ~"and again", _Also} -> ok
+    after ?TIMEOUT -> ct:fail(no_second_notification)
+    end,
+    ok = minato:stop_listener(Name).
+
+awaited(Conn) ->
+    receive
+        Message ->
+            case minato_conn:handle_message(Conn, Message) of
+                {messages, [], _Again} -> awaited(Conn);
+                {messages, Messages, _Read} -> hd(Messages);
+                ignore -> awaited(Conn);
+                {closed, Reason} -> ct:fail({closed, Reason})
+            end
+    after ?TIMEOUT -> ct:fail(no_notification)
+    end.
+
+notify(Channel, Payload) ->
+    {ok, Conn} = minato_conn:connect(opts()),
+    Sql = <<"NOTIFY ", Channel/binary, ", '", Payload/binary, "'">>,
+    {ok, _Results, Ready} = minato_query:simple(Conn, Sql),
+    minato_conn:close(Ready).
 
 %%----------------------------------------------------------------------
 
 connected() ->
     {ok, Conn} = minato_conn:connect(opts()),
     Conn.
+
+secured() ->
+    (opts())#{
+        host => env("MINATO_TLS_HOST", "localhost"),
+        port => list_to_integer(env("MINATO_TLS_PORT", "55433")),
+        ssl => true,
+        ssl_options => [{cacerts, cacerts()}]
+    }.
+
+cacerts() ->
+    {ok, Pem} = file:read_file(certificate("ca.crt")),
+    [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)].
+
+certificate(Name) ->
+    filename:join([directory(code:lib_dir(minato)), "test", "certs", Name]).
+
+directory({error, Reason}) ->
+    error({no_application_directory, Reason});
+directory(Directory) ->
+    Directory.
 
 pool(Case) ->
     Name = list_to_atom("minato_socket_suite_" ++ atom_to_list(Case)),
