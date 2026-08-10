@@ -202,10 +202,12 @@ to `prefer` under `ssl => true` and `disable` without it, since there is nothing
 to bind to on a plain socket. `require` refuses to connect at all unless the
 server offers `SCRAM-SHA-256-PLUS`.
 
-`transport` is `inet`, the driver every BEAM program uses, or `socket`, which is
-`m:minato_socket` over the socket NIFs. `socket` is experimental and faster per
-operation, by about a quarter on a query and about a half on a pooled one, and
-does everything the driver does on every machine minato runs on. See
+`transport` is `socket`, which is `m:minato_socket` over the socket NIFs, or
+`inet`, the driver every BEAM program uses. `socket` is the default: it does
+everything the driver does on every machine minato runs on, costs about a
+quarter less per query and about half less per pooled one, and holds more
+throughput at the same CPU once a pool is deep enough for per-operation cost to
+show. `inet` is there for a machine or a workload that disagrees. See
 `m:minato_socket`.
 
 `prepared_statements` is how many statements this connection will keep parsed on
@@ -316,8 +318,8 @@ opening(Opts) ->
     end.
 
 -spec transport(opts()) -> plain().
-transport(#{transport := socket}) -> minato_socket;
-transport(_Opts) -> gen_tcp.
+transport(#{transport := inet}) -> gen_tcp;
+transport(_Opts) -> minato_socket.
 
 -doc """
 Close a connection.

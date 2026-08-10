@@ -61,6 +61,13 @@ end).
 - **Result sets are framed in bulk.** One read with the remainder carried
   forward, never a header read then a payload read: 61 reads over 5000 rows
   rather than 10,006. See [the benchmark](bench/README.md).
+- **The socket NIFs are the default transport, not the inet driver.** A round
+  trip costs about 97 reductions rather than 323, and lending a connection out
+  of the pool costs a NIF call rather than two port reassignments. At sixty-four
+  connections that is about a fifth more queries a second for about a sixth less
+  of the machine; at sixteen it is nothing at all, because the pool is the
+  ceiling before the client is. `transport => inet` is one option away. See
+  [the benchmark](bench/README.md).
 
 ## Guides
 

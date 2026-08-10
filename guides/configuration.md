@@ -24,6 +24,7 @@ directly.
 | `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge |
 | `prepared_statements` | `64` | how many statements a connection keeps parsed; `0` disables |
 | `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}` | each replaces one default |
+| `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
 | `frame_opts` | `#{max_message_length => 67108864}` | raise it only for a single value near PostgreSQL's 1 GB limit |
 
 Two startup parameters are sent unless `parameters` overrides them:
@@ -33,6 +34,20 @@ server sending LATIN1 would put mojibake in a binary rather than raise;
 unambiguous under ISO. Set `application_name` here - it is what
 `pg_stat_activity` shows, and it is the difference between finding the query
 that is hurting and guessing.
+
+`transport` is `socket`, which is `minato_socket` over the socket NIFs. It does
+everything the driver does on every machine minato runs on, costs about a
+quarter less per query and about half less per pooled one, and holds more
+throughput at the same CPU once a pool is deep enough for per-operation cost to
+matter at all - see the [bench](https://github.com/Taure/minato/tree/main/bench)
+for where that is and is not true. `inet` is the driver, and is one option away
+for a machine or a workload that disagrees.
+
+The two transports take the same `socket_options`, but the socket transport has
+no driver behind it to hold the ones it does not use: `nodelay`, `keepalive`,
+`recbuf` and `sndbuf` are set on the socket, `binary`, `{packet, raw}`,
+`{active, false}` and `buffer` are accepted and ignored, and anything else is
+refused at connect rather than silently dropped.
 
 ## A pool
 

@@ -2,10 +2,11 @@
 -moduledoc """
 The `m:socket` module behind the same calls `m:gen_tcp` answers.
 
-Experimental, and not the default. `m:minato_conn` speaks to its transport
-through `connect/4`, `send/2`, `recv/3`, `close/1`, `controlling_process/2` and
+The default transport. `m:minato_conn` speaks to its transport through
+`connect/4`, `send/2`, `recv/3`, `close/1`, `controlling_process/2` and
 `setopts/2`, and this module answers all six on top of the socket NIFs so that
 the transport can be chosen per connection with nothing else changing.
+`transport => inet` goes back to `m:gen_tcp`.
 
 ## Why
 
@@ -78,10 +79,12 @@ where it hands over the bytes.
 Open a connection.
 
 Takes the option list `m:gen_tcp` would take, so a caller does not have to know
-which transport it got. `binary`, `{active, false}` and `{packet, raw}` are what
-this module always does and are accepted and ignored; `{nodelay, Boolean}` and
-`{buffer, _}` are the two that mean anything here, and anything else is refused
-rather than silently dropped.
+which transport it got. `binary`, `{mode, binary}`, `{active, false}`,
+`{packet, raw}` and `{buffer, _}` are what this module always does or has no
+equivalent of, and are accepted and ignored. `{nodelay, _}`, `{keepalive, _}`,
+`{recbuf, _}` and `{sndbuf, _}` are set on the socket. Anything else is refused
+rather than silently dropped: this is the default transport, and an option that
+did something through the driver must not quietly stop doing it here.
 """.
 -spec connect(
     inet:socket_address() | inet:hostname(), inet:port_number(), [term()], timeout()
@@ -182,21 +185,35 @@ cancel(Socket, Waiting) ->
         {error, _Too_late} -> pending
     end.
 
--doc "Set what can be set. `{active, _}` is refused; see the module note.".
+-doc """
+Set what can be set.
+
+`{active, _}` is refused; see the module note. So is an option this module has
+no answer for, because the alternative is a connection that was configured and
+silently was not.
+""".
 -spec setopts(socket(), [term()]) -> ok | {error, term()}.
-setopts(Socket, [{active, false} | Rest]) ->
-    setopts(Socket, Rest);
-setopts(_Socket, [{active, _Mode} | _Rest]) ->
-    {error, active_mode_unsupported};
-setopts(Socket, [{nodelay, Value} | Rest]) ->
-    case socket:setopt(Socket, {tcp, nodelay}, Value) of
+setopts(Socket, [Option | Rest]) ->
+    case setopt(Socket, Option) of
         ok -> setopts(Socket, Rest);
         {error, Reason} -> {error, Reason}
     end;
-setopts(Socket, [_Ignored | Rest]) ->
-    setopts(Socket, Rest);
 setopts(_Socket, []) ->
     ok.
+
+-spec setopt(socket(), term()) -> ok | {error, term()}.
+setopt(_Socket, {active, false}) -> ok;
+setopt(_Socket, {active, _Mode}) -> {error, active_mode_unsupported};
+setopt(Socket, {nodelay, Value}) -> socket:setopt(Socket, {tcp, nodelay}, Value);
+setopt(Socket, {keepalive, Value}) -> socket:setopt(Socket, {socket, keepalive}, Value);
+setopt(Socket, {recbuf, Value}) -> socket:setopt(Socket, {socket, rcvbuf}, Value);
+setopt(Socket, {sndbuf, Value}) -> socket:setopt(Socket, {socket, sndbuf}, Value);
+setopt(_Socket, binary) -> ok;
+setopt(_Socket, {mode, binary}) -> ok;
+setopt(_Socket, {packet, raw}) -> ok;
+setopt(_Socket, {packet, 0}) -> ok;
+setopt(_Socket, {buffer, _Driver_side}) -> ok;
+setopt(_Socket, Option) -> {error, {unsupported_socket_option, Option}}.
 
 %%----------------------------------------------------------------------
 %% Opening
