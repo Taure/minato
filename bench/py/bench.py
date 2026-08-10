@@ -3,8 +3,8 @@
 asyncpg prepares every statement it runs, and psycopg is asked to prepare, so
 the `cached` row means what it means in the Erlang report.
 
-    cd bench/py && python3 -m venv .venv && .venv/bin/pip install -q asyncpg psycopg[binary]
-    .venv/bin/python bench.py
+    bench/py/install.sh
+    bench/py/.venv/bin/python bench/py/bench.py
 """
 
 import asyncio
@@ -23,6 +23,8 @@ CONFIG = {
     "user": os.environ.get("MINATO_PG_USER", "minato"),
     "password": os.environ.get("MINATO_PG_PASSWORD", "minato"),
 }
+
+PSYCOPG_CONFIG = {"dbname" if k == "database" else k: v for k, v in CONFIG.items()}
 
 ROWS = lambda n: f"SELECT i, repeat('x', 32) FROM generate_series(1, {n}) i"
 WIDE = "SELECT " + ", ".join(f"i * {n}" for n in range(1, 65)) + " FROM generate_series(1, 1) i"
@@ -92,7 +94,7 @@ async def run_asyncpg():
 async def run_psycopg():
     import psycopg
 
-    conn = await psycopg.AsyncConnection.connect(autocommit=True, **CONFIG)
+    conn = await psycopg.AsyncConnection.connect(autocommit=True, **PSYCOPG_CONFIG)
     cursor = conn.cursor()
 
     def numbered(sql):
@@ -110,7 +112,8 @@ async def run_psycopg():
         ))
 
     run_psycopg.pool = [
-        await psycopg.AsyncConnection.connect(autocommit=True, **CONFIG) for _ in range(WORKERS)
+        await psycopg.AsyncConnection.connect(autocommit=True, **PSYCOPG_CONFIG)
+        for _ in range(WORKERS)
     ]
 
     results = [

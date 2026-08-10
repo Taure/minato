@@ -60,6 +60,8 @@ clients on the same run, and a difference under about ten percent is noise.
 """.
 
 -export([main/1, run/1, iterations/1, json/1]).
+%% For minato_profile, which measures the same workloads a different way.
+-export([setup/1, prepare_schema/2, parsed/2, runner/3, teardown/2]).
 
 -define(DEFAULT_ITERATIONS, 2000).
 -define(DEFAULT_WARMUP, 200).
