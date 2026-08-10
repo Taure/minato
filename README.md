@@ -12,8 +12,10 @@ Codecs, protocol, authentication with channel binding, TLS, connections,
 queries, transactions, a pool, `LISTEN`/`NOTIFY`, telemetry and logs, over the
 socket NIFs or the inet driver, on Linux and on Windows.
 
-What it has not got is a year of somebody else's production traffic. Nothing
-runs on it in production yet. Read [the design guide](guides/design.md) for the
+Its mileage is one operator and one workload: it runs in production under
+[asobi](https://asobi.dev)'s hosted game environments, on the 0.18 line, which
+is this client with the transport default the other way round. Nobody else's
+traffic has been near it. Read [the design guide](guides/design.md) for the
 decisions you would be taking on.
 
 ## Install
