@@ -31,6 +31,8 @@ Skips when no server answers.
     a_transaction_commits/1,
     a_result_set_spanning_many_reads_arrives_whole/1,
     a_socket_option_the_driver_takes_is_taken_here/1,
+    an_address_family_is_chosen_not_refused/1,
+    an_address_family_is_not_quietly_swapped/1,
     an_option_this_transport_cannot_honour_is_refused/1,
     a_pool_lends_a_connection_and_takes_it_back/1,
     a_pooled_connection_outlives_the_process_that_opened_it/1,
@@ -62,6 +64,8 @@ cases() ->
         a_transaction_commits,
         a_result_set_spanning_many_reads_arrives_whole,
         a_socket_option_the_driver_takes_is_taken_here,
+        an_address_family_is_chosen_not_refused,
+        an_address_family_is_not_quietly_swapped,
         an_option_this_transport_cannot_honour_is_refused,
         a_pool_lends_a_connection_and_takes_it_back,
         a_pooled_connection_outlives_the_process_that_opened_it,
@@ -152,6 +156,22 @@ a_socket_option_the_driver_takes_is_taken_here(Config) ->
     {ok, Conn} = minato_conn:connect(Opts),
     {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
     ok = minato_conn:close(Ready).
+
+%% The option every deployment passes. `inet` and `inet6` are not settings a
+%% socket takes, so a transport that asked `setopts` about them refused the
+%% config its own consumers were documented to use, and did it after the TCP
+%% connect, where a pool reports it as `disconnected` rather than as a bad
+%% option.
+an_address_family_is_chosen_not_refused(Config) ->
+    Conn = connected(Config, [inet]),
+    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
+    ok = minato_conn:close(Ready).
+
+%% v6 asked for is v6 or nothing. A silent fall back to v4 would be the same
+%% defect one layer down: the option accepted and not honoured.
+an_address_family_is_not_quietly_swapped(Config) ->
+    Opts = (opts(Config))#{host => "127.0.0.1", socket_options => [inet6]},
+    ?assertMatch({error, {socket, _Not_a_v6_address}}, minato_conn:connect(Opts)).
 
 an_option_this_transport_cannot_honour_is_refused(Config) ->
     Opts = (opts(Config))#{socket_options => [{send_timeout, 5000}]},
@@ -366,6 +386,10 @@ notify(Channel, Payload, Config) ->
 
 connected(Config) ->
     {ok, Conn} = minato_conn:connect(opts(Config)),
+    Conn.
+
+connected(Config, Socket_options) ->
+    {ok, Conn} = minato_conn:connect((opts(Config))#{socket_options => Socket_options}),
     Conn.
 
 secured(Config) ->

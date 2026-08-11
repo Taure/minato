@@ -79,21 +79,39 @@ where it hands over the bytes.
 Open a connection.
 
 Takes the option list `m:gen_tcp` would take, so a caller does not have to know
-which transport it got. `binary`, `{mode, binary}`, `{active, false}`,
-`{packet, raw}` and `{buffer, _}` are what this module always does or has no
-equivalent of, and are accepted and ignored. `{nodelay, _}`, `{keepalive, _}`,
-`{recbuf, _}` and `{sndbuf, _}` are set on the socket. Anything else is refused
-rather than silently dropped: this is the default transport, and an option that
-did something through the driver must not quietly stop doing it here.
+which transport it got.
+
+`inet` and `inet6` choose the address family a hostname resolves to, as they do
+for the driver. `{nodelay, _}`, `{keepalive, _}`, `{recbuf, _}` and
+`{sndbuf, _}` are set on the socket. `binary`, `{mode, binary}`,
+`{active, false}`, `{packet, raw}` and `{buffer, _}` are what this module always
+does or has no equivalent of, and are accepted and ignored.
+
+Anything else is refused rather than silently dropped: this is the default
+transport, and an option that did something through the driver must not quietly
+stop doing it here. That cuts both ways, so the list above is what real callers
+pass rather than what a socket happens to be settable to - `inet` is neither,
+and refusing it broke every deployment that names its address family.
 """.
 -spec connect(
     inet:socket_address() | inet:hostname(), inet:port_number(), [term()], timeout()
 ) -> {ok, socket()} | {error, term()}.
 connect(Host, Port, Opts, Timeout) ->
-    case address(Host, Port) of
+    case address(Host, Port, family(Opts)) of
         {ok, {Domain, Address}} -> opened(Domain, Address, Opts, Timeout);
         {error, Reason} -> {error, Reason}
     end.
+
+-doc false.
+-spec family([term()]) -> inet | inet6 | any.
+%% `inet` and `inet6` are not options a socket is set to, which is why asking
+%% `setopt/2` about them was the wrong question: they choose which address a
+%% name resolves to, and the driver reads them before it connects. `any` is
+%% both, in the order `resolved/3` tries them.
+family([inet | _Rest]) -> inet;
+family([inet6 | _Rest]) -> inet6;
+family([_Other | Rest]) -> family(Rest);
+family([]) -> any.
 
 -doc """
 Send every byte, or say why not.
@@ -218,6 +236,8 @@ setopt(_Socket, {mode, binary}) -> ok;
 setopt(_Socket, {packet, raw}) -> ok;
 setopt(_Socket, {packet, 0}) -> ok;
 setopt(_Socket, {buffer, _Driver_side}) -> ok;
+setopt(_Socket, inet) -> ok;
+setopt(_Socket, inet6) -> ok;
 setopt(_Socket, Option) -> {error, {unsupported_socket_option, Option}}.
 
 %%----------------------------------------------------------------------
@@ -270,29 +290,38 @@ failed(Socket, Reason) ->
     ok = close(Socket),
     {error, Reason}.
 
--spec address(inet:socket_address() | inet:hostname(), inet:port_number()) ->
+-spec address(inet:socket_address() | inet:hostname(), inet:port_number(), inet | inet6 | any) ->
     {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-address({local, Path}, _Port) ->
+address({local, Path}, _Port, _Family) ->
     {ok, {local, #{family => local, path => iolist_to_binary(Path)}}};
-address(Host, Port) when is_list(Host); is_atom(Host) ->
-    resolved(Host, Port);
-address(Address, Port) ->
+address(Host, Port, Family) when is_list(Host); is_atom(Host) ->
+    resolved(Host, Port, Family);
+address(Address, Port, _Family) ->
     {ok, target(Address, Port)}.
 
--spec resolved(inet:hostname(), inet:port_number()) ->
+-spec resolved(inet:hostname(), inet:port_number(), inet | inet6 | any) ->
     {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-resolved(Host, Port) ->
-    case inet:getaddr(Host, inet) of
-        {ok, Address} -> {ok, target(Address, Port)};
-        {error, _Not_a_v4_address} -> resolved6(Host, Port)
-    end.
+%% A name that has both an A and a AAAA record resolves to the v4 address unless
+%% the caller said otherwise, which is what the driver does. A caller that said
+%% `inet6` gets v6 or an error, never a quiet v4: a host reachable both ways is
+%% exactly where a silent fallback would hide the fact that the option did
+%% nothing.
+resolved(Host, Port, inet6) ->
+    resolved(Host, Port, inet6, fun(Reason) -> {error, Reason} end);
+resolved(Host, Port, inet) ->
+    resolved(Host, Port, inet, fun(Reason) -> {error, Reason} end);
+resolved(Host, Port, any) ->
+    resolved(Host, Port, inet, fun(_Not_a_v4_address) -> resolved(Host, Port, inet6) end).
 
--spec resolved6(inet:hostname(), inet:port_number()) ->
-    {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-resolved6(Host, Port) ->
-    case inet:getaddr(Host, inet6) of
+-type resolution() :: {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
+
+-spec resolved(
+    inet:hostname(), inet:port_number(), inet | inet6, fun((term()) -> resolution())
+) -> resolution().
+resolved(Host, Port, Family, Otherwise) ->
+    case inet:getaddr(Host, Family) of
         {ok, Address} -> {ok, target(Address, Port)};
-        {error, Reason} -> {error, Reason}
+        {error, Reason} -> Otherwise(Reason)
     end.
 
 -spec target(inet:ip_address(), inet:port_number()) ->

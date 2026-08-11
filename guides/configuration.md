@@ -44,10 +44,16 @@ for where that is and is not true. `inet` is the driver, and is one option away
 for a machine or a workload that disagrees.
 
 The two transports take the same `socket_options`, but the socket transport has
-no driver behind it to hold the ones it does not use: `nodelay`, `keepalive`,
-`recbuf` and `sndbuf` are set on the socket, `binary`, `{packet, raw}`,
-`{active, false}` and `buffer` are accepted and ignored, and anything else is
-refused at connect rather than silently dropped.
+no driver behind it to hold the ones it does not use. `inet` and `inet6` choose
+which address a hostname resolves to; `nodelay`, `keepalive`, `recbuf` and
+`sndbuf` are set on the socket; `binary`, `{packet, raw}`, `{active, false}` and
+`buffer` are accepted and ignored; anything else is refused at connect rather
+than silently dropped.
+
+`inet6` means v6 or nothing. A host with both an A and a AAAA record resolves to
+v4 unless you say otherwise, and a caller that asked for v6 gets an error rather
+than a v4 connection, because a quiet fall back is the option accepted and not
+honoured.
 
 ## A pool
 

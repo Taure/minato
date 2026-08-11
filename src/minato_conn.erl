@@ -1187,7 +1187,20 @@ key(Option) ->
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
     Given = maps:get(ssl_options, Opts, []),
-    Given ++ [Option || Option <- tls_defaults(Host), not given(Option, Given)].
+    Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
+
+%% A default is replaced by the option that answers the same question, not
+%% merely by one spelled the same way. `cacertfile` and `cacerts` are one
+%% question - which authorities are trusted - so a caller pinning a private CA
+%% by file has to take the public bundle out of the answer rather than be handed
+%% both, where the wider set is the one that decides.
+-spec superseded(ssl:tls_client_option(), [ssl:tls_client_option()]) -> boolean().
+superseded(Option, Given) ->
+    lists:any(fun(Candidate) -> question(Candidate) =:= question(Option) end, Given).
+
+-spec question(term()) -> term().
+question({cacertfile, _Authorities}) -> cacerts;
+question(Option) -> key(Option).
 
 -spec tls_defaults(inet:socket_address() | inet:hostname()) -> [ssl:tls_client_option()].
 tls_defaults(Host) ->

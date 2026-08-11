@@ -38,7 +38,8 @@ Skips when no TLS server answers.
     the_exchange_is_bound_to_the_tls_session/1,
     channel_binding_can_be_required/1,
     a_required_binding_is_refused_without_tls/1,
-    the_certificate_hash_is_the_one_the_server_computes/1
+    the_certificate_hash_is_the_one_the_server_computes/1,
+    a_ca_pinned_by_file_is_the_ca_that_decides/1
 ]).
 
 -define(TIMEOUT, 15000).
@@ -56,7 +57,8 @@ all() ->
         the_exchange_is_bound_to_the_tls_session,
         channel_binding_can_be_required,
         a_required_binding_is_refused_without_tls,
-        the_certificate_hash_is_the_one_the_server_computes
+        the_certificate_hash_is_the_one_the_server_computes,
+        a_ca_pinned_by_file_is_the_ca_that_decides
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -97,6 +99,17 @@ an_untrusted_certificate_is_refused(_Config) ->
 a_hostname_the_certificate_does_not_cover_is_refused(_Config) ->
     Elsewhere = (verified())#{host => "127.0.0.1", ssl_options => [{cacerts, cacerts()}]},
     ?assertMatch({error, {tls, _Reason}}, minato_conn:connect(Elsewhere)).
+
+%% `cacertfile` and `cacerts` answer the same question, so a caller who pins a
+%% private CA by file must not also be handed the public bundle: two answers to
+%% "which authorities are trusted" is the wider one deciding. The test CA is not
+%% in any public bundle, so a handshake that succeeds is one this file carried.
+-spec a_ca_pinned_by_file_is_the_ca_that_decides([{atom(), term()}]) -> ok.
+a_ca_pinned_by_file_is_the_ca_that_decides(_Config) ->
+    Pinned = (verified())#{ssl_options => [{cacertfile, certificate("ca.crt")}]},
+    {ok, Conn} = minato_conn:connect(Pinned),
+    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
+    ok = minato_conn:close(Ready).
 
 -spec verification_can_be_turned_off_deliberately([{atom(), term()}]) -> ok.
 verification_can_be_turned_off_deliberately(_Config) ->
