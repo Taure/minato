@@ -90,10 +90,17 @@ did something through the driver must not quietly stop doing it here.
     inet:socket_address() | inet:hostname(), inet:port_number(), [term()], timeout()
 ) -> {ok, socket()} | {error, term()}.
 connect(Host, Port, Opts, Timeout) ->
-    case address(Host, Port) of
+    case address(Host, Port, family(Opts)) of
         {ok, {Domain, Address}} -> opened(Domain, Address, Opts, Timeout);
         {error, Reason} -> {error, Reason}
     end.
+
+-doc false.
+-spec family([term()]) -> inet | inet6 | any.
+family([inet | _Rest]) -> inet;
+family([inet6 | _Rest]) -> inet6;
+family([_Other | Rest]) -> family(Rest);
+family([]) -> any.
 
 -doc """
 Send every byte, or say why not.
@@ -218,6 +225,8 @@ setopt(_Socket, {mode, binary}) -> ok;
 setopt(_Socket, {packet, raw}) -> ok;
 setopt(_Socket, {packet, 0}) -> ok;
 setopt(_Socket, {buffer, _Driver_side}) -> ok;
+setopt(_Socket, inet) -> ok;
+setopt(_Socket, inet6) -> ok;
 setopt(_Socket, Option) -> {error, {unsupported_socket_option, Option}}.
 
 %%----------------------------------------------------------------------
@@ -270,29 +279,31 @@ failed(Socket, Reason) ->
     ok = close(Socket),
     {error, Reason}.
 
--spec address(inet:socket_address() | inet:hostname(), inet:port_number()) ->
+-spec address(inet:socket_address() | inet:hostname(), inet:port_number(), inet | inet6 | any) ->
     {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-address({local, Path}, _Port) ->
+address({local, Path}, _Port, _Family) ->
     {ok, {local, #{family => local, path => iolist_to_binary(Path)}}};
-address(Host, Port) when is_list(Host); is_atom(Host) ->
-    resolved(Host, Port);
-address(Address, Port) ->
+address(Host, Port, Family) when is_list(Host); is_atom(Host) ->
+    resolved(Host, Port, Family);
+address(Address, Port, _Family) ->
     {ok, target(Address, Port)}.
 
--spec resolved(inet:hostname(), inet:port_number()) ->
-    {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-resolved(Host, Port) ->
-    case inet:getaddr(Host, inet) of
-        {ok, Address} -> {ok, target(Address, Port)};
-        {error, _Not_a_v4_address} -> resolved6(Host, Port)
-    end.
+-type resolution() :: {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
 
--spec resolved6(inet:hostname(), inet:port_number()) ->
-    {ok, {socket:domain(), socket:sockaddr()}} | {error, term()}.
-resolved6(Host, Port) ->
-    case inet:getaddr(Host, inet6) of
+-spec resolved(inet:hostname(), inet:port_number(), inet | inet6 | any) -> resolution().
+resolved(Host, Port, inet6) ->
+    resolved(Host, Port, inet6, fun(Reason) -> {error, Reason} end);
+resolved(Host, Port, inet) ->
+    resolved(Host, Port, inet, fun(Reason) -> {error, Reason} end);
+resolved(Host, Port, any) ->
+    resolved(Host, Port, inet, fun(_Not_a_v4_address) -> resolved(Host, Port, inet6) end).
+
+-spec resolved(inet:hostname(), inet:port_number(), inet | inet6, fun((term()) -> resolution())) ->
+    resolution().
+resolved(Host, Port, Family, Otherwise) ->
+    case inet:getaddr(Host, Family) of
         {ok, Address} -> {ok, target(Address, Port)};
-        {error, Reason} -> {error, Reason}
+        {error, Reason} -> Otherwise(Reason)
     end.
 
 -spec target(inet:ip_address(), inet:port_number()) ->
