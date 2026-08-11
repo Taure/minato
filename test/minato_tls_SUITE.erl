@@ -26,7 +26,7 @@ Skips when no TLS server answers.
 
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1]).
+-export([suite/0, all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     a_verified_handshake_opens_a_working_session/1,
     the_server_reports_the_session_as_encrypted/1,
@@ -42,6 +42,16 @@ Skips when no TLS server answers.
 ]).
 
 -define(TIMEOUT, 15000).
+
+%% Without one of these a case that blocks runs into Common Test's thirty minute
+%% default, which is longer than CI gives the whole step, so a hang arrives as a
+%% killed job with no case name and no stack. Every operation in this suite is
+%% bounded by a five second connect or a ten second read, so a case that reaches
+%% sixty seconds is stuck somewhere that has no deadline of its own, and the
+%% timetrap's stack trace is the thing worth having.
+-spec suite() -> [{timetrap, {seconds, pos_integer()}}].
+suite() ->
+    [{timetrap, {seconds, 60}}].
 
 -spec all() -> [atom()].
 all() ->
