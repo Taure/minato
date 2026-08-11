@@ -47,7 +47,7 @@ sends its `SSLRequest` through this module and hands the upgraded socket to
 including the certificate hash SCRAM binds to.
 """.
 
--export([connect/4, send/2, recv/3, close/1, controlling_process/2, setopts/2]).
+-export([connect/4, send/2, send/3, recv/3, close/1, controlling_process/2, setopts/2]).
 -export([activate/1, cancel/2]).
 
 %% eqWAlizer reads the eight words of an `inet:ip6_address()` as `integer()` and
@@ -55,6 +55,11 @@ including the certificate hash SCRAM binds to.
 %% from `inet:getaddr/2` cannot be written into a `socket:sockaddr()` without
 %% this. The v4 half of the same function checks.
 -eqwalizer({nowarn_function, target/2}).
+
+%% `socket:send/3` answers `{ok, RestData}` where `RestData` is the tail of the
+%% `iodata()` that went in, but its spec says `term()`, so eqWAlizer reads a
+%% list tail as a bare list rather than as an iolist.
+-eqwalizer({nowarn_function, sending/3}).
 
 -doc """
 A socket handle.
@@ -83,7 +88,9 @@ which transport it got.
 
 `inet` and `inet6` choose the address family a hostname resolves to, as they do
 for the driver. `{nodelay, _}`, `{keepalive, _}`, `{recbuf, _}` and
-`{sndbuf, _}` are set on the socket. `binary`, `{mode, binary}`,
+`{sndbuf, _}` are set on the socket. `{send_timeout, _}` and
+`{send_timeout_close, _}` are read by `m:minato_conn` and applied to `send/3`,
+because there is no driver here to hold them. `binary`, `{mode, binary}`,
 `{active, false}`, `{packet, raw}` and `{buffer, _}` are what this module always
 does or has no equivalent of, and are accepted and ignored.
 
@@ -121,11 +128,59 @@ still answer with what is left rather than with `ok`, so what is left is sent.
 """.
 -spec send(socket(), iodata()) -> ok | {error, term()}.
 send(Socket, Data) ->
-    case socket:send(Socket, Data) of
+    send(Socket, Data, infinity).
+
+-doc """
+Send every byte, or say why not, within `Timeout`.
+
+The deadline is for the whole of it rather than for each attempt, because a
+peer that accepts one byte per attempt would otherwise never time out. What is
+left when the deadline passes is not sent and not retried: a `Query` the server
+has half of is a connection that has to be given up on, which is what
+`send_timeout` is for.
+""".
+-spec send(socket(), iodata(), timeout()) -> ok | {error, term()}.
+send(Socket, Data, infinity) ->
+    sent(Socket, Data, infinity);
+send(Socket, Data, Timeout) ->
+    sent(Socket, Data, erlang:monotonic_time(millisecond) + Timeout).
+
+-type written() :: ok | {ok, iodata()} | {error, term() | {term(), iodata()}}.
+
+%% `socket:send/3` answers more shapes than its spec narrows to, so the union
+%% this module matches on is stated here rather than inferred. What comes back
+%% as `RestData` is the tail of the `iodata()` that went in, which eqWAlizer
+%% reads as a bare list because the spec says `term()`.
+-spec sending(socket(), iodata(), timeout()) -> written().
+sending(Socket, Data, Timeout) ->
+    case socket:send(Socket, Data, Timeout) of
         ok -> ok;
-        {ok, Rest} -> send(Socket, Rest);
+        {ok, Rest} when is_binary(Rest); is_list(Rest) -> {ok, Rest};
         {error, Reason} -> {error, Reason}
     end.
+
+-spec sent(socket(), iodata(), integer() | infinity) -> ok | {error, term()}.
+sent(Socket, Data, Deadline) ->
+    case remaining(Deadline) of
+        0 -> {error, timeout};
+        Left -> written(Socket, Data, Deadline, sending(Socket, Data, Left))
+    end.
+
+-spec written(socket(), iodata(), integer() | infinity, written()) -> ok | {error, term()}.
+written(_Socket, _Data, _Deadline, ok) -> ok;
+written(Socket, _Data, Deadline, {ok, Rest}) -> sent(Socket, Rest, Deadline);
+written(_Socket, _Data, _Deadline, {error, {timeout, _Rest}}) -> {error, timeout};
+written(_Socket, _Data, _Deadline, {error, {Reason, _Rest}}) -> {error, Reason};
+written(_Socket, _Data, _Deadline, {error, Reason}) -> {error, Reason}.
+
+-spec remaining(integer() | infinity) -> timeout().
+remaining(Deadline) when is_integer(Deadline) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left > 0 -> Left;
+        _Passed -> 0
+    end;
+remaining(infinity) ->
+    infinity.
 
 -doc """
 Read `Length` bytes, or whatever has arrived when `Length` is 0.
@@ -238,6 +293,8 @@ setopt(_Socket, {packet, 0}) -> ok;
 setopt(_Socket, {buffer, _Driver_side}) -> ok;
 setopt(_Socket, inet) -> ok;
 setopt(_Socket, inet6) -> ok;
+setopt(_Socket, {send_timeout, _Read_by_the_connection}) -> ok;
+setopt(_Socket, {send_timeout_close, _Read_by_the_connection}) -> ok;
 setopt(_Socket, Option) -> {error, {unsupported_socket_option, Option}}.
 
 %%----------------------------------------------------------------------

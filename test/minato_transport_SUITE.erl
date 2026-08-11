@@ -33,6 +33,7 @@ Skips when no server answers.
     a_socket_option_the_driver_takes_is_taken_here/1,
     an_address_family_is_chosen_not_refused/1,
     an_address_family_is_not_quietly_swapped/1,
+    a_send_to_a_peer_that_stopped_reading_gives_up/1,
     an_option_this_transport_cannot_honour_is_refused/1,
     a_pool_lends_a_connection_and_takes_it_back/1,
     a_pooled_connection_outlives_the_process_that_opened_it/1,
@@ -66,6 +67,7 @@ cases() ->
         a_socket_option_the_driver_takes_is_taken_here,
         an_address_family_is_chosen_not_refused,
         an_address_family_is_not_quietly_swapped,
+        a_send_to_a_peer_that_stopped_reading_gives_up,
         an_option_this_transport_cannot_honour_is_refused,
         a_pool_lends_a_connection_and_takes_it_back,
         a_pooled_connection_outlives_the_process_that_opened_it,
@@ -173,14 +175,52 @@ an_address_family_is_not_quietly_swapped(Config) ->
     Opts = (opts(Config))#{host => "127.0.0.1", socket_options => [inet6]},
     ?assertMatch({error, {socket, _Not_a_v6_address}}, minato_conn:connect(Opts)).
 
+%% A send with no deadline waits for a peer that has stopped reading for as long
+%% as the peer likes, holding the pool slot it borrowed. The driver has
+%% `send_timeout` for that and the socket transport had nowhere to put it, so
+%% the mitigation existed for one transport and not the default one.
+%%
+%% A listening socket nobody accepts from fills its buffers and then accepts
+%% nothing, which is that peer without needing one.
+a_send_to_a_peer_that_stopped_reading_gives_up(Config) ->
+    {ok, Listener} = gen_tcp:listen(0, [binary, {active, false}, {backlog, 1}]),
+    {ok, Port} = inet:port(Listener),
+    Opts = (opts(Config))#{
+        host => "127.0.0.1",
+        port => Port,
+        connect_timeout => ?TIMEOUT,
+        socket_options => [{send_timeout, 200}]
+    },
+    ?assertEqual({error, {socket, timeout}}, filled(Opts)),
+    ok = gen_tcp:close(Listener).
+
+%% The startup exchange is small enough to fit in a buffer, so the connect
+%% itself would not block. Writing until something gives is what reaches the
+%% deadline; a server that answers is a different case and has its own tests.
+filled(Opts) ->
+    case minato_conn:connect(Opts) of
+        {ok, Conn} -> filled(Conn, binary:copy(~"x", 1048576), 64);
+        {error, Reason} -> {error, Reason}
+    end.
+
+filled(Conn, _Bytes, 0) ->
+    ok = minato_conn:close(Conn),
+    never_filled;
+filled(Conn, Bytes, Left) ->
+    case minato_conn:send(Conn, {query, Bytes}) of
+        ok -> filled(Conn, Bytes, Left - 1);
+        {error, Reason} -> {error, Reason}
+    end.
+
 an_option_this_transport_cannot_honour_is_refused(Config) ->
-    Opts = (opts(Config))#{socket_options => [{send_timeout, 5000}]},
+    Opts = (opts(Config))#{socket_options => [{priority, 3}]},
     ok = judged(transport(Config), minato_conn:connect(Opts)).
 
-%% `send_timeout` is the driver's, and this module has no answer for it. The
-%% refusal is the point: an option that did something through the driver has to
-%% either keep doing it or say that it stopped, never quietly become nothing.
-judged(socket, {error, {socket, {unsupported_socket_option, {send_timeout, 5000}}}}) -> ok;
+%% The refusal is the point: an option that did something through the driver has
+%% to either keep doing it or say that it stopped, never quietly become nothing.
+%% Which option this is matters less than that the answer is loud - and the list
+%% of what is honoured grows as real callers turn out to pass things.
+judged(socket, {error, {socket, {unsupported_socket_option, {priority, 3}}}}) -> ok;
 judged(inet, {ok, Conn}) -> minato_conn:close(Conn).
 
 %%----------------------------------------------------------------------
