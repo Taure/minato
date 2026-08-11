@@ -260,14 +260,24 @@ a_local_address_is_bound_not_ignored(Config) ->
 
 an_option_this_transport_cannot_honour_is_refused(Config) ->
     Opts = (opts(Config))#{socket_options => [{netns, "/var/run/netns/none"}]},
-    ok = judged(transport(Config), minato_conn:connect(Opts)).
+    Answer =
+        try minato_conn:connect(Opts) of
+            Result -> Result
+        catch
+            _Class:Raised -> {raised, Raised}
+        end,
+    ok = judged(transport(Config), Answer).
 
 %% The refusal is the point: an option that did something through the driver has
 %% to either keep doing it or say that it stopped, never quietly become nothing.
 %% Which option this is matters less than that the answer is loud - and the list
 %% of what is honoured grows as real callers turn out to pass things.
+%% The driver refuses it by answering on one machine and by raising on another,
+%% and either is a refusal. What this case is about is the transport that has to
+%% decide for itself.
 judged(socket, {error, {socket, {unsupported_socket_option, {netns, _Namespace}}}}) -> ok;
-judged(inet, {error, _Driver_refuses_it_too}) -> ok;
+judged(inet, {error, _Answered}) -> ok;
+judged(inet, {raised, _Refused}) -> ok;
 judged(inet, {ok, Conn}) -> minato_conn:close(Conn).
 
 %%----------------------------------------------------------------------

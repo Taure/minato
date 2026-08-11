@@ -299,28 +299,32 @@ setopts(_Socket, []) ->
     ok.
 
 -spec setopt(socket(), term()) -> ok | {error, term()}.
+%% An option the OS does not have is not the caller asking for something wrong,
+%% it is a machine that cannot do it, and the driver does not fail a connection
+%% over that either. `priority` and `tos` are Linux's; Windows answers
+%% `{invalid, {socket_option, _}}` and the connection carries on without them.
 setopt(_Socket, {active, false}) ->
     ok;
 setopt(_Socket, {active, _Mode}) ->
     {error, active_mode_unsupported};
 setopt(Socket, {nodelay, Value}) ->
-    socket:setopt(Socket, {tcp, nodelay}, Value);
+    supported(socket:setopt(Socket, {tcp, nodelay}, Value));
 setopt(Socket, {keepalive, Value}) ->
-    socket:setopt(Socket, {socket, keepalive}, Value);
+    supported(socket:setopt(Socket, {socket, keepalive}, Value));
 setopt(Socket, {recbuf, Value}) ->
-    socket:setopt(Socket, {socket, rcvbuf}, Value);
+    supported(socket:setopt(Socket, {socket, rcvbuf}, Value));
 setopt(Socket, {sndbuf, Value}) ->
-    socket:setopt(Socket, {socket, sndbuf}, Value);
+    supported(socket:setopt(Socket, {socket, sndbuf}, Value));
 setopt(Socket, {priority, Value}) ->
-    socket:setopt(Socket, {socket, priority}, Value);
+    supported(socket:setopt(Socket, {socket, priority}, Value));
 setopt(Socket, {reuseaddr, Value}) ->
-    socket:setopt(Socket, {socket, reuseaddr}, Value);
+    supported(socket:setopt(Socket, {socket, reuseaddr}, Value));
 setopt(Socket, {tos, Value}) ->
-    socket:setopt(Socket, {ip, tos}, Value);
+    supported(socket:setopt(Socket, {ip, tos}, Value));
 setopt(Socket, {bind_to_device, Value}) ->
-    socket:setopt(Socket, {socket, bindtodevice}, Value);
+    supported(socket:setopt(Socket, {socket, bindtodevice}, Value));
 setopt(Socket, {linger, {OnOff, Seconds}}) ->
-    socket:setopt(Socket, {socket, linger}, #{onoff => OnOff, linger => Seconds});
+    supported(socket:setopt(Socket, {socket, linger}, #{onoff => OnOff, linger => Seconds}));
 setopt(_Socket, binary) ->
     ok;
 setopt(_Socket, {mode, binary}) ->
@@ -355,6 +359,14 @@ setopt(_Socket, {send_timeout_close, _Read_by_the_connection}) ->
     ok;
 setopt(_Socket, Option) ->
     {error, {unsupported_socket_option, Option}}.
+
+%% An option the OS does not have is not the caller asking for something wrong,
+%% it is a machine that cannot do it, and the driver does not fail a connection
+%% over that either. `priority` and `tos` are Linux's, and Windows answers
+%% `{invalid, {socket_option, _}}` rather than setting them.
+-spec supported(ok | {error, term()}) -> ok | {error, term()}.
+supported({error, {invalid, {socket_option, _Not_on_this_machine}}}) -> ok;
+supported(Answer) -> Answer.
 
 %%----------------------------------------------------------------------
 %% Opening
