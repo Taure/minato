@@ -44,11 +44,21 @@ for where that is and is not true. `inet` is the driver, and is one option away
 for a machine or a workload that disagrees.
 
 The two transports take the same `socket_options`, but the socket transport has
-no driver behind it to hold the ones it does not use. `inet` and `inet6` choose
-which address a hostname resolves to; `nodelay`, `keepalive`, `recbuf` and
-`sndbuf` are set on the socket; `binary`, `{packet, raw}`, `{active, false}` and
-`buffer` are accepted and ignored; anything else is refused at connect rather
-than silently dropped.
+no driver behind it to hold the ones it does not use, so it sorts them by what
+they decide.
+
+`inet`, `inet6`, `ip` and `port` are read before connecting: the first two
+choose which address a hostname resolves to, the other two the local end to bind
+to. `nodelay`, `keepalive`, `recbuf`, `sndbuf`, `priority`, `reuseaddr`, `tos`,
+`bind_to_device` and `linger` are set on the socket, and `send_timeout` with
+`send_timeout_close` are applied to the write. `binary`, `{packet, raw}`,
+`{active, false}`, `buffer`, `delay_send`, `high_watermark`, `low_watermark`,
+`exit_on_close` and `show_econnreset` are accepted and ignored, because this
+transport already does them or configures a port's send queue that is not there.
+
+Anything else is refused at connect rather than silently dropped. If you hit
+that with an option the driver takes, it is a gap in the list rather than a
+decision - the list is meant to be what callers pass.
 
 `inet6` means v6 or nothing. A host with both an A and a AAAA record resolves to
 v4 unless you say otherwise, and a caller that asked for v6 gets an error rather

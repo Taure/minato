@@ -34,6 +34,8 @@ Skips when no server answers.
     an_address_family_is_chosen_not_refused/1,
     an_address_family_is_not_quietly_swapped/1,
     a_send_to_a_peer_that_stopped_reading_gives_up/1,
+    every_socket_option_the_list_claims_is_taken/1,
+    a_local_address_is_bound_not_ignored/1,
     an_option_this_transport_cannot_honour_is_refused/1,
     a_pool_lends_a_connection_and_takes_it_back/1,
     a_pooled_connection_outlives_the_process_that_opened_it/1,
@@ -68,6 +70,8 @@ cases() ->
         an_address_family_is_chosen_not_refused,
         an_address_family_is_not_quietly_swapped,
         a_send_to_a_peer_that_stopped_reading_gives_up,
+        every_socket_option_the_list_claims_is_taken,
+        a_local_address_is_bound_not_ignored,
         an_option_this_transport_cannot_honour_is_refused,
         a_pool_lends_a_connection_and_takes_it_back,
         a_pooled_connection_outlives_the_process_that_opened_it,
@@ -212,15 +216,58 @@ filled(Conn, Bytes, Left) ->
         {error, Reason} -> {error, Reason}
     end.
 
+%% The whole list, in one connection, on both transports. A driver option this
+%% transport quietly dropped was the defect that took an outage to find, and a
+%% driver option it refuses is the same defect wearing the other coat: either
+%% way the caller asked for something and did not get it. The cheapest guard is
+%% to keep passing everything real callers pass.
+every_socket_option_the_list_claims_is_taken(Config) ->
+    Opts = (opts(Config))#{
+        socket_options => [
+            inet,
+            {ip, {127, 0, 0, 1}},
+            {nodelay, true},
+            {keepalive, true},
+            {recbuf, 65536},
+            {sndbuf, 65536},
+            {priority, 0},
+            {reuseaddr, true},
+            {tos, 8},
+            {linger, {true, 5}},
+            {send_timeout, 5000},
+            {send_timeout_close, true},
+            {delay_send, true},
+            {high_watermark, 131072},
+            {low_watermark, 65536},
+            {exit_on_close, true},
+            {buffer, 65536},
+            binary,
+            {packet, raw},
+            {active, false}
+        ]
+    },
+    {ok, Conn} = minato_conn:connect(Opts),
+    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
+    ok = minato_conn:close(Ready).
+
+%% `{ip, _}` is bound rather than accepted and forgotten. Asking the server which
+%% address it sees would prove nothing through a NAT, and a container is one, so
+%% the proof is an address this machine cannot have: binding it has to fail.
+%% TEST-NET-1 is reserved and never assigned.
+a_local_address_is_bound_not_ignored(Config) ->
+    Opts = (opts(Config))#{socket_options => [{ip, {192, 0, 2, 1}}]},
+    ?assertMatch({error, {socket, eaddrnotavail}}, minato_conn:connect(Opts)).
+
 an_option_this_transport_cannot_honour_is_refused(Config) ->
-    Opts = (opts(Config))#{socket_options => [{priority, 3}]},
+    Opts = (opts(Config))#{socket_options => [{netns, "/var/run/netns/none"}]},
     ok = judged(transport(Config), minato_conn:connect(Opts)).
 
 %% The refusal is the point: an option that did something through the driver has
 %% to either keep doing it or say that it stopped, never quietly become nothing.
 %% Which option this is matters less than that the answer is loud - and the list
 %% of what is honoured grows as real callers turn out to pass things.
-judged(socket, {error, {socket, {unsupported_socket_option, {priority, 3}}}}) -> ok;
+judged(socket, {error, {socket, {unsupported_socket_option, {netns, _Namespace}}}}) -> ok;
+judged(inet, {error, _Driver_refuses_it_too}) -> ok;
 judged(inet, {ok, Conn}) -> minato_conn:close(Conn).
 
 %%----------------------------------------------------------------------

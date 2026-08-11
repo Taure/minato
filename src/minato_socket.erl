@@ -86,22 +86,41 @@ Open a connection.
 Takes the option list `m:gen_tcp` would take, so a caller does not have to know
 which transport it got.
 
-`inet` and `inet6` choose the address family a hostname resolves to, as they do
-for the driver. `{nodelay, _}`, `{keepalive, _}`, `{recbuf, _}` and
-`{sndbuf, _}` are set on the socket. `{send_timeout, _}` and
-`{send_timeout_close, _}` are read by `m:minato_conn` and applied to `send/3`,
-because there is no driver here to hold them. `binary`, `{mode, binary}`,
-`{active, false}`, `{packet, raw}` and `{buffer, _}` are what this module always
-does or has no equivalent of, and are accepted and ignored.
+Three kinds of option, and the difference is what the option decides.
+
+**Read before connecting**, because that is the only time they can be honoured:
+`inet` and `inet6` choose which address a hostname resolves to; `{ip, _}` and
+`{port, _}` choose the local end to bind, which is how a multi homed host picks
+the interface the server sees.
+
+**Set on the socket**: `{nodelay, _}`, `{keepalive, _}`, `{recbuf, _}`,
+`{sndbuf, _}`, `{priority, _}`, `{reuseaddr, _}`, `{tos, _}`,
+`{bind_to_device, _}` and `{linger, _}`. `{send_timeout, _}` and
+`{send_timeout_close, _}` belong here in spirit but are read by `m:minato_conn`
+and applied to `send/3`, because there is no driver underneath to hold them.
+
+**Accepted and ignored**, because this module already does them or the thing
+they configure does not exist here: `binary`, `{mode, binary}`,
+`{active, false}`, `{packet, raw}`, `{buffer, _}`, `{delay_send, _}`,
+`{high_watermark, _}`, `{low_watermark, _}`, `{exit_on_close, _}` and
+`{show_econnreset, _}`. The last five configure a port's send queue and a
+port's reporting, and there is no port here.
 
 Anything else is refused rather than silently dropped: this is the default
 transport, and an option that did something through the driver must not quietly
-stop doing it here. That cuts both ways, so the list above is what real callers
-pass rather than what a socket happens to be settable to - `inet` is neither,
-and refusing it broke every deployment that names its address family.
+stop doing it here.
+
+The lists above are what callers pass, not what a socket happens to be settable
+to. Getting that backwards is how `inet` came to be refused, which broke every
+deployment that names its address family - so when a real caller passes
+something missing, the answer is to add it here rather than to tell them to
+stop.
 """.
 -spec connect(
-    inet:socket_address() | inet:hostname(), inet:port_number(), [term()], timeout()
+    inet:socket_address() | inet:hostname(),
+    inet:port_number(),
+    [gen_tcp:connect_option()],
+    timeout()
 ) -> {ok, socket()} | {error, term()}.
 connect(Host, Port, Opts, Timeout) ->
     case address(Host, Port, family(Opts)) of
@@ -110,7 +129,7 @@ connect(Host, Port, Opts, Timeout) ->
     end.
 
 -doc false.
--spec family([term()]) -> inet | inet6 | any.
+-spec family([gen_tcp:connect_option()]) -> inet | inet6 | any.
 %% `inet` and `inet6` are not options a socket is set to, which is why asking
 %% `setopt/2` about them was the wrong question: they choose which address a
 %% name resolves to, and the driver reads them before it connects. `any` is
@@ -280,28 +299,68 @@ setopts(_Socket, []) ->
     ok.
 
 -spec setopt(socket(), term()) -> ok | {error, term()}.
-setopt(_Socket, {active, false}) -> ok;
-setopt(_Socket, {active, _Mode}) -> {error, active_mode_unsupported};
-setopt(Socket, {nodelay, Value}) -> socket:setopt(Socket, {tcp, nodelay}, Value);
-setopt(Socket, {keepalive, Value}) -> socket:setopt(Socket, {socket, keepalive}, Value);
-setopt(Socket, {recbuf, Value}) -> socket:setopt(Socket, {socket, rcvbuf}, Value);
-setopt(Socket, {sndbuf, Value}) -> socket:setopt(Socket, {socket, sndbuf}, Value);
-setopt(_Socket, binary) -> ok;
-setopt(_Socket, {mode, binary}) -> ok;
-setopt(_Socket, {packet, raw}) -> ok;
-setopt(_Socket, {packet, 0}) -> ok;
-setopt(_Socket, {buffer, _Driver_side}) -> ok;
-setopt(_Socket, inet) -> ok;
-setopt(_Socket, inet6) -> ok;
-setopt(_Socket, {send_timeout, _Read_by_the_connection}) -> ok;
-setopt(_Socket, {send_timeout_close, _Read_by_the_connection}) -> ok;
-setopt(_Socket, Option) -> {error, {unsupported_socket_option, Option}}.
+setopt(_Socket, {active, false}) ->
+    ok;
+setopt(_Socket, {active, _Mode}) ->
+    {error, active_mode_unsupported};
+setopt(Socket, {nodelay, Value}) ->
+    socket:setopt(Socket, {tcp, nodelay}, Value);
+setopt(Socket, {keepalive, Value}) ->
+    socket:setopt(Socket, {socket, keepalive}, Value);
+setopt(Socket, {recbuf, Value}) ->
+    socket:setopt(Socket, {socket, rcvbuf}, Value);
+setopt(Socket, {sndbuf, Value}) ->
+    socket:setopt(Socket, {socket, sndbuf}, Value);
+setopt(Socket, {priority, Value}) ->
+    socket:setopt(Socket, {socket, priority}, Value);
+setopt(Socket, {reuseaddr, Value}) ->
+    socket:setopt(Socket, {socket, reuseaddr}, Value);
+setopt(Socket, {tos, Value}) ->
+    socket:setopt(Socket, {ip, tos}, Value);
+setopt(Socket, {bind_to_device, Value}) ->
+    socket:setopt(Socket, {socket, bindtodevice}, Value);
+setopt(Socket, {linger, {OnOff, Seconds}}) ->
+    socket:setopt(Socket, {socket, linger}, #{onoff => OnOff, linger => Seconds});
+setopt(_Socket, binary) ->
+    ok;
+setopt(_Socket, {mode, binary}) ->
+    ok;
+setopt(_Socket, {packet, raw}) ->
+    ok;
+setopt(_Socket, {packet, 0}) ->
+    ok;
+setopt(_Socket, {buffer, _Driver_side}) ->
+    ok;
+setopt(_Socket, inet) ->
+    ok;
+setopt(_Socket, inet6) ->
+    ok;
+setopt(_Socket, {ip, _Bound_before_connecting}) ->
+    ok;
+setopt(_Socket, {port, _Bound_before_connecting}) ->
+    ok;
+setopt(_Socket, {delay_send, _No_send_queue_here}) ->
+    ok;
+setopt(_Socket, {high_watermark, _No_send_queue_here}) ->
+    ok;
+setopt(_Socket, {low_watermark, _No_send_queue_here}) ->
+    ok;
+setopt(_Socket, {exit_on_close, _Not_a_port}) ->
+    ok;
+setopt(_Socket, {show_econnreset, _Driver_reporting}) ->
+    ok;
+setopt(_Socket, {send_timeout, _Read_by_the_connection}) ->
+    ok;
+setopt(_Socket, {send_timeout_close, _Read_by_the_connection}) ->
+    ok;
+setopt(_Socket, Option) ->
+    {error, {unsupported_socket_option, Option}}.
 
 %%----------------------------------------------------------------------
 %% Opening
 %%----------------------------------------------------------------------
 
--spec opened(socket:domain(), socket:sockaddr(), [term()], timeout()) ->
+-spec opened(socket:domain(), socket:sockaddr(), [gen_tcp:connect_option()], timeout()) ->
     {ok, socket()} | {error, term()}.
 opened(Domain, Address, Opts, Timeout) ->
     case socket:open(Domain, stream, tcp) of
@@ -309,25 +368,66 @@ opened(Domain, Address, Opts, Timeout) ->
         {error, Reason} -> {error, Reason}
     end.
 
--spec started(socket(), socket:sockaddr(), [term()], timeout()) ->
+-spec started(socket(), socket:sockaddr(), [gen_tcp:connect_option()], timeout()) ->
     {ok, socket()} | {error, term()}.
 started(Socket, Address, Opts, Timeout) ->
-    case bound(Socket, Address) of
+    case bound(Socket, Address, local(Opts)) of
         ok -> connecting(Socket, Address, Opts, Timeout);
         {error, Reason} -> failed(Socket, Reason)
     end.
 
 -doc false.
--spec bound(socket(), socket:sockaddr()) -> ok | {error, term()}.
+-spec bound(socket(), socket:sockaddr(), socket:sockaddr() | any | loopback) ->
+    ok | {error, term()}.
 %% Windows refuses to connect a socket that was never bound, and answers
 %% `not_bound` rather than binding it for you. Binding to the wildcard is what
 %% the driver does on every machine, and costs nothing where it was not needed.
-bound(Socket, #{family := Family}) when Family =:= inet; Family =:= inet6 ->
-    socket:bind(Socket, any);
-bound(_Socket, _Local) ->
+%%
+%% `{ip, _}` and `{port, _}` are the caller asking for a particular local end
+%% instead, which a multi homed host uses to choose which interface the server
+%% sees. They are read before the connect because that is when a bind is
+%% possible at all.
+bound(Socket, #{family := Family}, Local) when Family =:= inet; Family =:= inet6 ->
+    socket:bind(Socket, Local);
+bound(_Socket, _Address, _Local) ->
     ok.
 
--spec connecting(socket(), socket:sockaddr(), [term()], timeout()) ->
+-spec local([gen_tcp:connect_option()]) -> socket:sockaddr() | any | loopback.
+local(Opts) ->
+    bound_to(local(ip, Opts), local(port, Opts)).
+
+-spec bound_to(inet:socket_address() | undefined, inet:port_number() | undefined) ->
+    socket:sockaddr() | any | loopback.
+bound_to(undefined, undefined) ->
+    any;
+bound_to(undefined, Port) ->
+    #{family => inet, addr => any, port => Port};
+bound_to(Address, undefined) ->
+    local_address(Address, 0);
+bound_to(Address, Port) ->
+    local_address(Address, Port).
+
+-spec local_address(inet:socket_address(), inet:port_number()) ->
+    socket:sockaddr() | any | loopback.
+local_address({local, Path}, _Port) ->
+    #{family => local, path => iolist_to_binary(Path)};
+local_address(any, Port) ->
+    #{family => inet, addr => any, port => Port};
+local_address(loopback, Port) ->
+    #{family => inet, addr => loopback, port => Port};
+local_address(Address, Port) ->
+    {_Domain, Sockaddr} = target(Address, Port),
+    Sockaddr.
+
+-spec local
+    (ip, [gen_tcp:connect_option()]) -> inet:socket_address() | undefined;
+    (port, [gen_tcp:connect_option()]) -> inet:port_number() | undefined.
+local(ip, [{ip, Address} | _Rest]) -> Address;
+local(port, [{port, Port} | _Rest]) -> Port;
+local(Name, [_Other | Rest]) -> local(Name, Rest);
+local(_Name, []) -> undefined.
+
+-spec connecting(socket(), socket:sockaddr(), [gen_tcp:connect_option()], timeout()) ->
     {ok, socket()} | {error, term()}.
 connecting(Socket, Address, Opts, Timeout) ->
     case socket:connect(Socket, Address, Timeout) of
@@ -335,7 +435,7 @@ connecting(Socket, Address, Opts, Timeout) ->
         {error, Reason} -> failed(Socket, Reason)
     end.
 
--spec tuned(socket(), [term()]) -> {ok, socket()} | {error, term()}.
+-spec tuned(socket(), [gen_tcp:connect_option()]) -> {ok, socket()} | {error, term()}.
 tuned(Socket, Opts) ->
     case setopts(Socket, Opts) of
         ok -> {ok, Socket};
