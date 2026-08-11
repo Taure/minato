@@ -113,6 +113,16 @@ jobs:
         timeout-minutes: 10
         run: rebar3 ct
 
+      # A run killed by the step timeout prints no case level detail, so the
+      # suite that hung is known and the case inside it is not.
+      - name: The Common Test logs, which say which case
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs
+          path: _build/test/logs
+          retention-days: 5
+
       - name: What the TLS server logged, if anything went wrong
         if: failure()
         shell: pwsh

@@ -156,6 +156,8 @@ the server issued is the whole of the authorisation.
     prefix = ~"" :: binary(),
     prepared = 0 :: non_neg_integer(),
     limit :: non_neg_integer(),
+    send_timeout = infinity :: timeout(),
+    send_timeout_close = false :: boolean(),
     opts :: opts()
 }).
 
@@ -362,10 +364,31 @@ rather than four.
 """.
 -spec send(conn(), minato_protocol:frontend() | [minato_protocol:frontend()]) ->
     ok | {error, error()}.
-send(#conn{transport = Transport, socket = Socket}, Messages) when is_list(Messages) ->
-    write(Transport, Socket, [minato_protocol:encode(Message) || Message <- Messages]);
-send(#conn{transport = Transport, socket = Socket}, Message) ->
-    write(Transport, Socket, minato_protocol:encode(Message)).
+send(#conn{} = Conn, Messages) when is_list(Messages) ->
+    written(Conn, [minato_protocol:encode(Message) || Message <- Messages]);
+send(#conn{} = Conn, Message) ->
+    written(Conn, minato_protocol:encode(Message)).
+
+%% `send_timeout` is the driver's own option and the driver applies it itself.
+%% The socket transport has no driver underneath to hold it, so the deadline is
+%% passed to the send instead. A write that times out has left the server half a
+%% message, so `send_timeout_close` is honoured here as well: the connection is
+%% not usable again either way, and a caller that asked for it to be closed
+%% should not have to notice that for itself.
+-spec written(conn(), iodata()) -> ok | {error, error()}.
+written(#conn{transport = minato_socket, send_timeout = Timeout} = Conn, Bytes) ->
+    timed(Conn, minato_socket:send(handle(Conn), Bytes, Timeout));
+written(#conn{transport = Transport, socket = Socket}, Bytes) ->
+    write(Transport, Socket, Bytes).
+
+-spec timed(conn(), ok | {error, term()}) -> ok | {error, error()}.
+timed(_Conn, ok) ->
+    ok;
+timed(#conn{send_timeout_close = true} = Conn, {error, timeout}) ->
+    ok = close(Conn),
+    {error, {socket, timeout}};
+timed(_Conn, {error, Reason}) ->
+    {error, {socket, Reason}}.
 
 -doc """
 Hand the socket to another process.
@@ -952,8 +975,30 @@ new(Transport, Socket, Opts) ->
         limit = maps:get(prepared_statements, Opts, ?DEFAULT_STATEMENTS),
         prefix = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
         frame_opts = maps:get(frame_opts, Opts, #{}),
+        send_timeout = send_timeout(Opts),
+        send_timeout_close = option(send_timeout_close, Opts) =:= true,
         opts = maps:remove(password, Opts)
     }.
+
+%% The driver reads these off the socket, so they arrive as socket options
+%% rather than as connection options and are read here once instead of on every
+%% send. A `getopt` per write would be a NIF call per write, which is the cost
+%% this transport exists to avoid.
+-spec send_timeout(opts()) -> timeout().
+send_timeout(Opts) ->
+    case option(send_timeout, Opts) of
+        Milliseconds when is_integer(Milliseconds), Milliseconds >= 0 -> Milliseconds;
+        _Absent -> infinity
+    end.
+
+-spec option(atom(), opts()) -> term().
+option(Name, Opts) ->
+    found(Name, maps:get(socket_options, Opts, [])).
+
+-spec found(atom(), [term()]) -> term().
+found(Name, [{Name, Value} | _Rest]) -> Value;
+found(Name, [_Other | Rest]) -> found(Name, Rest);
+found(_Name, []) -> undefined.
 
 -spec start(conn(), opts()) -> {ok, conn()} | {error, error()}.
 start(Conn, Opts) ->
@@ -1187,7 +1232,20 @@ key(Option) ->
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
     Given = maps:get(ssl_options, Opts, []),
-    Given ++ [Option || Option <- tls_defaults(Host), not given(Option, Given)].
+    Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
+
+%% A default is replaced by the option that answers the same question, not
+%% merely by one spelled the same way. `cacertfile` and `cacerts` are one
+%% question - which authorities are trusted - so a caller pinning a private CA
+%% by file has to take the public bundle out of the answer rather than be handed
+%% both, where the wider set is the one that decides.
+-spec superseded(ssl:tls_client_option(), [ssl:tls_client_option()]) -> boolean().
+superseded(Option, Given) ->
+    lists:any(fun(Candidate) -> question(Candidate) =:= question(Option) end, Given).
+
+-spec question(term()) -> term().
+question({cacertfile, _Authorities}) -> cacerts;
+question(Option) -> key(Option).
 
 -spec tls_defaults(inet:socket_address() | inet:hostname()) -> [ssl:tls_client_option()].
 tls_defaults(Host) ->
