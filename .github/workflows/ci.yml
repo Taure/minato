@@ -16,6 +16,12 @@ on:
       - 'LICENSE'
       - '.gitignore'
 
+  # paths-ignore means a docs-only stretch produces no CI run at all, so a
+  # dependency moving underneath a pin goes unnoticed. A weekly run catches
+  # rot that no commit would have triggered.
+  schedule:
+    - cron: '19 5 * * 1'
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -30,6 +36,11 @@ jobs:
       version-file: '.tool-versions'
       otp-matrix: '["28", "29"]'
       enable-ct: true
+      # Diff-scoped: only lines a PR changes are mutated, so this gates
+      # new code without a retroactive sweep of every existing test.
+      enable-mutate: true
+      mutate-diff: true
+      mutate-min-score: 75
       extra-services-compose: 'test/docker-compose.yml'
       enable-ex-doc: true
       enable-audit: true
