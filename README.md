@@ -151,5 +151,5 @@ source of implementation.
 
 ## Licence
 
-Apache-2.0. Copyright 2026 Widgrens IT AB (org.nr 559241-2752). See
+Apache-2.0. Copyright 2026 Daniel Widgren. See
 [LICENSE](LICENSE).

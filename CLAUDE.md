@@ -1,6 +1,6 @@
 # minato
 
-An independent Erlang PostgreSQL client. Apache-2.0, Widgrens IT AB.
+An independent Erlang PostgreSQL client. Apache-2.0, Daniel Widgren.
 
 ## Legal position
 
