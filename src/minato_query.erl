@@ -227,6 +227,11 @@ Changing a table under a prepared statement makes PostgreSQL refuse it with
 return now. That is not an error the caller can do anything with, so it is not
 returned: the statement is dropped from the cache, parsed again, and run once
 more. A second `0A000` is a real failure and is returned.
+
+A statement the server no longer has, because something on the session ran
+`DEALLOCATE`, comes back as `26000`. It is dropped from the cache and parsed
+again in the same way, unless a transaction is open: the error has aborted it,
+so parsing again could only fail, and the `26000` is returned instead.
 """.
 -spec cached(conn(), iodata(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
@@ -265,8 +270,22 @@ reused(Conn, Sql, Statement, Parameters, Opts) ->
     case run(Conn, Statement, Parameters, Opts) of
         {error, {pgsql_error, #{code := ~"0A000"}}, Stale} ->
             replanned(Stale, Sql, Statement, Parameters, Opts);
+        {error, {pgsql_error, #{code := ~"26000"}} = Reason, Missing} ->
+            deallocated(minato_conn:forget(Missing, Sql), Sql, Parameters, Opts, Reason);
         Answer ->
             Answer
+    end.
+
+-spec deallocated(conn(), binary(), [term()], minato_protocol:opts(), error()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+deallocated(Conn, Sql, Parameters, Opts, Reason) ->
+    ?LOG_INFO(
+        #{event => cached_statement_deallocated, sql => statement_for_log(Sql)},
+        #{domain => [minato]}
+    ),
+    case minato_conn:transaction_status(Conn) of
+        idle -> parsed(Conn, Sql, Parameters, Opts);
+        _Open -> {error, Reason, Conn}
     end.
 
 -spec replanned(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
@@ -288,8 +307,8 @@ Parse a statement under a name and keep it for the life of the connection.
 The describe round trip happens here rather than on every `execute/3`, which is
 the point: a statement run in a loop costs one round trip a time.
 
-The name is the caller's. Reusing one replaces what it named, and `close/2`
-gives it back.
+The name is the caller's. A name already in use is refused with `42P05`, so
+`close/2` it first to parse something else under it.
 """.
 -spec prepare(conn(), binary(), iodata()) ->
     {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
