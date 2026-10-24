@@ -231,14 +231,18 @@ health(Pool, Timeout) ->
 answered(Pool, Conn, Timeout) ->
     case minato_query:query(minato_conn:with_timeout(Conn, Timeout), ~"SELECT 1", []) of
         {ok, _Result, Read} ->
-            minato_pool:checkin(Pool, Read);
+            restored(Pool, Conn, Read, ok);
         {error, Reason, Read} ->
-            ok = minato_pool:checkin(Pool, Read),
-            {error, Reason};
+            restored(Pool, Conn, Read, {error, Reason});
         {error, Reason} ->
             ok = minato_pool:discard(Pool, Conn),
             {error, Reason}
     end.
+
+-spec restored(pool(), conn(), conn(), Answer) -> Answer when Answer :: ok | {error, term()}.
+restored(Pool, Conn, Read, Answer) ->
+    ok = minato_pool:checkin(Pool, minato_conn:with_timeout(Read, minato_conn:timeout(Conn))),
+    Answer.
 
 -doc "What the pool holds and what it has done.".
 -spec stats(pool()) -> minato_pool:stats().

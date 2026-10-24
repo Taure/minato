@@ -97,7 +97,8 @@ checkout timeout to learn the same thing, and a queue that outlives the outage.
 `size` is not a throughput dial. A pool larger than the database can serve moves
 the queue from your application to the server, where you cannot see it; a pool
 smaller than your concurrency makes callers wait, which
-`[minato, checkout, stop]` measures exactly.
+`[minato, checkout, stop]` measures, along with the round trip a checkout may
+spend reading the answer to the connection's session reset.
 
 `max_age` is `infinity` because a connection to PostgreSQL is good
 indefinitely, and churning connections is work nobody asked for. Set it when

@@ -58,9 +58,10 @@ written when each was written rather than retrofitted.
 
 Instrumentation added afterwards measures what was easy to reach, which is
 rarely what you need. The one that would not have survived retrofitting is the
-checkout span: its duration is time spent **waiting for a connection**, which
-separates a slow database from a pool that is too small - two problems that look
-identical in a query latency graph.
+checkout span: its duration is time spent **getting a connection**, waiting for
+one and then reading the answer to its session reset, which separates a slow
+database from a pool that is too small - two problems that look identical in a
+query latency graph.
 
 What it costs: one dependency, and an event on the hot path that does nothing
 when nothing is attached.
