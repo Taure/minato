@@ -58,7 +58,9 @@ connect.
 ## Credentials
 
 The password is used during authentication and is not stored on the connection,
-so a pool holding a thousand connections holds no copies of it. A password given
+so a pool holding a thousand connections holds one copy of it, in its options,
+not a thousand. Neither `sys:get_status/1` on a pool or listener nor its crash
+report shows that copy. A password given
 as `fun(() -> binary())` is called once per connection attempt, which is what a
 rotating credential needs: one read at start up and kept for a month is a
 credential that expires while you hold it.
@@ -74,6 +76,15 @@ in query events. It is off by default because a statement is not a secret but
 sits next to one: `WHERE email = $1` is fine to log, and the same statement
 written by a caller who pasted the value in is a leak. It is read per call, so
 it can be turned on while something is happening.
+
+**Pool options are a child spec.** A pool or listener started under `minato_sup`
+has its options in its child spec, and OTP's supervisor prints child specs when
+a pool declared in the environment fails at boot, when a running pool is
+restarted after an abnormal exit, and in `sys:get_status(minato_sup)`. A
+password given as a binary appears there. Give it as a fun to keep it out; that
+means starting the pool with `minato:start_pool/2`, because `sys.config` cannot
+hold a fun. `start_pool/2` and `start_listener/2` return the child's reason
+without the child spec.
 
 **Errors a caller can act on are returned, not logged.** A failing statement
 comes back as a value. minato logs what nobody asked for and nobody else will
