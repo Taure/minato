@@ -100,12 +100,13 @@ default, so set it when a server may stop reading.
     stop/1,
     stats/1
 ]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
 -define(DEFAULT_SIZE, 10).
 -define(DEFAULT_MIN_SIZE, 1).
+-define(IS_TIMEOUT(T), (T =:= infinity orelse (is_integer(T) andalso T >= 0))).
 -define(CROWDED_SHARE, 4).
 -define(SWEEP_INTERVAL, 5000).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
@@ -174,6 +175,18 @@ defaults to one. The rest are opened when a caller finds none free, so a node
 with twenty pools does not want a hundred connections the moment it boots, while
 a pool that cannot connect at all still says so at start up rather than at the
 first query. `0` opens nothing until asked.
+
+A `size` that is not a positive integer, or a `min_size` that is not a
+non-negative integer, stops the pool before it connects, and `start_link/2`
+returns `{error, {invalid_size, Size}}` or `{error, {invalid_min_size, MinSize}}`.
+`max_idle` and `max_age` must be `infinity` or a non-negative integer, and
+`disconnected` `fail` or `wait`, or the pool stops the same way with
+`{invalid_max_idle, _}`, `{invalid_max_age, _}` or `{invalid_disconnected, _}`.
+Options that are not a map stop it with `invalid_opts`.
+
+A pool's options are its supervisor's child spec, and a supervisor prints its
+child specs when one fails to start. Give `password` as a fun, as
+`minato_conn:opts()` allows, to keep the password out of those reports.
 
 `disconnected` decides what a checkout gets when the pool holds no connections
 and the last attempt to open one failed. `fail` is the default and answers
@@ -552,15 +565,54 @@ call(Name, Message, Timeout) ->
 %% gen_server
 %%----------------------------------------------------------------------
 
--spec init({name(), opts()}) -> {ok, #state{}}.
-init({Name, Opts}) ->
-    process_flag(trap_exit, true),
+-type refused() ::
+    invalid_opts
+    | {invalid_size, term()}
+    | {invalid_min_size, term()}
+    | {invalid_max_idle, term()}
+    | {invalid_max_age, term()}
+    | {invalid_disconnected, term()}.
+
+-spec init({name(), opts()}) -> {ok, #state{}} | {stop, refused()}.
+%% The reason never carries the options themselves: they hold the password.
+init({Name, Opts}) when is_map(Opts) ->
+    case checked(Opts) of
+        {ok, Size, MinSize} -> started(Name, Opts, Size, MinSize);
+        {refused, Reason} -> {stop, Reason}
+    end;
+init({_Name, _Opts}) ->
+    {stop, invalid_opts}.
+
+-spec checked(opts()) -> {ok, pos_integer(), non_neg_integer()} | {refused, refused()}.
+checked(Opts) ->
     Size = maps:get(size, Opts, ?DEFAULT_SIZE),
+    MinSize = maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
+    MaxIdle = maps:get(max_idle, Opts, 60000),
+    MaxAge = maps:get(max_age, Opts, infinity),
+    Disconnected = maps:get(disconnected, Opts, fail),
+    if
+        not is_integer(Size); Size < 1 ->
+            {refused, {invalid_size, Size}};
+        not is_integer(MinSize); MinSize < 0 ->
+            {refused, {invalid_min_size, MinSize}};
+        not ?IS_TIMEOUT(MaxIdle) ->
+            {refused, {invalid_max_idle, MaxIdle}};
+        not ?IS_TIMEOUT(MaxAge) ->
+            {refused, {invalid_max_age, MaxAge}};
+        Disconnected =/= fail, Disconnected =/= wait ->
+            {refused, {invalid_disconnected, Disconnected}};
+        true ->
+            {ok, Size, MinSize}
+    end.
+
+-spec started(name(), opts(), pos_integer(), non_neg_integer()) -> {ok, #state{}}.
+started(Name, Opts, Size, MinSize) ->
+    process_flag(trap_exit, true),
     State = #state{
         name = Name,
         opts = maps:get(connection, Opts),
         size = Size,
-        min_size = min(maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE), Size),
+        min_size = min(MinSize, Size),
         disconnected = maps:get(disconnected, Opts, fail),
         max_idle = maps:get(max_idle, Opts, 60000),
         max_age = maps:get(max_age, Opts, infinity),
@@ -568,6 +620,13 @@ init({Name, Opts}) ->
     },
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, fill(State)}.
+
+-doc false.
+-spec format_status(gen_server:format_status()) -> gen_server:format_status().
+format_status(#{state := #state{opts = Opts} = State} = Status) ->
+    Status#{state => State#state{opts = maps:remove(password, Opts)}};
+format_status(Status) ->
+    Status.
 
 -type request() :: {checkout, integer() | infinity} | stats | {give_away, pid(), pid()}.
 

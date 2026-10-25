@@ -43,7 +43,7 @@ faster - never the only path.
 -behaviour(gen_server).
 
 -export([start_link/2, listen/2, unlisten/2, channels/1, stop/1]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -131,6 +131,13 @@ stop(Name) ->
 %%----------------------------------------------------------------------
 %% gen_server
 %%----------------------------------------------------------------------
+
+-doc false.
+-spec format_status(gen_server:format_status()) -> gen_server:format_status().
+format_status(#{state := #state{opts = Opts} = State} = Status) ->
+    Status#{state => State#state{opts = maps:remove(password, Opts)}};
+format_status(Status) ->
+    Status.
 
 -spec init({name(), opts()}) -> {ok, #state{}}.
 init({Name, Opts}) ->

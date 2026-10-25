@@ -29,13 +29,20 @@ start_link() ->
 -doc "Add a pool at run time.".
 -spec start_pool(minato_pool:name(), minato_pool:opts()) -> supervisor:startchild_ret().
 start_pool(Name, Opts) ->
-    supervisor:start_child(?MODULE, child(minato_pool, Name, Opts)).
+    unwrapped(supervisor:start_child(?MODULE, child(minato_pool, Name, Opts))).
 
 -doc "Add a listener at run time.".
 -spec start_listener(minato_listener:name(), minato_listener:opts()) ->
     supervisor:startchild_ret().
 start_listener(Name, Opts) ->
-    supervisor:start_child(?MODULE, child(minato_listener, Name, Opts)).
+    unwrapped(supervisor:start_child(?MODULE, child(minato_listener, Name, Opts))).
+
+%% A start error carries the child spec, and with it the connection options,
+%% password included.
+-spec unwrapped(supervisor:startchild_ret()) -> supervisor:startchild_ret().
+unwrapped({error, {already_started, Pid}} = Started) when is_pid(Pid) -> Started;
+unwrapped({error, {Reason, _ChildSpec}}) -> {error, Reason};
+unwrapped(Started) -> Started.
 
 -doc "Stop a listener and forget it.".
 -spec stop_listener(minato_listener:name()) -> ok | {error, not_found}.
