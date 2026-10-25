@@ -328,12 +328,19 @@ Close a connection.
 
 `Terminate` is sent first so the server tears the backend down rather than
 discovering a closed socket, and a failure to send it is not reported: the
-socket is being closed either way.
+socket is being closed either way. The send waits no longer than
+`send_timeout`.
 """.
 -spec close(conn()) -> ok.
-close(#conn{transport = Transport, socket = Socket}) ->
-    _ = Transport:send(Socket, minato_protocol:encode(terminate)),
+close(#conn{transport = Transport, socket = Socket} = Conn) ->
+    _ = terminated(Conn),
     Transport:close(Socket).
+
+-spec terminated(conn()) -> ok | {error, term()}.
+terminated(#conn{transport = minato_socket, send_timeout = Timeout} = Conn) ->
+    minato_socket:send(handle(Conn), minato_protocol:encode(terminate), Timeout);
+terminated(#conn{transport = Transport, socket = Socket}) ->
+    Transport:send(Socket, minato_protocol:encode(terminate)).
 
 -doc """
 Ask the server to cancel whatever this connection is running.
@@ -361,6 +368,10 @@ Write one frontend message, or a list of them in order.
 A list is written as a single send, which is what the extended query protocol
 wants: `Parse`, `Bind`, `Execute` and `Sync` in one write is one round trip
 rather than four.
+
+A pooled connection used this way has to have every answer read before it goes
+back with `minato_pool:checkin/2`. One with answers still unread is closed by
+the next checkout, so discard it with `minato_pool:discard/2` instead.
 """.
 -spec send(conn(), minato_protocol:frontend() | [minato_protocol:frontend()]) ->
     ok | {error, error()}.
@@ -422,6 +433,10 @@ split it into rather than one per row.
 time. It is a message like any other and the layer above decides what to do with
 it, because a connection that quietly swallowed `SET TIME ZONE` taking effect
 would be hiding the one thing the message exists to announce.
+
+A pooled connection read this way goes back with `minato_pool:checkin/2` only
+once its last `ReadyForQuery` has been read, and is otherwise discarded with
+`minato_pool:discard/2`.
 """.
 -spec next(conn(), timeout()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
 next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
@@ -484,16 +499,19 @@ caller gets a socket error for a statement that never reached a server.
 
 Asking costs one non-blocking read. No bytes waiting means the connection is
 idle and healthy, which is the answer for a pooled connection. A closed socket
-is the case this exists for. Bytes waiting means the server said something
-nobody read, so the session is not in the state a caller would assume, and it
-is cheaper to open a new connection than to work out what it said.
+is the case this exists for. Bytes waiting, on the socket or already read into
+the connection, mean the server said something nobody read, so the session is
+not in the state a caller would assume, and it is cheaper to open a new
+connection than to work out what it said.
 """.
 -spec usable(conn()) -> boolean().
-usable(#conn{transport = Transport, socket = Socket}) ->
+usable(#conn{buffer = ~"", pending = [], transport = Transport, socket = Socket}) ->
     case Transport:recv(Socket, 0, 0) of
         {error, timeout} -> true;
         _Closed_or_unread -> false
-    end.
+    end;
+usable(#conn{}) ->
+    false.
 
 -spec noted(minato_protocol:backend(), conn()) -> conn().
 noted({ready_for_query, Status}, #conn{frame_opts = Opts} = Conn) ->

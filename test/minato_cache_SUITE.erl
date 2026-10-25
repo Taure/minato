@@ -28,6 +28,8 @@ Skips when no server answers.
     different_sql_gets_different_names/1,
     a_cached_statement_answers_like_an_uncached_one/1,
     a_schema_change_under_a_cached_plan_is_recovered/1,
+    a_deallocated_statement_is_parsed_again/1,
+    a_statement_deallocated_in_a_transaction_fails_it/1,
     a_full_cache_falls_back_to_unnamed/1,
     caching_can_be_turned_off/1,
     a_pool_query_parses_each_statement_once/1,
@@ -44,6 +46,8 @@ all() ->
         different_sql_gets_different_names,
         a_cached_statement_answers_like_an_uncached_one,
         a_schema_change_under_a_cached_plan_is_recovered,
+        a_deallocated_statement_is_parsed_again,
+        a_statement_deallocated_in_a_transaction_fails_it,
         a_full_cache_falls_back_to_unnamed,
         caching_can_be_turned_off,
         a_pool_query_parses_each_statement_once,
@@ -146,6 +150,33 @@ a_schema_change_under_a_cached_plan_is_recovered(_Config) ->
     ?assertEqual([{1, null}], Rows),
     {ok, _Dropped, Dropped} = minato_query:simple(Recovered, ~"DROP TABLE minato_cache"),
     ok = minato_conn:close(Dropped).
+
+-spec a_deallocated_statement_is_parsed_again([{atom(), term()}]) -> ok.
+a_deallocated_statement_is_parsed_again(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT $1::int4",
+    {ok, _First, Cached} = minato_query:cached(Conn, Sql, [1]),
+    {ok, _Gone, Deallocated} = minato_query:simple(Cached, ~"DEALLOCATE ALL"),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(Deallocated, Sql, [2]),
+    ok = minato_conn:close(Again),
+    ?assertEqual([{2}], Rows).
+
+%% Parsing again inside the transaction the error aborted could only fail with
+%% 25P02 and hide what went wrong.
+-spec a_statement_deallocated_in_a_transaction_fails_it([{atom(), term()}]) -> ok.
+a_statement_deallocated_in_a_transaction_fails_it(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT $1::int4",
+    {ok, _First, Cached} = minato_query:cached(Conn, Sql, [1]),
+    {ok, Open} = minato_txn:open(Cached),
+    {ok, _Gone, Deallocated} = minato_query:simple(Open, ~"DEALLOCATE ALL"),
+    Failed = minato_query:cached(Deallocated, Sql, [2]),
+    {error, _Reason, Aborted} = Failed,
+    {ok, RolledBack} = minato_txn:rollback(Aborted),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(RolledBack, Sql, [3]),
+    ok = minato_conn:close(Again),
+    ?assertMatch({error, {pgsql_error, #{code := ~"26000"}}, _}, Failed),
+    ?assertEqual([{3}], Rows).
 
 -spec a_full_cache_falls_back_to_unnamed([{atom(), term()}]) -> ok.
 a_full_cache_falls_back_to_unnamed(_Config) ->

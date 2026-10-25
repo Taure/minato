@@ -16,6 +16,7 @@ writes bytes as they are, which is how the single byte answer to `SSLRequest`
 is given; anything else is a list of `m:minato_backend_writer` messages. When
 the script runs out the server keeps reading and answers nothing, which is what
 a client waiting on a message it will never get has to cope with.
+A `Terminate` is never answered, as no server would, and ends the conversation.
 
 Connections are served concurrently, each with its own copy of the script,
 because `cancel/1` opens a second connection while the first is still waiting
@@ -102,6 +103,9 @@ served(Socket, Owner, Acceptor, Script) ->
 -spec serve(gen_tcp:socket(), pid(), pid(), binary(), boolean(), [answer()]) -> [answer()].
 serve(Socket, Owner, Acceptor, Buffer, StartedUp, Script) ->
     case read(Socket, Buffer, StartedUp) of
+        {ok, terminate, _Rest} ->
+            Owner ! {?MODULE, Acceptor, terminate},
+            Script;
         {ok, Message, Rest} ->
             Owner ! {?MODULE, Acceptor, Message},
             answer(Socket, Owner, Acceptor, Rest, started_up(Message, StartedUp), Script);

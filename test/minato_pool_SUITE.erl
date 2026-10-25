@@ -17,6 +17,7 @@ Skips when no server answers.
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
+-export([checkout_stopped/4]).
 -export([
     a_query_runs_through_the_pool/1,
     a_failing_statement_does_not_cost_the_connection/1,
@@ -41,7 +42,33 @@ Skips when no server answers.
     a_pool_that_cannot_connect_fails_a_checkout_at_once/1,
     a_pool_told_to_wait_waits/1,
     a_connection_nobody_wants_is_closed_down_to_the_floor/1,
-    a_pool_that_grew_gives_the_connections_back/1
+    a_pool_that_grew_gives_the_connections_back/1,
+    a_setting_does_not_reach_the_next_borrower/1,
+    a_session_default_does_not_reach_the_next_borrower/1,
+    an_advisory_lock_does_not_reach_the_next_borrower/1,
+    a_listen_does_not_reach_the_next_borrower/1,
+    a_temporary_table_does_not_reach_the_next_borrower/1,
+    a_held_cursor_does_not_reach_the_next_borrower/1,
+    a_cached_statement_survives_the_reset/1,
+    a_role_does_not_reach_the_next_borrower/1,
+    a_search_path_does_not_reach_the_next_borrower/1,
+    an_unread_answer_does_not_reach_the_next_borrower/1,
+    an_unread_answer_does_not_reach_a_later_borrower/1,
+    a_statement_prepared_with_sql_closes_the_connection/1,
+    a_refused_reset_is_tried_again_on_another_connection/1,
+    a_checkout_that_runs_out_of_time_leaves_nothing_borrowed/1,
+    a_checkout_with_no_time_left_leaves_nothing_borrowed/1,
+    an_unread_error_does_not_reach_the_next_borrower/1,
+    a_forged_reset_does_not_pass_for_the_real_one/1,
+    a_connection_given_back_in_a_failed_transaction_is_reset/1,
+    a_transaction_left_open_does_not_hold_up_a_checkout/1,
+    a_waiter_is_served_after_a_discard_below_the_floor/1,
+    a_waiter_past_its_deadline_is_lent_nothing/1,
+    an_unread_begin_does_not_reach_the_next_borrower/1,
+    a_stale_idle_term_inside_a_transaction_is_not_lent_again/1,
+    a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing/1,
+    a_connection_given_back_unread_comes_back_idle/1,
+    a_connection_given_back_unread_with_another_nonce_is_closed/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -73,7 +100,33 @@ all() ->
         a_pool_that_cannot_connect_fails_a_checkout_at_once,
         a_pool_told_to_wait_waits,
         a_connection_nobody_wants_is_closed_down_to_the_floor,
-        a_pool_that_grew_gives_the_connections_back
+        a_pool_that_grew_gives_the_connections_back,
+        a_setting_does_not_reach_the_next_borrower,
+        a_session_default_does_not_reach_the_next_borrower,
+        an_advisory_lock_does_not_reach_the_next_borrower,
+        a_listen_does_not_reach_the_next_borrower,
+        a_temporary_table_does_not_reach_the_next_borrower,
+        a_held_cursor_does_not_reach_the_next_borrower,
+        a_cached_statement_survives_the_reset,
+        a_role_does_not_reach_the_next_borrower,
+        a_search_path_does_not_reach_the_next_borrower,
+        an_unread_answer_does_not_reach_the_next_borrower,
+        an_unread_answer_does_not_reach_a_later_borrower,
+        a_statement_prepared_with_sql_closes_the_connection,
+        a_refused_reset_is_tried_again_on_another_connection,
+        a_checkout_that_runs_out_of_time_leaves_nothing_borrowed,
+        a_checkout_with_no_time_left_leaves_nothing_borrowed,
+        an_unread_error_does_not_reach_the_next_borrower,
+        a_forged_reset_does_not_pass_for_the_real_one,
+        a_connection_given_back_in_a_failed_transaction_is_reset,
+        a_transaction_left_open_does_not_hold_up_a_checkout,
+        a_waiter_is_served_after_a_discard_below_the_floor,
+        a_waiter_past_its_deadline_is_lent_nothing,
+        an_unread_begin_does_not_reach_the_next_borrower,
+        a_stale_idle_term_inside_a_transaction_is_not_lent_again,
+        a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing,
+        a_connection_given_back_unread_comes_back_idle,
+        a_connection_given_back_unread_with_another_nonce_is_closed
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -109,6 +162,8 @@ init_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, Config) ->
     Config;
 init_per_testcase(a_pool_grows_when_a_caller_finds_none_free, Config) ->
     Config;
+init_per_testcase(a_waiter_is_served_after_a_discard_below_the_floor, Config) ->
+    Config;
 init_per_testcase(a_connection_older_than_max_age_is_retired, Config) ->
     {ok, _Pid} = minato:start_pool(?POOL, #{
         size => 1, min_size => 1, max_age => 1, connection => connection()
@@ -138,6 +193,8 @@ end_per_testcase(a_pool_opens_only_its_floor_before_anybody_asks, _Config) ->
     ok = minato:stop_pool(minato_floor_pool);
 end_per_testcase(a_pool_grows_when_a_caller_finds_none_free, _Config) ->
     ok = minato:stop_pool(minato_growth_pool);
+end_per_testcase(a_waiter_is_served_after_a_discard_below_the_floor, _Config) ->
+    ok = minato:stop_pool(minato_bare_pool);
 end_per_testcase(_Case, _Config) ->
     ok = minato:stop_pool(?POOL).
 
@@ -182,6 +239,313 @@ a_connection_given_back_mid_transaction_is_reset(_Config) ->
     {ok, Again} = minato_pool:checkout(?POOL),
     ?assertEqual(idle, minato_txn:status(Again)),
     ok = minato_pool:checkin(?POOL, Again).
+
+-spec a_connection_given_back_in_a_failed_transaction_is_reset([{atom(), term()}]) -> ok.
+a_connection_given_back_in_a_failed_transaction_is_reset(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, Open} = minato_txn:open(Conn),
+    {error, _Reason, Failed} = minato_query:query(Open, ~"SELECT * FROM no_such_table", []),
+    ok = minato_pool:checkin(?POOL, Failed),
+    {ok, Again} = minato_pool:checkout(?POOL),
+    {ok, #{rows := Rows}, Read} = minato_query:query(Again, ~"SELECT 1::int4", []),
+    ok = minato_pool:checkin(?POOL, Read),
+    ?assertEqual([{1}], Rows),
+    ?assertMatch(#{disconnects := 0}, minato:stats(?POOL)).
+
+%% The rollback is the next borrower's to wait for, within its own timeout; a
+%% pool that waited for it would hold up every checkout behind the slow one.
+-spec a_transaction_left_open_does_not_hold_up_a_checkout([{atom(), term()}]) -> ok.
+a_transaction_left_open_does_not_hold_up_a_checkout(_Config) ->
+    {ok, Other} = minato_pool:checkout(?POOL),
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, Open} = minato_txn:open(Conn),
+    {ok, _Result, Written} = insert(Open, ~"a"),
+    ok = minato_conn:send(Written, {query, ~"SELECT pg_sleep(2)"}),
+    ok = minato_pool:checkin(?POOL, Written),
+    Started = erlang:monotonic_time(millisecond),
+    Checkout = minato_pool:checkout(?POOL, 300),
+    Waited = erlang:monotonic_time(millisecond) - Started,
+    _ = [minato_pool:checkin(?POOL, Lent) || {ok, Lent} <- [Checkout]],
+    ok = minato_pool:checkin(?POOL, Other),
+    ?assertEqual({error, checkout_timeout}, Checkout),
+    ?assert(Waited < 1500),
+    ?assertMatch(#{timeouts := 1}, minato:stats(?POOL)),
+    ?assertEqual([], names()).
+
+-spec a_waiter_is_served_after_a_discard_below_the_floor([{atom(), term()}]) -> ok.
+a_waiter_is_served_after_a_discard_below_the_floor(_Config) ->
+    {ok, _Pid} = minato:start_pool(minato_bare_pool, #{
+        size => 1, min_size => 0, connection => connection()
+    }),
+    {ok, Conn} = minato_pool:checkout(minato_bare_pool, ?TIMEOUT),
+    Test = self(),
+    _Waiter = spawn_link(fun() ->
+        Test ! {waited, minato_pool:checkout(minato_bare_pool, ?TIMEOUT)}
+    end),
+    ?assertMatch(#{waiting := 1}, waited_for(minato_bare_pool)),
+    ok = minato_pool:discard(minato_bare_pool, Conn),
+    Served =
+        receive
+            {waited, Checkout} -> Checkout
+        after 2000 -> error(never_served)
+        end,
+    ?assertMatch({ok, _}, Served).
+
+%% Stalled for longer than its caller waits for a late answer, the pool must not
+%% lend to it when it gets there: the answer would reach nobody.
+-spec a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing([{atom(), term()}]) -> ok.
+a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing(_Config) ->
+    ok = sys:suspend(?POOL),
+    _Resumer = spawn_link(fun() ->
+        timer:sleep(400),
+        sys:resume(?POOL)
+    end),
+    Started = erlang:monotonic_time(millisecond),
+    ?assertEqual({error, checkout_timeout}, minato_pool:checkout(?POOL, 50)),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 350),
+    ?assertMatch(#{borrowed := 0, idle := 2, timeouts := 1}, minato:stats(?POOL)).
+
+-spec a_waiter_past_its_deadline_is_lent_nothing([{atom(), term()}]) -> ok.
+a_waiter_past_its_deadline_is_lent_nothing(_Config) ->
+    #{checkouts := Before} = minato_pool:stats(?POOL),
+    {ok, First} = minato_pool:checkout(?POOL),
+    {ok, Second} = minato_pool:checkout(?POOL),
+    Test = self(),
+    _Waiter = spawn_link(fun() -> Test ! {waited, minato_pool:checkout(?POOL, 100)} end),
+    ?assertMatch(#{waiting := 1}, waited_for(?POOL)),
+    ok = sys:suspend(?POOL),
+    ok = minato_pool:checkin(?POOL, First),
+    timer:sleep(200),
+    ok = sys:resume(?POOL),
+    Waited =
+        receive
+            {waited, Checkout} -> Checkout
+        after ?TIMEOUT -> error(never_answered)
+        end,
+    ok = minato_pool:checkin(?POOL, Second),
+    ?assertEqual({error, checkout_timeout}, Waited),
+    ?assertMatch(#{borrowed := 0, idle := 2}, minato_pool:stats(?POOL)),
+    ?assertEqual(Before + 2, maps:get(checkouts, minato_pool:stats(?POOL))).
+
+%% Its status still says idle, so no `ROLLBACK` goes ahead of the reset, and the
+%% reset is answered by the `BEGIN` first.
+-spec an_unread_begin_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+an_unread_begin_does_not_reach_the_next_borrower(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = minato_conn:send(Conn, {query, ~"BEGIN"}),
+    ok = minato_pool:checkin(?POOL, Conn),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, _Result, Read} = minato_query:query(Next, ~"SELECT 1", []),
+    Status = minato_txn:status(Read),
+    ok = minato_pool:checkin(?POOL, Read),
+    ?assertEqual(idle, Status).
+
+%% The term given back still says idle, but the session is inside a transaction,
+%% so the reset has to roll back on what the server says rather than the term.
+-spec a_stale_idle_term_inside_a_transaction_is_not_lent_again([{atom(), term()}]) -> ok.
+a_stale_idle_term_inside_a_transaction_is_not_lent_again(_Config) ->
+    {ok, Stale} = minato_pool:checkout(?POOL),
+    {ok, _Results, Begun} = minato_query:simple(Stale, ~"BEGIN; SET app.leak = 'x'"),
+    transaction = minato_txn:status(Begun),
+    ok = minato_pool:checkin(?POOL, Stale),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, [#{rows := Rows}], Read} =
+        minato_query:simple(Next, ~"SELECT current_setting('app.leak', true)"),
+    Status = minato_txn:status(Read),
+    ok = minato_pool:checkin(?POOL, Read),
+    ?assertEqual([{null}], Rows),
+    ?assertEqual(idle, Status).
+
+-spec a_connection_given_back_unread_comes_back_idle([{atom(), term()}]) -> ok.
+a_connection_given_back_unread_comes_back_idle(_Config) ->
+    {ok, Conn, Expected, _Size} = lent_unread(?POOL),
+    ok = minato_conn:give_away(Conn, pool_pid(?POOL)),
+    ok = gen_server:cast(?POOL, {unlent, self(), Conn, Expected}),
+    ?assertMatch(#{borrowed := 0, idle := 2, disconnects := 0}, minato:stats(?POOL)).
+
+-spec a_connection_given_back_unread_with_another_nonce_is_closed([{atom(), term()}]) -> ok.
+a_connection_given_back_unread_with_another_nonce_is_closed(_Config) ->
+    {ok, Conn, _Expected, _Size} = lent_unread(?POOL),
+    ok = minato_conn:give_away(Conn, pool_pid(?POOL)),
+    ok = gen_server:cast(?POOL, {unlent, self(), Conn, [{row, ~"0000000000000000"}]}),
+    ?assertMatch(#{borrowed := 0, disconnects := 1}, minato:stats(?POOL)).
+
+%% The pool's own answer to a checkout, with the reset still unread, as
+%% `minato_pool:checkout/2` gets it before reading the reset.
+-spec lent_unread(atom()) -> dynamic().
+lent_unread(Pool) ->
+    gen_server:call(Pool, {checkout, infinity}).
+
+-spec pool_pid(atom()) -> pid().
+pool_pid(Pool) ->
+    case whereis(Pool) of
+        Pid when is_pid(Pid) -> Pid
+    end.
+
+-spec a_setting_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_setting_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"SET statement_timeout = 1234; SELECT set_config('minato.tenant', 'acme', false)",
+        ~"SELECT current_setting('statement_timeout'), current_setting('minato.tenant', true)"
+    ),
+    ?assertMatch([{~"0", Tenant}] when Tenant =/= ~"acme", Left).
+
+-spec a_session_default_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_session_default_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+        ~"SELECT current_setting('default_transaction_read_only')"
+    ),
+    ?assertEqual([{~"off"}], Left).
+
+-spec an_advisory_lock_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+an_advisory_lock_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"SELECT pg_advisory_lock(424242)",
+        ~"SELECT count(*)::int4 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+    ),
+    ?assertEqual([{0}], Left).
+
+-spec a_listen_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_listen_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(~"LISTEN minato_left_behind", ~"SELECT pg_listening_channels()"),
+    ?assertEqual([], Left).
+
+-spec a_temporary_table_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_temporary_table_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"CREATE TEMPORARY TABLE minato_left_behind (id int4)",
+        ~"SELECT to_regclass('minato_left_behind')::text"
+    ),
+    ?assertEqual([{null}], Left).
+
+-spec a_held_cursor_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_held_cursor_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"DECLARE minato_left_behind CURSOR WITH HOLD FOR SELECT 1",
+        ~"SELECT name FROM pg_cursors WHERE name <> ''"
+    ),
+    ?assertEqual([], Left).
+
+-spec a_cached_statement_survives_the_reset([{atom(), term()}]) -> ok.
+a_cached_statement_survives_the_reset(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, _Result, Cached} = minato_query:cached(Conn, ~"SELECT 1 AS minato_cached", []),
+    ok = minato_pool:checkin(?POOL, Cached),
+    {ok, Again} = minato_pool:checkout(?POOL),
+    {ok, #{rows := Rows}, Used} = minato_query:query(
+        Again, ~"SELECT count(*)::int4 FROM pg_prepared_statements", []
+    ),
+    ok = minato_pool:checkin(?POOL, Used),
+    ?assertEqual([{1}], Rows).
+
+-spec a_role_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_role_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(
+        ~"SELECT set_config('role', current_user, false)", ~"SELECT current_setting('role')"
+    ),
+    ?assertEqual([{~"none"}], Left).
+
+-spec a_search_path_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+a_search_path_does_not_reach_the_next_borrower(_Config) ->
+    Left = left_behind(~"SET search_path = pg_catalog", ~"SELECT current_setting('search_path')"),
+    ?assertMatch([{Path}] when Path =/= ~"pg_catalog", Left).
+
+-spec an_unread_answer_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+an_unread_answer_does_not_reach_the_next_borrower(_Config) ->
+    ?assertEqual([{~"own"}], after_unread_answers(0)).
+
+-spec an_unread_answer_does_not_reach_a_later_borrower([{atom(), term()}]) -> ok.
+an_unread_answer_does_not_reach_a_later_borrower(_Config) ->
+    ?assertEqual([{~"own"}], after_unread_answers(50)).
+
+-spec a_statement_prepared_with_sql_closes_the_connection([{atom(), term()}]) -> ok.
+a_statement_prepared_with_sql_closes_the_connection(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, #{rows := [{Backend}]}, Asked} = minato_query:query(Conn, ~"SELECT pg_backend_pid()", []),
+    {ok, _Results, Prepared} = minato_query:simple(
+        Asked, ~"PREPARE minato_left_behind AS SELECT 1"
+    ),
+    ok = minato_pool:checkin(?POOL, Prepared),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, #{rows := [{Other}]}, Checked} = minato_query:query(Next, ~"SELECT pg_backend_pid()", []),
+    {ok, #{rows := Rows}, Probed} = minato_query:query(
+        Checked, ~"SELECT count(*)::int4 FROM pg_prepared_statements WHERE from_sql", []
+    ),
+    ok = minato_pool:checkin(?POOL, Probed),
+    ?assertNotEqual(Backend, Other),
+    ?assertEqual([{0}], Rows).
+
+-spec a_refused_reset_is_tried_again_on_another_connection([{atom(), term()}]) -> ok.
+a_refused_reset_is_tried_again_on_another_connection(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = left_copying(Conn),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, #{rows := Rows}, Read} = minato_query:query(Next, ~"SELECT 1::int4", []),
+    ok = minato_pool:checkin(?POOL, Read),
+    ?assertEqual([{1}], Rows).
+
+-spec a_checkout_that_runs_out_of_time_leaves_nothing_borrowed([{atom(), term()}]) -> ok.
+a_checkout_that_runs_out_of_time_leaves_nothing_borrowed(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(0.3)"}),
+    ok = minato_pool:checkin(?POOL, Conn),
+    ?assertEqual({error, checkout_timeout}, minato_pool:checkout(?POOL, 100)),
+    ?assertMatch(#{borrowed := 0}, minato_pool:stats(?POOL)).
+
+-spec a_checkout_with_no_time_left_leaves_nothing_borrowed([{atom(), term()}]) -> ok.
+a_checkout_with_no_time_left_leaves_nothing_borrowed(_Config) ->
+    Checkouts = [minato_pool:checkout(?POOL, Timeout) || Timeout <- [0, 1], _ <- lists:seq(1, 20)],
+    _ = [minato_pool:checkin(?POOL, Conn) || {ok, Conn} <- Checkouts],
+    ?assertMatch(#{borrowed := 0}, minato_pool:stats(?POOL)).
+
+%% Both connections are left with an error nobody read, which quotes the value
+%% that failed. Neither the checkout nor its telemetry may carry it on.
+-spec an_unread_error_does_not_reach_the_next_borrower([{atom(), term()}]) -> ok.
+an_unread_error_does_not_reach_the_next_borrower(_Config) ->
+    {ok, First} = minato_pool:checkout(?POOL),
+    {ok, Second} = minato_pool:checkout(?POOL),
+    Failing = {query, ~"SELECT ('alice@example.com:hunter2')::int"},
+    ok = minato_conn:send(First, Failing),
+    ok = minato_conn:send(Second, Failing),
+    ok = minato_pool:checkin(?POOL, First),
+    ok = minato_pool:checkin(?POOL, Second),
+    ok = telemetry:attach(
+        checkout_stopped, [minato, checkout, stop], fun ?MODULE:checkout_stopped/4, self()
+    ),
+    Checkout =
+        try
+            minato_pool:checkout(?POOL)
+        after
+            telemetry:detach(checkout_stopped)
+        end,
+    Metadata =
+        receive
+            {checkout_stopped, Seen} -> Seen
+        after ?TIMEOUT -> error(no_telemetry)
+        end,
+    _ = [minato_pool:checkin(?POOL, Conn) || {ok, Conn} <- [Checkout]],
+    ?assertMatch({ok, _}, Checkout),
+    ?assertEqual(nomatch, binary:match(term_to_binary({Checkout, Metadata}), ~"hunter2")).
+
+%% A borrower that sends something shaped like the reset, unread, and something
+%% slow behind it would otherwise have its answers taken for the reset's.
+-spec a_forged_reset_does_not_pass_for_the_real_one([{atom(), term()}]) -> ok.
+a_forged_reset_does_not_pass_for_the_real_one(_Config) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    Forged =
+        ~"CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; SELECT pg_catalog.pg_advisory_unlock_all(); DISCARD TEMP; DISCARD SEQUENCES; SELECT '00' WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_prepared_statements WHERE from_sql)",
+    ok = minato_conn:send(Conn, {query, Forged}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(0.2), 'slow'"}),
+    ok = minato_pool:checkin(?POOL, Conn),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, #{rows := Rows}, Read} = minato_query:query(Next, ~"SELECT 'own'", []),
+    ok = minato_pool:checkin(?POOL, Read),
+    ?assertEqual([{~"own"}], Rows).
+
+checkout_stopped(_Event, _Measurements, Metadata, Test) ->
+    Test ! {checkout_stopped, Metadata},
+    ok.
 
 -spec a_borrower_that_dies_is_replaced([{atom(), term()}]) -> ok.
 a_borrower_that_dies_is_replaced(_Config) ->
@@ -471,6 +835,41 @@ waited_for(Pool, Attempts) ->
             timer:sleep(20),
             waited_for(Pool, Attempts - 1)
     end.
+
+%% What `Probe` finds on the connection the next borrower gets, after `Setup` ran
+%% on it and it went back to the pool. The idle connections are lent most recent
+%% first, so the next borrower gets the same backend, which is asserted rather
+%% than assumed.
+left_behind(Setup, Probe) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    {ok, #{rows := [{Backend}]}, Asked} = minato_query:query(Conn, ~"SELECT pg_backend_pid()", []),
+    {ok, _Results, Set} = minato_query:simple(Asked, Setup),
+    ok = minato_pool:checkin(?POOL, Set),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, #{rows := [{Same}]}, Checked} = minato_query:query(Next, ~"SELECT pg_backend_pid()", []),
+    {ok, #{rows := Rows}, Probed} = minato_query:query(Checked, Probe, []),
+    ok = minato_pool:checkin(?POOL, Probed),
+    ?assertEqual(Backend, Same),
+    Rows.
+
+%% What the next borrower's own query returns after the last one sent two queries
+%% without reading their answers and gave the connection back.
+after_unread_answers(Wait) ->
+    {ok, Conn} = minato_pool:checkout(?POOL),
+    ok = minato_conn:send(Conn, {query, ~"SELECT 'fast'"}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(0.2), 'slow'"}),
+    ok = minato_pool:checkin(?POOL, Conn),
+    timer:sleep(Wait),
+    {ok, Next} = minato_pool:checkout(?POOL),
+    {ok, #{rows := Rows}, Read} = minato_query:query(Next, ~"SELECT 'own'", []),
+    ok = minato_pool:checkin(?POOL, Read),
+    Rows.
+
+%% Gives a connection back in the middle of a COPY, which the server answers the
+%% reset on with an error.
+left_copying(Conn) ->
+    ok = minato_conn:send(Conn, {query, ~"COPY minato_pool_rows (name) FROM STDIN"}),
+    minato_pool:checkin(?POOL, Conn).
 
 insert(Conn, Name) ->
     minato_query:query(Conn, ~"INSERT INTO minato_pool_rows (name) VALUES ($1)", [Name]).

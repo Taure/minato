@@ -192,6 +192,20 @@ a_deadline_is_cleared_when_the_statement_ends_test() ->
     ok = minato_conn:close(Cleared),
     minato_backend_server:stop(Server).
 
+close_sends_terminate_over_inet_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{transport => inet}),
+    ok = minato_conn:close(Conn),
+    ?assertMatch([{startup, _Parameters}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+a_message_read_but_not_taken_is_not_usable_test() ->
+    Notification = {notification_response, 4242, ~"channel", ~"payload"},
+    {Server, {ok, Conn}} = connects([?READY ++ [Notification]], #{}),
+    Usable = minato_conn:usable(Conn),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server),
+    ?assertNot(Usable).
+
 cancel_without_a_key_is_refused_test() ->
     Script = [[authentication_ok, {ready_for_query, idle}]],
     {Server, {ok, Conn}} = connects(Script, #{}),

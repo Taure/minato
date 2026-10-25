@@ -29,9 +29,11 @@ Spans are `telemetry:span/3` shaped - `start`, then `stop` or `exception` - and
 | `[minato, listener, reconnected]` | `system_time`, `channels` | `listener` |
 
 `[minato, checkout, stop]` is the one to watch first. Its `duration` is time
-spent **waiting for a connection**, not running a query, so it separates "the
-database is slow" from "the pool is too small" - two problems with completely
-different fixes that look identical in a query latency graph.
+spent **getting a connection**, not running a query: waiting for one to be free,
+then reading the answer to the session reset the pool sent when it came back,
+which is one round trip at most and nothing when the answer is already there. It
+separates "the database is slow" from "the pool is too small" - two problems
+with completely different fixes that look identical in a query latency graph.
 
 ## What is never emitted
 
@@ -63,14 +65,24 @@ logger:add_handler(minato, logger_std_h, #{
 }).
 ```
 
+OTP's `default` handler drops records with a domain it does not know, so
+without a handler of its own nothing minato logs is printed. To send it to the
+`default` handler instead, let the domain through there:
+
+```erlang
+logger:add_handler_filter(default, minato, {fun logger_filters:domain/2, {log, sub, [minato]}}).
+```
+
 minato logs when something happened that nobody asked for and nobody will
 otherwise see:
 
 | level | event | why it is worth a line |
 | --- | --- | --- |
 | warning | `connect_failed` | a pool could not open a connection; carries `reason` and `retry_in_ms` |
+| warning | `session_reset_failed` | a checkout closed a connection whose reset did not answer as sent: `reason` is `unread_answer` when the last borrower gave it back with answers unread, `sql_prepared_statement` when it left a statement prepared with SQL `PREPARE`, `in_transaction` or `failed` when the reset ended inside a transaction, otherwise the server's refusal by SQLSTATE `code` |
 | warning | `listener_resubscribed` | a listener reconnected, which means notifications were missed - `NOTIFY` has no replay |
 | info | `cached_plan_invalidated` | a schema change made PostgreSQL refuse a cached statement; minato recovered, but somebody ran a migration |
+| info | `cached_statement_deallocated` | something on the session ran a SQL `DEALLOCATE` of a statement minato had cached; outside a transaction minato parsed it again |
 
 Failures a caller can act on are **returned, not logged**. A statement with a
 syntax error comes back as `{error, {pgsql_error, _}}` and stays out of the log,
@@ -89,7 +101,7 @@ attached:
 ```
 
 `waits` against `checkouts` is how often a caller found nothing free. `timeouts`
-is how often one gave up. `disconnects` climbing is a pool losing connections -
+is how often one ran out of time, waiting or reading the reset. `disconnects` climbing is a pool losing connections -
 the server closing them, or the application killing processes that hold them -
 while `retired` is the pool closing them on purpose at `max_age`. They are
 counted separately because one is a problem and the other is the pool working.
@@ -168,8 +180,9 @@ is closed and replaced, and `disconnects` goes up.
 
 - `timeouts` increasing at all. A checkout timeout is a request that failed
   before it reached the database.
-- `[minato, checkout, stop]` p99 above a few milliseconds. The pool is too small
-  for the load, or connections are being held across something slow.
+- `[minato, checkout, stop]` p99 above a few round trips to the server. One
+  round trip is the reset; beyond that, the pool is too small for the load, or
+  connections are being held across something slow.
 - `disconnects` increasing while nothing is deploying.
 - `listener_resubscribed` at any rate above roughly never, on a system that
   treats `NOTIFY` as its wake-up: every one of those is a window where nothing
