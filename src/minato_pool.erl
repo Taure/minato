@@ -106,6 +106,9 @@ default, so set it when a server may stop reading.
 
 -define(DEFAULT_SIZE, 10).
 -define(DEFAULT_MIN_SIZE, 1).
+-define(DEFAULT_MAX_IDLE, 60000).
+-define(DEFAULT_MAX_AGE, infinity).
+-define(DEFAULT_DISCONNECTED, fail).
 -define(IS_TIMEOUT(T), (T =:= infinity orelse (is_integer(T) andalso T >= 0))).
 -define(CROWDED_SHARE, 4).
 -define(SWEEP_INTERVAL, 5000).
@@ -179,14 +182,20 @@ first query. `0` opens nothing until asked.
 A `size` that is not a positive integer, or a `min_size` that is not a
 non-negative integer, stops the pool before it connects, and `start_link/2`
 returns `{error, {invalid_size, Size}}` or `{error, {invalid_min_size, MinSize}}`.
-`max_idle` and `max_age` must be `infinity` or a non-negative integer, and
-`disconnected` `fail` or `wait`, or the pool stops the same way with
-`{invalid_max_idle, _}`, `{invalid_max_age, _}` or `{invalid_disconnected, _}`.
-Options that are not a map stop it with `invalid_opts`.
+A `min_size` above `size` is lowered to `size`. `max_idle` and `max_age` must be
+`infinity` or a non-negative integer, and `disconnected` `fail` or `wait`, or the
+pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
+`{invalid_disconnected, _}`. A `connection` that is missing, not a map, or has no
+`user` stops it with `invalid_connection`, and options that are not a map with
+`invalid_opts`. None of these reasons carries the options.
 
-A pool's options are its supervisor's child spec, and a supervisor prints its
-child specs when one fails to start. Give `password` as a fun, as
-`minato_conn:opts()` allows, to keep the password out of those reports.
+The options are also the pool's child spec under `minato_sup`, and a supervisor
+prints its child specs: when a pool declared in the application environment
+fails to start at boot, each time a running pool exits abnormally and is
+restarted, and in `sys:get_status(minato_sup)`. A password given as a binary
+appears in all three. Give it as a fun, as `minato_conn:opts()` allows, to keep
+it out; a fun cannot be written in `sys.config`, so such a pool is started with
+`minato:start_pool/2`.
 
 `disconnected` decides what a checkout gets when the pool holds no connections
 and the last attempt to open one failed. `fail` is the default and answers
@@ -567,55 +576,63 @@ call(Name, Message, Timeout) ->
 
 -type refused() ::
     invalid_opts
+    | invalid_connection
     | {invalid_size, term()}
     | {invalid_min_size, term()}
     | {invalid_max_idle, term()}
     | {invalid_max_age, term()}
     | {invalid_disconnected, term()}.
 
--spec init({name(), opts()}) -> {ok, #state{}} | {stop, refused()}.
-%% The reason never carries the options themselves: they hold the password.
-init({Name, Opts}) when is_map(Opts) ->
+-type settings() :: {pos_integer(), non_neg_integer(), timeout(), timeout(), fail | wait}.
+
+%% Options can come from the environment, so anything reaches here. No reason
+%% carries the options themselves: they hold the password.
+-spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, refused()}.
+init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
     case checked(Opts) of
-        {ok, Size, MinSize} -> started(Name, Opts, Size, MinSize);
+        {ok, Settings} -> started(Name, Connection, Settings);
         {refused, Reason} -> {stop, Reason}
     end;
+init({_Name, Opts}) when is_map(Opts) ->
+    {stop, invalid_connection};
 init({_Name, _Opts}) ->
     {stop, invalid_opts}.
 
--spec checked(opts()) -> {ok, pos_integer(), non_neg_integer()} | {refused, refused()}.
+-spec checked(opts()) -> {ok, settings()} | {refused, refused()}.
 checked(Opts) ->
-    Size = maps:get(size, Opts, ?DEFAULT_SIZE),
-    MinSize = maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
-    MaxIdle = maps:get(max_idle, Opts, 60000),
-    MaxAge = maps:get(max_age, Opts, infinity),
-    Disconnected = maps:get(disconnected, Opts, fail),
-    if
-        not is_integer(Size); Size < 1 ->
+    Settings = {
+        maps:get(size, Opts, ?DEFAULT_SIZE),
+        maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
+        maps:get(max_idle, Opts, ?DEFAULT_MAX_IDLE),
+        maps:get(max_age, Opts, ?DEFAULT_MAX_AGE),
+        maps:get(disconnected, Opts, ?DEFAULT_DISCONNECTED)
+    },
+    case Settings of
+        {Size, _, _, _, _} when not is_integer(Size); Size < 1 ->
             {refused, {invalid_size, Size}};
-        not is_integer(MinSize); MinSize < 0 ->
+        {_, MinSize, _, _, _} when not is_integer(MinSize); MinSize < 0 ->
             {refused, {invalid_min_size, MinSize}};
-        not ?IS_TIMEOUT(MaxIdle) ->
+        {_, _, MaxIdle, _, _} when not ?IS_TIMEOUT(MaxIdle) ->
             {refused, {invalid_max_idle, MaxIdle}};
-        not ?IS_TIMEOUT(MaxAge) ->
+        {_, _, _, MaxAge, _} when not ?IS_TIMEOUT(MaxAge) ->
             {refused, {invalid_max_age, MaxAge}};
-        Disconnected =/= fail, Disconnected =/= wait ->
+        {_, _, _, _, Disconnected} when Disconnected =/= fail, Disconnected =/= wait ->
             {refused, {invalid_disconnected, Disconnected}};
-        true ->
-            {ok, Size, MinSize}
+        _Valid ->
+            {ok, Settings}
     end.
 
--spec started(name(), opts(), pos_integer(), non_neg_integer()) -> {ok, #state{}}.
-started(Name, Opts, Size, MinSize) ->
+-spec started(name(), minato_conn:opts(), settings()) -> {ok, #state{}}.
+started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
     process_flag(trap_exit, true),
     State = #state{
         name = Name,
-        opts = maps:get(connection, Opts),
+        opts = Connection,
         size = Size,
         min_size = min(MinSize, Size),
-        disconnected = maps:get(disconnected, Opts, fail),
-        max_idle = maps:get(max_idle, Opts, 60000),
-        max_age = maps:get(max_age, Opts, infinity),
+        disconnected = Disconnected,
+        max_idle = MaxIdle,
+        max_age = MaxAge,
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),

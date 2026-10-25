@@ -74,6 +74,10 @@ Start a pool and keep it under minato's supervisor.
 The pool is up before it has connections: they are opened in the background and
 retried with backoff, so an application that starts before its database starts
 anyway and the first query waits.
+
+A pool that does not start returns the pool's own reason, such as
+`{error, {invalid_size, 0.5}}`, not the supervisor's `{Reason, ChildSpec}`: the
+child spec holds the password.
 """.
 -spec start_pool(pool(), minato_pool:opts()) -> supervisor:startchild_ret().
 start_pool(Name, Opts) ->
@@ -89,7 +93,8 @@ Start a listener and keep it under minato's supervisor.
 
 A listener holds one connection of its own, because `LISTEN` is session state
 and a pooled connection would deliver notifications to whichever caller happened
-to hold it next.
+to hold it next. A listener that does not start returns its own reason, as
+`start_pool/2` does.
 """.
 -spec start_listener(minato_listener:name(), minato_listener:opts()) ->
     supervisor:startchild_ret().

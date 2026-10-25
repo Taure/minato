@@ -47,7 +47,6 @@ a_refused_pool_under_the_supervisor_returns_only_the_reason_test() ->
     {ok, _Started} = application:ensure_all_started(minato),
     Result = minato:start_pool(?POOL, sized(0.5)),
     ?assertEqual({error, {invalid_size, 0.5}}, Result),
-    ?assertEqual(nomatch, string:find(io_lib:format("~0p", [Result]), "s3cret")),
     ?assertEqual(undefined, whereis(?POOL)).
 
 a_running_pool_reports_its_status_without_the_password_test() ->
@@ -72,6 +71,47 @@ a_running_listener_reports_its_status_without_the_password_test() ->
         ok = minato:stop_listener(minato_pool_opts_tests_listener)
     end.
 
+a_password_outside_connection_is_refused_without_echoing_it_test() ->
+    ?assertEqual(
+        {error, invalid_connection}, linked(#{size => 2, user => ~"u", password => ~"s3cret"})
+    ).
+
+a_connection_without_a_user_is_refused_test() ->
+    ?assertEqual(
+        {error, invalid_connection},
+        linked(#{size => 2, connection => #{port => 1, password => ~"s3cret"}})
+    ).
+
+a_connection_that_is_not_a_map_is_refused_test() ->
+    ?assertEqual(
+        {error, invalid_connection},
+        linked(#{size => 2, connection => [{user, ~"u"}, {password, ~"s3cret"}]})
+    ).
+
+a_listener_without_a_connection_returns_no_password_test() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    ?assertEqual(
+        {error, invalid_connection},
+        minato:start_listener(minato_pool_opts_tests_listener, unnested())
+    ).
+
+zero_and_infinity_timeouts_are_accepted_test() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{
+        min_size => 0, max_idle => 0, max_age => 0
+    }),
+    ok = minato:stop_pool(?POOL),
+    {ok, _Pid2} = minato:start_pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
+    ok = minato:stop_pool(?POOL).
+
+linked(Opts) ->
+    Trapping = process_flag(trap_exit, true),
+    try
+        minato_pool:start_link(?POOL, Opts)
+    after
+        process_flag(trap_exit, Trapping)
+    end.
+
 started(Opts) ->
     Trapping = process_flag(trap_exit, true),
     try
@@ -79,6 +119,9 @@ started(Opts) ->
     after
         process_flag(trap_exit, Trapping)
     end.
+
+unnested() ->
+    #{user => ~"u", password => ~"s3cret"}.
 
 proplist() ->
     [{size, 2}, {connection, connection()}].

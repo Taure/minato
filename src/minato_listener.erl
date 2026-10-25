@@ -70,7 +70,8 @@ What to connect to.
 ```
 
 Passed to `minato_conn:connect/1` unchanged. One connection, held for the life
-of the listener.
+of the listener. A `connection` that is missing, not a map, or has no `user`
+stops the listener with `invalid_connection`.
 """.
 -type opts() :: #{connection := minato_conn:opts()}.
 
@@ -139,11 +140,14 @@ format_status(#{state := #state{opts = Opts} = State} = Status) ->
 format_status(Status) ->
     Status.
 
--spec init({name(), opts()}) -> {ok, #state{}}.
-init({Name, Opts}) ->
+%% Options can come from the environment, so anything reaches here. The reason
+%% never carries the options: they hold the password.
+-spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, invalid_connection}.
+init({Name, #{connection := #{user := _} = Connection}}) ->
     process_flag(trap_exit, true),
-    State = #state{name = Name, opts = maps:get(connection, Opts)},
-    {ok, connect(State)}.
+    {ok, connect(#state{name = Name, opts = Connection})};
+init({_Name, _Opts}) ->
+    {stop, invalid_connection}.
 
 -type request() ::
     {listen, binary(), pid()}
