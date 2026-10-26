@@ -77,6 +77,10 @@ jobs:
           & "$env:PGBIN\psql" -U postgres -c "CREATE USER minato WITH PASSWORD 'minato' SUPERUSER"
           & "$env:PGBIN\psql" -U postgres -c "CREATE DATABASE minato_test OWNER minato"
           & "$env:PGBIN\psql" -U postgres -c "SHOW ssl"
+          & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_connections = on"
+          & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_disconnections = on"
+          & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_line_prefix = '%m [%p] %r '"
+          & "$env:PGBIN\psql" -U postgres -c "SELECT pg_reload_conf()"
 
       - name: Start a second PostgreSQL with TLS on
         shell: pwsh
@@ -119,7 +123,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ct-logs
+          name: ct-logs-${{ github.run_attempt }}
           path: _build/test/logs
           retention-days: 5
 
@@ -127,3 +131,24 @@ jobs:
         if: failure()
         shell: pwsh
         run: Get-Content "$env:RUNNER_TEMP\tls.log" -Tail 50
+
+      # A backend this server ends, or a connection it sees dropped, says why in
+      # its own log and nowhere else; the client only sees a closed socket.
+      - name: What the plain server logged, if anything went wrong
+        if: failure()
+        shell: pwsh
+        run: |
+          $env:PGPASSWORD = 'root'
+          & "$env:PGBIN\psql" -U postgres -At -c "SELECT pg_read_file(pg_current_logfile())" |
+            Set-Content server.log
+          Select-String -Path server.log `
+            -Pattern 'FATAL|PANIC|terminat|could not|unexpected|exited' |
+            Select-Object -Last 100
+
+      - name: The plain server's log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log-${{ github.run_attempt }}
+          path: server.log
+          retention-days: 5
