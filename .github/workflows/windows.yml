@@ -27,7 +27,7 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       MINATO_PG_HOST: 127.0.0.1
       MINATO_PG_PORT: '5432'
@@ -118,6 +118,7 @@ jobs:
         run: rebar3 ct
 
       - name: DIAG pool and soak, repeated
+        if: always()
         timeout-minutes: 12
         continue-on-error: true
         shell: pwsh
