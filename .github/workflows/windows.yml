@@ -125,7 +125,7 @@ jobs:
         run: |
           $failed = 0
           foreach ($i in 1..7) {
-            rebar3 ct --suite test/minato_pool_SUITE,test/minato_soak_SUITE 2>&1 | Select-String -Pattern '%%%|FAILED|badmatch|disconnects|line' 
+            rebar3 ct --suite "test/minato_pool_SUITE,test/minato_soak_SUITE" 2>&1 | Select-String -Pattern '%%%|FAILED|badmatch|disconnects|line' 
             if ($LASTEXITCODE -ne 0) { $failed++ ; Write-Output "DIAG iteration $i FAILED at $(Get-Date -Format o)" }
           }
           Write-Output "DIAG failed iterations: $failed"
