@@ -79,6 +79,7 @@ jobs:
           & "$env:PGBIN\psql" -U postgres -c "SHOW ssl"
           & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_connections = on"
           & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_disconnections = on"
+          & "$env:PGBIN\psql" -U postgres -c "ALTER SYSTEM SET log_line_prefix = '%m [%p] %r '"
           & "$env:PGBIN\psql" -U postgres -c "SELECT pg_reload_conf()"
 
       - name: Start a second PostgreSQL with TLS on
@@ -116,10 +117,23 @@ jobs:
         timeout-minutes: 10
         run: rebar3 ct
 
+      - name: DIAG pool and soak, repeated
+        timeout-minutes: 12
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($i in 1..7) {
+            rebar3 ct --suite test/minato_pool_SUITE,test/minato_soak_SUITE 2>&1 | Select-String -Pattern '%%%|FAILED|badmatch|disconnects|line' 
+            if ($LASTEXITCODE -ne 0) { $failed++ ; Write-Output "DIAG iteration $i FAILED at $(Get-Date -Format o)" }
+          }
+          Write-Output "DIAG failed iterations: $failed"
+          if ($failed -gt 0) { exit 1 }
+
       # A run killed by the step timeout prints no case level detail, so the
       # suite that hung is known and the case inside it is not.
       - name: The Common Test logs, which say which case
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ct-logs-${{ github.run_attempt }}
@@ -134,7 +148,7 @@ jobs:
       # A backend this server ends, or a connection it sees dropped, says why in
       # its own log and nowhere else; the client only sees a closed socket.
       - name: What the plain server logged, if anything went wrong
-        if: failure()
+        if: always()
         shell: pwsh
         run: |
           $env:PGPASSWORD = 'root'
@@ -145,7 +159,7 @@ jobs:
             Select-Object -Last 100
 
       - name: The plain server's log
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: server-log-${{ github.run_attempt }}
