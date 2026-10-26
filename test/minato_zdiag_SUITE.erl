@@ -1,9 +1,7 @@
--module(minato_diag_SUITE).
+-module(minato_zdiag_SUITE).
 -moduledoc """
 Temporary diagnostics for #55, Windows only. Not for merging.
 """.
-
--include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([fresh_pools/1, sustained/1]).
@@ -59,7 +57,7 @@ fresh_pools(_Config) ->
     Deadline = erlang:monotonic_time(millisecond) + 45000,
     {Rounds, Errors} = fresh(Deadline, 0, []),
     ct:pal("fresh pool rounds: ~p, errors: ~p", [Rounds, length(Errors)]),
-    ?assertEqual([], Errors).
+    ct:fail({summary, Rounds, Errors}).
 
 fresh(Deadline, Rounds, Errors) when length(Errors) >= 3 ->
     _ = Deadline,
@@ -101,7 +99,7 @@ sustained(_Config) ->
     ct:pal("sustained ops: ~p, errors: ~p, stats: ~p", [
         lists:sum([N || {N, _} <- Reports]), length(Errors), Stats
     ]),
-    ?assertEqual([], Errors).
+    ct:fail({summary, lists:sum([N || {N, _} <- Reports]), Stats, Errors}).
 
 worked(Deadline, Worker, Done, Errors) ->
     case erlang:monotonic_time(millisecond) < Deadline andalso length(Errors) < 2 of
