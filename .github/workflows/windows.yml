@@ -144,7 +144,9 @@ jobs:
         shell: pwsh
         run: |
           $env:PGPASSWORD = 'root'
-          & "$env:PGBIN\psql" -U postgres -At -c "SELECT pg_read_file(pg_current_logfile())" |
+          # With connections logged the server rotates its log during the run,
+          # and the current file alone starts after the suites that matter.
+          & "$env:PGBIN\psql" -U postgres -At -c "SELECT string_agg(pg_read_file(current_setting('log_directory') || '/' || name), '' ORDER BY name) FROM pg_ls_logdir()" |
             Set-Content server.log
           Select-String -Path server.log `
             -Pattern 'FATAL|PANIC|terminat|could not|unexpected|exited' |
