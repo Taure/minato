@@ -63,6 +63,9 @@ exchange_property_test_() ->
         end}
     ]}.
 
+passwords_differing_in_trailing_zero_bytes_authenticate_test() ->
+    ?assertEqual(ok, exchange(~"u", ~"", <<0>>, <<0:128>>, 4096)).
+
 tampering_property_test_() ->
     {timeout, 600, [
         {"changing any byte of the server first message breaks the exchange", fun() ->
@@ -114,7 +117,9 @@ prop_wrong_password_never_authenticates() ->
         {Username, Stored, Offered, Salt, Iterations},
         {gen_username(), gen_password(), gen_password(), gen_salt(), gen_iterations()},
         begin
-            Same = minato_saslprep:prepare(Stored) =:= minato_saslprep:prepare(Offered),
+            Same =
+                hmac_key(minato_saslprep:prepare(Stored)) =:=
+                    hmac_key(minato_saslprep:prepare(Offered)),
             Result = exchange(Username, Stored, Offered, Salt, Iterations),
             case Same of
                 true -> Result =:= ok;
@@ -122,6 +127,11 @@ prop_wrong_password_never_authenticates() ->
             end
         end
     ).
+
+%% HMAC zero-pads its key to the block size, so passwords that differ only in
+%% trailing zero bytes are the same key.
+hmac_key(Key) when byte_size(Key) > 64 -> hmac_key(crypto:hash(sha256, Key));
+hmac_key(Key) -> <<Key/binary, 0:((64 - byte_size(Key)) * 8)>>.
 
 prop_client_first_is_well_formed() ->
     ?FORALL(

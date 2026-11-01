@@ -43,7 +43,7 @@ faster - never the only path.
 -behaviour(gen_server).
 
 -export([start_link/2, listen/2, unlisten/2, channels/1, stop/1]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -70,7 +70,8 @@ What to connect to.
 ```
 
 Passed to `minato_conn:connect/1` unchanged. One connection, held for the life
-of the listener.
+of the listener. A `connection` that is missing, not a map, or has no `user`
+stops the listener with `invalid_connection`.
 """.
 -type opts() :: #{connection := minato_conn:opts()}.
 
@@ -132,11 +133,21 @@ stop(Name) ->
 %% gen_server
 %%----------------------------------------------------------------------
 
--spec init({name(), opts()}) -> {ok, #state{}}.
-init({Name, Opts}) ->
+-doc false.
+-spec format_status(gen_server:format_status()) -> gen_server:format_status().
+format_status(#{state := #state{opts = Opts} = State} = Status) ->
+    Status#{state => State#state{opts = maps:remove(password, Opts)}};
+format_status(Status) ->
+    Status.
+
+%% Options can come from the environment, so anything reaches here. The reason
+%% never carries the options: they hold the password.
+-spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, invalid_connection}.
+init({Name, #{connection := #{user := _} = Connection}}) ->
     process_flag(trap_exit, true),
-    State = #state{name = Name, opts = maps:get(connection, Opts)},
-    {ok, connect(State)}.
+    {ok, connect(#state{name = Name, opts = Connection})};
+init({_Name, _Opts}) ->
+    {stop, invalid_connection}.
 
 -type request() ::
     {listen, binary(), pid()}
