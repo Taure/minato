@@ -27,6 +27,7 @@ Skips when no TLS server answers.
 -include_lib("stdlib/include/assert.hrl").
 
 -export([suite/0, all/0, init_per_suite/1, end_per_suite/1]).
+-export([init_per_testcase/2, end_per_testcase/2]).
 -export([
     a_verified_handshake_opens_a_working_session/1,
     the_server_reports_the_session_as_encrypted/1,
@@ -84,6 +85,80 @@ init_per_suite(Config) ->
 -spec end_per_suite([{atom(), term()}]) -> ok.
 end_per_suite(_Config) ->
     ok.
+
+-spec init_per_testcase(atom(), [{atom(), term()}]) -> [{atom(), term()}].
+init_per_testcase(Case, Config) ->
+    Test = self(),
+    [{stuck_watch, spawn(fun() -> watch(Case, Test) end)} | Config].
+
+-spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
+end_per_testcase(_Case, Config) ->
+    stop_watching(proplists:get_value(stuck_watch, Config)).
+
+stop_watching(Watch) when is_pid(Watch) ->
+    exit(Watch, kill),
+    ok;
+stop_watching(_None) ->
+    ok.
+
+watch(Case, Test) ->
+    receive
+    after 20000 -> stuck(Case, Test)
+    end.
+
+stuck(Case, Test) ->
+    Processes = [describe(Pid) || Pid <- erlang:processes(), Pid =:= Test orelse tls_related(Pid)],
+    Sockets = [{Socket, socket:info(Socket)} || Socket <- socket:which_sockets()],
+    ct:pal("STUCK ~p after 20s~nprocesses:~n~p~nsockets:~n~p", [Case, Processes, Sockets]).
+
+describe(Pid) ->
+    Info = erlang:process_info(Pid, [
+        registered_name,
+        initial_call,
+        current_stacktrace,
+        status,
+        message_queue_len,
+        messages,
+        links
+    ]),
+    {Pid, initial(Pid), trimmed(Info)}.
+
+trimmed(undefined) -> undefined;
+trimmed(Info) -> [trim(Item) || Item <- Info].
+
+trim({messages, Messages}) -> {messages, lists:sublist(Messages, 10)};
+trim(Item) -> Item.
+
+initial(Pid) ->
+    case erlang:process_info(Pid, dictionary) of
+        {dictionary, Dictionary} -> proplists:get_value('$initial_call', Dictionary);
+        undefined -> undefined
+    end.
+
+tls_related(Pid) ->
+    Frames =
+        case erlang:process_info(Pid, current_stacktrace) of
+            {current_stacktrace, Stack} -> [Module || {Module, _F, _A, _L} <- Stack];
+            undefined -> []
+        end,
+    Initial =
+        case initial(Pid) of
+            {Module, _F, _A} -> [Module];
+            _None -> []
+        end,
+    lists:any(fun tls_module/1, Frames ++ Initial).
+
+tls_module(Module) ->
+    lists:member(Module, [
+        tls_client_connection,
+        tls_client_connection_1_3,
+        tls_gen_connection,
+        tls_sender,
+        tls_socket_tcp,
+        ssl_gen_statem,
+        socket,
+        prim_socket
+    ]).
 
 -spec a_verified_handshake_opens_a_working_session([{atom(), term()}]) -> ok.
 a_verified_handshake_opens_a_working_session(_Config) ->
