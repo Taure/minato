@@ -330,11 +330,49 @@ Close a connection.
 discovering a closed socket, and a failure to send it is not reported: the
 socket is being closed either way. The send waits no longer than
 `send_timeout`.
+
+Under TLS the server's own close is waited for, up to `cancel_timeout`, before
+the TLS session is closed. `m:ssl` keeps a read outstanding on a socket from
+`m:socket`, and on Windows a `socket:close/1` that races the server's close
+against that read can wait forever for the read to be given back, which leaves
+the caller of `ssl:close/1` waiting with it. Once the server has closed, the read
+has finished and there is nothing left to race.
 """.
 -spec close(conn()) -> ok.
+close(#conn{transport = ssl, socket = Socket, grace = Grace} = Conn) ->
+    _ = terminated(Conn),
+    _ = ssl:setopts(Socket, [{active, false}]),
+    ok = drained(Socket, deadline_after(Grace)),
+    _ = ssl:close(Socket),
+    ok;
 close(#conn{transport = Transport, socket = Socket} = Conn) ->
     _ = terminated(Conn),
     Transport:close(Socket).
+
+-spec drained(ssl:sslsocket(), integer() | infinity) -> ok.
+drained(Socket, Deadline) ->
+    case remaining(Deadline) of
+        0 ->
+            ok;
+        Left ->
+            case ssl:recv(Socket, 0, Left) of
+                {ok, _Unread} -> drained(Socket, Deadline);
+                {error, _Closed} -> ok
+            end
+    end.
+
+-spec deadline_after(timeout()) -> integer() | infinity.
+deadline_after(infinity) -> infinity;
+deadline_after(Timeout) -> erlang:monotonic_time(millisecond) + Timeout.
+
+-spec remaining(integer() | infinity) -> timeout().
+remaining(infinity) ->
+    infinity;
+remaining(Deadline) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left > 0 -> Left;
+        _Passed -> 0
+    end.
 
 -spec terminated(conn()) -> ok | {error, term()}.
 terminated(#conn{transport = minato_socket, send_timeout = Timeout} = Conn) ->

@@ -40,7 +40,9 @@ Skips when no TLS server answers.
     channel_binding_can_be_required/1,
     a_required_binding_is_refused_without_tls/1,
     the_certificate_hash_is_the_one_the_server_computes/1,
-    a_ca_pinned_by_file_is_the_ca_that_decides/1
+    a_ca_pinned_by_file_is_the_ca_that_decides/1,
+    closing_a_session_never_waits_for_ever/1,
+    closing_with_answers_unread_waits_only_for_the_server/1
 ]).
 
 -define(TIMEOUT, 15000).
@@ -69,7 +71,9 @@ all() ->
         channel_binding_can_be_required,
         a_required_binding_is_refused_without_tls,
         the_certificate_hash_is_the_one_the_server_computes,
-        a_ca_pinned_by_file_is_the_ca_that_decides
+        a_ca_pinned_by_file_is_the_ca_that_decides,
+        closing_a_session_never_waits_for_ever,
+        closing_with_answers_unread_waits_only_for_the_server
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -260,6 +264,27 @@ the_certificate_hash_is_the_one_the_server_computes(_Config) ->
     ok = minato_conn:close(Conn),
     [{'Certificate', Der, not_encrypted}] = public_key:pem_decode(pem()),
     ?assertEqual(crypto:hash(sha256, Der), Hash).
+
+%% On Windows about one close in a few hundred used to hang in `socket:close/1`
+%% inside the TLS connection process (#58), so a few hundred closes is what it
+%% takes for this to say anything there. Everywhere else it is cheap.
+-spec closing_a_session_never_waits_for_ever([{atom(), term()}]) -> ok.
+closing_a_session_never_waits_for_ever(_Config) ->
+    lists:foreach(
+        fun(_) ->
+            {ok, Conn} = minato_conn:connect(verified()),
+            ok = minato_conn:close(Conn)
+        end,
+        lists:seq(1, 300)
+    ).
+
+-spec closing_with_answers_unread_waits_only_for_the_server([{atom(), term()}]) -> ok.
+closing_with_answers_unread_waits_only_for_the_server(_Config) ->
+    {ok, Conn} = minato_conn:connect((verified())#{cancel_timeout => 10000}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT i FROM generate_series(1, 100000) i"}),
+    Started = erlang:monotonic_time(millisecond),
+    ok = minato_conn:close(Conn),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 5000).
 
 %%----------------------------------------------------------------------
 %% Where the server is
