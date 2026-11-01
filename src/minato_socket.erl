@@ -48,7 +48,7 @@ including the certificate hash SCRAM binds to.
 """.
 
 -export([connect/4, send/2, send/3, recv/3, close/1, controlling_process/2, setopts/2]).
--export([activate/1, cancel/2]).
+-export([activate/1, cancel/2, quiet/1, quiet/2]).
 
 %% eqWAlizer reads the eight words of an `inet:ip6_address()` as `integer()` and
 %% the eight of a `socket:in6_addr()` as `0..65535`, so a v6 address that came
@@ -204,8 +204,8 @@ remaining(infinity) ->
 -doc """
 Read `Length` bytes, or whatever has arrived when `Length` is 0.
 
-A timeout of 0 is the non-blocking probe `minato_conn:usable/1` makes, and
-answers `{error, timeout}` when nothing is waiting.
+A timeout of 0 answers `{error, timeout}` when nothing is waiting. It is how
+`quiet/1` asks, except on Windows.
 """.
 -spec recv(socket(), non_neg_integer(), timeout()) -> {ok, binary()} | {error, term()}.
 recv(Socket, Length, Timeout) ->
@@ -213,6 +213,38 @@ recv(Socket, Length, Timeout) ->
         {ok, Data} -> {ok, Data};
         {error, {timeout, _Partial}} -> {error, timeout};
         {error, Reason} -> {error, Reason}
+    end.
+
+-doc """
+Whether nothing is waiting to be read, asked without reading.
+
+Where the machine selects, a read with a timeout of 0 is a non-blocking read and
+costs nothing. Windows has no such read: it starts an overlapped read and cancels
+it, and on Windows CI about one cancel in tens of thousands aborted the
+connection, so the borrower that asked found the socket closed on its first
+statement (#55). Windows can count what is waiting instead, which is the
+question being asked.
+
+A socket the peer closed without a word has nothing waiting, so on Windows it
+passes. The first statement on it finds out, as it would had the close arrived a
+moment after the question.
+""".
+-spec quiet(socket()) -> boolean().
+quiet(Socket) ->
+    quiet(Socket, os:type()).
+
+-doc false.
+-spec quiet(socket(), {atom(), atom()}) -> boolean().
+quiet(Socket, {win32, _Name}) ->
+    case socket:ioctl(Socket, nread) of
+        {ok, 0} -> true;
+        {ok, _Unread} -> false;
+        {error, _Reason} -> false
+    end;
+quiet(Socket, _Selecting) ->
+    case recv(Socket, 0, 0) of
+        {error, timeout} -> true;
+        _Closed_or_unread -> false
     end.
 
 -doc "Close the socket.".
