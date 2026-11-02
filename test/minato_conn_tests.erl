@@ -17,6 +17,9 @@ messages the server received and require the password not to be among them.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-define(WINDOWS, {win32, nt}).
+-define(POSIX, {unix, linux}).
+
 -define(READY, [
     authentication_ok,
     {parameter_status, ~"server_version", ~"17.4"},
@@ -214,6 +217,64 @@ cancel_without_a_key_is_refused_test() ->
     minato_backend_server:stop(Server).
 
 %%----------------------------------------------------------------------
+%% Closing a TLS session, as Windows does it and as everything else does
+%%----------------------------------------------------------------------
+
+a_tls_session_is_closed_once_the_server_has_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took < 500),
+    ?assertMatch([ssl_request, {startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+on_windows_a_tls_close_waits_for_the_server_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+the_wait_is_bounded_in_total_not_per_read_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => chatter}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    minato_backend_server:stop(Server).
+
+no_cancel_timeout_is_no_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 0}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took < 200),
+    minato_backend_server:stop(Server).
+
+the_wait_never_exceeds_a_second_test() ->
+    lists:foreach(
+        fun(Grace) ->
+            {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, Grace),
+            {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+            ?assert(Took >= 1000),
+            ?assert(Took < 1500),
+            minato_backend_server:stop(Server)
+        end,
+        [#{}, #{cancel_timeout => infinity}]
+    ).
+
+a_tls_session_reading_for_messages_is_drained_too_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {ok, Active} = minato_conn:activate(Conn),
+    {Took, ok} = timed(fun() -> minato_conn:close(Active, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    minato_backend_server:stop(Server).
+
+elsewhere_a_tls_close_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+%%----------------------------------------------------------------------
 %% Talking to the server
 %%----------------------------------------------------------------------
 
@@ -227,3 +288,15 @@ opts(Port, Opts) ->
         #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000},
         Opts
     ).
+
+tls_connects(ServerOpts, Opts) ->
+    {ok, _Started} = application:ensure_all_started(ssl),
+    Server = minato_backend_server:start([?READY], ServerOpts#{tls => true}),
+    Port = minato_backend_server:port(Server),
+    Tls = #{ssl => true, ssl_options => minato_backend_server:client_tls(Server)},
+    {Server, minato_conn:connect(opts(Port, maps:merge(Tls, Opts)))}.
+
+timed(Fun) ->
+    Started = erlang:monotonic_time(millisecond),
+    Result = Fun(),
+    {erlang:monotonic_time(millisecond) - Started, Result}.

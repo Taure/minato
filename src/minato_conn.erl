@@ -91,6 +91,7 @@ the server issued is the whole of the authorisation.
 -export([
     connect/1,
     close/1,
+    close/2,
     cancel/1,
     give_away/2,
     send/2,
@@ -125,6 +126,7 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
 -define(DEFAULT_CANCEL_TIMEOUT, 5000).
+-define(CLOSE_DRAIN_CAP, 1000).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -219,7 +221,9 @@ off. See `m:minato_query` for what fills it.
 `timeout` is the per read timeout and applies for the life of the connection.
 `connect_timeout` covers the TCP connect and the TLS handshake. `cancel_timeout`
 is how long a cancelled statement is given to come back before the connection is
-given up on; see `deadline/2`.
+given up on; see `deadline/2`. On Windows it also bounds how long closing a TLS
+connection waits for the server to close first, to at most a second; see
+`close/1`.
 """.
 -type opts() :: #{
     host => inet:socket_address() | inet:hostname(),
@@ -271,6 +275,7 @@ An authentication method the server may ask for.
 -type transport() :: plain() | ssl.
 -type plain() :: gen_tcp | minato_socket.
 -type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
+-type os() :: {atom(), atom()}.
 
 -doc """
 Open a connection and complete the opening exchange.
@@ -331,47 +336,45 @@ discovering a closed socket, and a failure to send it is not reported: the
 socket is being closed either way. The send waits no longer than
 `send_timeout`.
 
-Under TLS the server's own close is waited for, up to `cancel_timeout`, before
-the TLS session is closed. `m:ssl` keeps a read outstanding on a socket from
-`m:socket`, and on Windows a `socket:close/1` that races the server's close
-against that read can wait forever for the read to be given back, which leaves
-the caller of `ssl:close/1` waiting with it. Once the server has closed, the read
-has finished and there is nothing left to race.
+On Windows a TLS session waits for the server's own close before it is closed,
+for no longer than `cancel_timeout` and never more than a second. `m:ssl` keeps a
+read outstanding on a socket from `m:socket`, and there a `socket:close/1` that
+races the server's close against that read can wait forever for the read to be
+given back, which leaves the caller of `ssl:close/1` waiting with it (#58). Once
+the server has closed, the read has finished and there is nothing left to race.
+A server busy with a statement reads `Terminate` only when the statement ends, so
+the second is what closing a busy TLS connection costs there. Everywhere else the
+session is closed at once.
 """.
 -spec close(conn()) -> ok.
-close(#conn{transport = ssl, socket = Socket, grace = Grace} = Conn) ->
+close(Conn) ->
+    close(Conn, os:type()).
+
+-doc false.
+-spec close(conn(), os()) -> ok.
+close(#conn{transport = Transport, socket = Socket, grace = Grace} = Conn, Os) ->
     _ = terminated(Conn),
+    shut(Transport, Socket, Grace, Os).
+
+-spec shut(transport(), socket(), timeout(), os()) -> ok.
+shut(ssl, Socket, Grace, {win32, _Name}) ->
     _ = ssl:setopts(Socket, [{active, false}]),
-    ok = drained(Socket, deadline_after(Grace)),
+    ok = drained(Socket, erlang:monotonic_time(millisecond) + drain_cap(Grace)),
     _ = ssl:close(Socket),
     ok;
-close(#conn{transport = Transport, socket = Socket} = Conn) ->
-    _ = terminated(Conn),
-    Transport:close(Socket).
+shut(Transport, Socket, _Grace, _Os) ->
+    _ = Transport:close(Socket),
+    ok.
 
--spec drained(ssl:sslsocket(), integer() | infinity) -> ok.
+-spec drain_cap(timeout()) -> non_neg_integer().
+drain_cap(infinity) -> ?CLOSE_DRAIN_CAP;
+drain_cap(Grace) -> min(Grace, ?CLOSE_DRAIN_CAP).
+
+-spec drained(ssl:sslsocket(), integer()) -> ok.
 drained(Socket, Deadline) ->
-    case remaining(Deadline) of
-        0 ->
-            ok;
-        Left ->
-            case ssl:recv(Socket, 0, Left) of
-                {ok, _Unread} -> drained(Socket, Deadline);
-                {error, _Closed} -> ok
-            end
-    end.
-
--spec deadline_after(timeout()) -> integer() | infinity.
-deadline_after(infinity) -> infinity;
-deadline_after(Timeout) -> erlang:monotonic_time(millisecond) + Timeout.
-
--spec remaining(integer() | infinity) -> timeout().
-remaining(infinity) ->
-    infinity;
-remaining(Deadline) ->
-    case Deadline - erlang:monotonic_time(millisecond) of
-        Left when Left > 0 -> Left;
-        _Passed -> 0
+    case ssl:recv(Socket, 0, remaining(Deadline - erlang:monotonic_time(millisecond), infinity)) of
+        {ok, _Unread} -> drained(Socket, Deadline);
+        {error, _Closed_or_timeout} -> ok
     end.
 
 -spec terminated(conn()) -> ok | {error, term()}.

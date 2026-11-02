@@ -42,10 +42,15 @@ Skips when no TLS server answers.
     the_certificate_hash_is_the_one_the_server_computes/1,
     a_ca_pinned_by_file_is_the_ca_that_decides/1,
     closing_a_session_never_waits_for_ever/1,
-    closing_with_answers_unread_waits_only_for_the_server/1
+    closing_with_answers_unread_waits_only_for_the_server/1,
+    closing_a_busy_session_is_bounded/1,
+    on_windows_an_idle_session_closes_once_the_server_has/1,
+    on_windows_closing_a_busy_session_waits_a_second_at_most/1
 ]).
 
 -define(TIMEOUT, 15000).
+-define(SLOW_AFTER, 20000).
+-define(WINDOWS, {win32, nt}).
 
 %% Without one of these a case that blocks runs into Common Test's thirty minute
 %% default, which is longer than CI gives the whole step, so a hang arrives as a
@@ -73,7 +78,10 @@ all() ->
         the_certificate_hash_is_the_one_the_server_computes,
         a_ca_pinned_by_file_is_the_ca_that_decides,
         closing_a_session_never_waits_for_ever,
-        closing_with_answers_unread_waits_only_for_the_server
+        closing_with_answers_unread_waits_only_for_the_server,
+        closing_a_busy_session_is_bounded,
+        on_windows_an_idle_session_closes_once_the_server_has,
+        on_windows_closing_a_busy_session_waits_a_second_at_most
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -93,11 +101,11 @@ end_per_suite(_Config) ->
 -spec init_per_testcase(atom(), [{atom(), term()}]) -> [{atom(), term()}].
 init_per_testcase(Case, Config) ->
     Test = self(),
-    [{stuck_watch, spawn(fun() -> watch(Case, Test) end)} | Config].
+    [{slow_watch, spawn(fun() -> watch(Case, Test) end)} | Config].
 
 -spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
 end_per_testcase(_Case, Config) ->
-    stop_watching(proplists:get_value(stuck_watch, Config)).
+    stop_watching(proplists:get_value(slow_watch, Config)).
 
 stop_watching(Watch) when is_pid(Watch) ->
     exit(Watch, kill),
@@ -107,13 +115,16 @@ stop_watching(_None) ->
 
 watch(Case, Test) ->
     receive
-    after 20000 -> stuck(Case, Test)
+    after ?SLOW_AFTER -> slow(Case, Test)
     end.
 
-stuck(Case, Test) ->
+slow(Case, Test) ->
     Processes = [describe(Pid) || Pid <- erlang:processes(), Pid =:= Test orelse tls_related(Pid)],
     Sockets = [{Socket, socket:info(Socket)} || Socket <- socket:which_sockets()],
-    ct:pal("STUCK ~p after 20s~nprocesses:~n~p~nsockets:~n~p", [Case, Processes, Sockets]).
+    ct:pal(
+        "slow: ~p still running after ~pms~nprocesses:~n~p~nsockets:~n~p",
+        [Case, ?SLOW_AFTER, Processes, Sockets]
+    ).
 
 describe(Pid) ->
     Info = erlang:process_info(Pid, [
@@ -267,7 +278,7 @@ the_certificate_hash_is_the_one_the_server_computes(_Config) ->
 
 %% On Windows about one close in a few hundred used to hang in `socket:close/1`
 %% inside the TLS connection process (#58), so a few hundred closes is what it
-%% takes for this to say anything there. Everywhere else it is cheap.
+%% takes for this to say anything there. Nowhere else has the race to find.
 -spec closing_a_session_never_waits_for_ever([{atom(), term()}]) -> ok.
 closing_a_session_never_waits_for_ever(_Config) ->
     lists:foreach(
@@ -275,8 +286,11 @@ closing_a_session_never_waits_for_ever(_Config) ->
             {ok, Conn} = minato_conn:connect(verified()),
             ok = minato_conn:close(Conn)
         end,
-        lists:seq(1, 300)
+        lists:seq(1, closes(os:type()))
     ).
+
+closes({win32, _Name}) -> 300;
+closes(_Os) -> 30.
 
 -spec closing_with_answers_unread_waits_only_for_the_server([{atom(), term()}]) -> ok.
 closing_with_answers_unread_waits_only_for_the_server(_Config) ->
@@ -285,6 +299,35 @@ closing_with_answers_unread_waits_only_for_the_server(_Config) ->
     Started = erlang:monotonic_time(millisecond),
     ok = minato_conn:close(Conn),
     ?assert(erlang:monotonic_time(millisecond) - Started < 5000).
+
+-spec closing_a_busy_session_is_bounded([{atom(), term()}]) -> ok.
+closing_a_busy_session_is_bounded(_Config) ->
+    {ok, Conn} = minato_conn:connect((verified())#{cancel_timeout => infinity}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn) end),
+    ?assert(Took < 2000).
+
+%% The Windows close, asked for here on whatever machine runs the suite, against
+%% a server that really closes: it ends because the server closed, not because
+%% the wait ran out.
+-spec on_windows_an_idle_session_closes_once_the_server_has([{atom(), term()}]) -> ok.
+on_windows_an_idle_session_closes_once_the_server_has(_Config) ->
+    {ok, Conn} = minato_conn:connect(verified()),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took < 500).
+
+-spec on_windows_closing_a_busy_session_waits_a_second_at_most([{atom(), term()}]) -> ok.
+on_windows_closing_a_busy_session_waits_a_second_at_most(_Config) ->
+    {ok, Conn} = minato_conn:connect((verified())#{cancel_timeout => infinity}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took >= 1000),
+    ?assert(Took < 2000).
+
+timed(Fun) ->
+    Started = erlang:monotonic_time(millisecond),
+    Result = Fun(),
+    {erlang:monotonic_time(millisecond) - Started, Result}.
 
 %%----------------------------------------------------------------------
 %% Where the server is
