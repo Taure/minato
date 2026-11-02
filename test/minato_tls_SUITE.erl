@@ -46,6 +46,7 @@ Skips when no TLS server answers.
     closing_a_busy_session_is_bounded/1,
     on_windows_an_idle_session_closes_once_the_server_has/1,
     on_windows_closing_a_busy_session_waits_a_second_at_most/1,
+    a_deadline_cancels_a_statement_over_tls/1,
     a_discarded_busy_connection_does_not_stall_checkouts/1
 ]).
 
@@ -83,6 +84,7 @@ all() ->
         closing_a_busy_session_is_bounded,
         on_windows_an_idle_session_closes_once_the_server_has,
         on_windows_closing_a_busy_session_waits_a_second_at_most,
+        a_deadline_cancels_a_statement_over_tls,
         a_discarded_busy_connection_does_not_stall_checkouts
     ].
 
@@ -326,6 +328,16 @@ on_windows_closing_a_busy_session_waits_a_second_at_most(_Config) ->
     ?assert(Took >= 1000),
     ?assert(Took < 2000).
 
+-spec a_deadline_cancels_a_statement_over_tls([{atom(), term()}]) -> ok.
+a_deadline_cancels_a_statement_over_tls(_Config) ->
+    {ok, Conn} = minato_conn:connect(verified()),
+    Bounded = minato_conn:deadline(Conn, 200),
+    ok = minato_conn:send(Bounded, {query, ~"SELECT pg_sleep(20)"}),
+    {Took, {Code, Read}} = timed(fun() -> failed(Bounded) end),
+    ?assertEqual(~"57014", Code),
+    ?assert(Took < 5000),
+    ok = minato_conn:close(Read).
+
 -spec a_discarded_busy_connection_does_not_stall_checkouts([{atom(), term()}]) -> ok.
 a_discarded_busy_connection_does_not_stall_checkouts(_Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
@@ -340,6 +352,12 @@ a_discarded_busy_connection_does_not_stall_checkouts(_Config) ->
     ?assert(Took < 500),
     ok = minato_pool:checkin(tls_discard_pool, Other),
     ok = minato:stop_pool(tls_discard_pool).
+
+failed(Conn) ->
+    case minato_conn:next(Conn) of
+        {ok, {error_response, #{code := Code}}, Read} -> {Code, Read};
+        {ok, _Other, Read} -> failed(Read)
+    end.
 
 filled(_Pool, _Size, 0) ->
     {error, never_filled};

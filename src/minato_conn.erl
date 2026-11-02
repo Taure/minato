@@ -96,6 +96,7 @@ the server issued is the whole of the authorisation.
     close_aside/2,
     closer/1,
     cancel/1,
+    cancel/2,
     give_away/2,
     send/2,
     next/1,
@@ -428,15 +429,20 @@ it. No answer is defined by the protocol: the server either cancels the query or
 does not, and this connection finds out by reading what its query returned.
 """.
 -spec cancel(conn()) -> ok | {error, error()}.
-cancel(#conn{key = undefined}) ->
+cancel(Conn) ->
+    cancel(Conn, os:type()).
+
+-doc false.
+-spec cancel(conn(), os()) -> ok | {error, error()}.
+cancel(#conn{key = undefined}, _Os) ->
     {error, {socket, no_backend_key}};
-cancel(#conn{key = {Pid, Secret}, opts = Opts}) ->
+cancel(#conn{key = Key, grace = Grace, opts = Opts}, Os) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
     Transport = transport(Opts),
     case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts);
+        {ok, Socket} -> requested(Transport, Socket, Host, Key, {Timeout, Grace, Os}, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
@@ -1278,14 +1284,21 @@ all_methods() ->
 %% Cancelling
 %%----------------------------------------------------------------------
 
--spec cancel(
-    plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), key(), opts()
+%% The server closes a cancel connection as soon as it has read the request, so
+%% the TLS one waits for that close on Windows for the same reason `close/1` does.
+-spec requested(
+    plain(),
+    socket(),
+    inet:socket_address() | inet:hostname(),
+    key(),
+    {timeout(), timeout(), os()},
+    opts()
 ) -> ok | {error, error()}.
-cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts) ->
+requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
     case secured(Transport, Socket, Host, Timeout, Opts) of
-        {ok, Transport, Secured} ->
-            Sent = write(Transport, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
-            _ = Transport:close(Secured),
+        {ok, Secure, Secured} ->
+            Sent = write(Secure, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
+            ok = shut(Secure, Secured, Grace, Os),
             Sent;
         {error, Reason} ->
             {error, Reason}

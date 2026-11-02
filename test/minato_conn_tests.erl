@@ -333,6 +333,32 @@ plain_close_aside(Os) ->
     ?assertMatch([{startup, _}, terminate], minato_backend_server:received(Server)),
     minato_backend_server:stop(Server).
 
+on_windows_a_tls_cancel_waits_for_the_server_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    Received = minato_backend_server:received(Server),
+    ?assert(lists:member({cancel_request, 4242, 777}, Received)),
+    ok = minato_conn:close(Conn, ?POSIX),
+    minato_backend_server:stop(Server).
+
+a_tls_cancel_sends_the_key_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn) end),
+    ?assert(Took < 500),
+    Received = minato_backend_server:received(Server),
+    ?assert(lists:member({cancel_request, 4242, 777}, Received)),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server).
+
+elsewhere_a_tls_cancel_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ok = minato_conn:close(Conn, ?POSIX),
+    minato_backend_server:stop(Server).
+
 %%----------------------------------------------------------------------
 %% Talking to the server
 %%----------------------------------------------------------------------
