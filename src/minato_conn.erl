@@ -95,6 +95,7 @@ the server issued is the whole of the authorisation.
     close_aside/1,
     close_aside/2,
     closer/1,
+    overdue/1,
     cancel/1,
     cancel/2,
     give_away/2,
@@ -133,6 +134,7 @@ the server issued is the whole of the authorisation.
 -define(CLOSE_DRAIN_CAP, 1000).
 -define(CLOSER_LIFETIME, 5000).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 %% eqWAlizer cannot see that the transport field decides what the socket field
@@ -371,11 +373,11 @@ close_aside(Conn) ->
 
 -doc false.
 -spec close_aside(conn(), os()) -> ok.
-close_aside(#conn{transport = ssl} = Conn, {win32, _Name} = Os) ->
+close_aside(#conn{transport = ssl, socket = Socket, grace = Grace} = Conn, {win32, _Name} = Os) ->
     Closer = proc_lib:spawn(?MODULE, closer, [Os]),
     case give_away(Conn, Closer) of
         ok ->
-            Closer ! {?MODULE, close, Conn},
+            Closer ! {?MODULE, close, Socket, Grace},
             ok;
         {error, _Reason} ->
             exit(Closer, kill),
@@ -386,12 +388,28 @@ close_aside(Conn, Os) ->
 
 -doc false.
 -spec closer(os()) -> ok.
-%% A closer that finishes first is gone when the kill arrives, which makes the
-%% kill a no-op rather than something to cancel.
+%% Only the socket is sent, so no copy of the credentials in the connection
+%% lands in the closer's heap.
 closer(Os) ->
-    {ok, _Timer} = timer:kill_after(?CLOSER_LIFETIME),
+    {ok, _Timer} = timer:apply_after(?CLOSER_LIFETIME, ?MODULE, overdue, [self()]),
     receive
-        {?MODULE, close, Conn} -> close(Conn, Os)
+        {?MODULE, close, Socket, Grace} ->
+            _ = ssl:send(Socket, minato_protocol:encode(terminate)),
+            shut(ssl, Socket, Grace, Os)
+    end.
+
+%% Killing the closer frees it, but not an ssl process stuck in socket:close/1,
+%% so an overdue close is logged rather than lost.
+-doc false.
+-spec overdue(pid()) -> ok.
+overdue(Closer) ->
+    case is_process_alive(Closer) of
+        true ->
+            ?LOG_WARNING(#{what => tls_close_overdue, closer => Closer}),
+            exit(Closer, kill),
+            ok;
+        false ->
+            ok
     end.
 
 -spec shut(transport(), socket(), timeout(), os()) -> ok.

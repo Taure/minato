@@ -339,6 +339,20 @@ a_close_that_cannot_be_set_aside_is_done_in_place_test() ->
     ?assertEqual(Closers, closers()),
     minato_backend_server:stop(Server).
 
+an_overdue_closer_is_killed_test() ->
+    Closer = spawn(fun() ->
+        receive
+            never -> ok
+        end
+    end),
+    Ref = monitor(process, Closer),
+    ok = minato_conn:overdue(Closer),
+    receive
+        {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
+    after 1000 -> error(closer_not_killed)
+    end,
+    ?assertEqual(ok, minato_conn:overdue(Closer)).
+
 closers() ->
     length([
         Pid
