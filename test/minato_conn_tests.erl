@@ -216,6 +216,39 @@ cancel_without_a_key_is_refused_test() ->
     ok = minato_conn:close(Conn),
     minato_backend_server:stop(Server).
 
+an_idle_connection_is_usable_test() ->
+    lists:foreach(
+        fun(Transport) ->
+            {Server, {ok, Conn}} = connects([?READY], #{transport => Transport}),
+            ?assert(minato_conn:usable(Conn)),
+            ok = minato_conn:close(Conn),
+            minato_backend_server:stop(Server)
+        end,
+        [socket, inet]
+    ).
+
+bytes_the_server_sent_later_are_not_usable_test() ->
+    lists:foreach(
+        fun(Transport) ->
+            Script = [?READY, [{notice_response, #{message => ~"hello"}}]],
+            {Server, {ok, Conn}} = connects(Script, #{transport => Transport}),
+            ok = minato_conn:send(Conn, sync),
+            ?assert(eventually(fun() -> not minato_conn:usable(Conn) end, 100)),
+            ok = minato_conn:close(Conn),
+            minato_backend_server:stop(Server)
+        end,
+        [socket, inet]
+    ).
+
+a_connection_waiting_for_a_message_is_not_usable_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    {ok, Waiting} = minato_conn:activate(Conn),
+    Usable = minato_conn:usable(Waiting),
+    {ok, Read} = minato_conn:deactivate(Waiting),
+    ok = minato_conn:close(Read),
+    minato_backend_server:stop(Server),
+    ?assertNot(Usable).
+
 %%----------------------------------------------------------------------
 %% Closing a TLS session, as Windows does it and as everything else does
 %%----------------------------------------------------------------------
@@ -399,4 +432,15 @@ said(Server, Message, Deadline, Received) ->
                 true -> said(Server, Message, Deadline, minato_backend_server:received(Server));
                 false -> {error, never_said}
             end
+    end.
+
+eventually(_Check, 0) ->
+    false;
+eventually(Check, Attempts) ->
+    case Check() of
+        true ->
+            true;
+        false ->
+            timer:sleep(10),
+            eventually(Check, Attempts - 1)
     end.

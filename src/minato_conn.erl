@@ -590,6 +590,8 @@ not in the state a caller would assume, and it is cheaper to open a new
 connection than to work out what it said.
 """.
 -spec usable(conn()) -> boolean().
+usable(#conn{waiting = Waiting}) when Waiting =/= undefined ->
+    false;
 usable(#conn{buffer = ~"", pending = [], transport = minato_socket} = Conn) ->
     minato_socket:quiet(handle(Conn));
 usable(#conn{buffer = ~"", pending = [], transport = Transport, socket = Socket}) ->

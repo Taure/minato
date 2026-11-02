@@ -39,6 +39,14 @@ a_closed_socket_is_not_quiet_test() ->
     ?assertNot(minato_socket:quiet(Client, ?POSIX)),
     ok = gen_tcp:close(Server).
 
+the_machine_it_runs_on_decides_how_to_ask_test() ->
+    {Client, Server} = pair(),
+    ?assert(minato_socket:quiet(Client)),
+    ok = gen_tcp:send(Server, ~"E"),
+    ok = arrived(Client, 100),
+    ?assertNot(minato_socket:quiet(Client)),
+    closed(Client, Server).
+
 pair() ->
     {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]),
     {ok, Port} = inet:port(Listen),
