@@ -45,7 +45,8 @@ Skips when no TLS server answers.
     closing_with_answers_unread_waits_only_for_the_server/1,
     closing_a_busy_session_is_bounded/1,
     on_windows_an_idle_session_closes_once_the_server_has/1,
-    on_windows_closing_a_busy_session_waits_a_second_at_most/1
+    on_windows_closing_a_busy_session_waits_a_second_at_most/1,
+    a_discarded_busy_connection_does_not_stall_checkouts/1
 ]).
 
 -define(TIMEOUT, 15000).
@@ -81,7 +82,8 @@ all() ->
         closing_with_answers_unread_waits_only_for_the_server,
         closing_a_busy_session_is_bounded,
         on_windows_an_idle_session_closes_once_the_server_has,
-        on_windows_closing_a_busy_session_waits_a_second_at_most
+        on_windows_closing_a_busy_session_waits_a_second_at_most,
+        a_discarded_busy_connection_does_not_stall_checkouts
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -323,6 +325,31 @@ on_windows_closing_a_busy_session_waits_a_second_at_most(_Config) ->
     {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
     ?assert(Took >= 1000),
     ?assert(Took < 2000).
+
+-spec a_discarded_busy_connection_does_not_stall_checkouts([{atom(), term()}]) -> ok.
+a_discarded_busy_connection_does_not_stall_checkouts(_Config) ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    {ok, _Pool} = minato:start_pool(tls_discard_pool, #{
+        size => 2, min_size => 2, connection => verified()
+    }),
+    ok = filled(tls_discard_pool, 2, 100),
+    {ok, Conn} = minato_pool:checkout(tls_discard_pool),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    ok = minato_pool:discard(tls_discard_pool, Conn),
+    {Took, {ok, Other}} = timed(fun() -> minato_pool:checkout(tls_discard_pool, 10000) end),
+    ?assert(Took < 500),
+    ok = minato_pool:checkin(tls_discard_pool, Other),
+    ok = minato:stop_pool(tls_discard_pool).
+
+filled(_Pool, _Size, 0) ->
+    {error, never_filled};
+filled(Pool, Size, Attempts) ->
+    case minato_pool:stats(Pool) of
+        #{idle := Idle} when Idle >= Size -> ok;
+        _Filling ->
+            timer:sleep(20),
+            filled(Pool, Size, Attempts - 1)
+    end.
 
 timed(Fun) ->
     Started = erlang:monotonic_time(millisecond),

@@ -92,6 +92,9 @@ the server issued is the whole of the authorisation.
     connect/1,
     close/1,
     close/2,
+    close_aside/1,
+    close_aside/2,
+    closer/1,
     cancel/1,
     give_away/2,
     send/2,
@@ -127,6 +130,7 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_STATEMENTS, 64).
 -define(DEFAULT_CANCEL_TIMEOUT, 5000).
 -define(CLOSE_DRAIN_CAP, 1000).
+-define(CLOSER_LIFETIME, 5000).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -355,6 +359,39 @@ close(Conn) ->
 close(#conn{transport = Transport, socket = Socket, grace = Grace} = Conn, Os) ->
     _ = terminated(Conn),
     shut(Transport, Socket, Grace, Os).
+
+%% For a process that cannot afford the drain `close/1` waits for on Windows,
+%% such as a pool: the close goes to a process of its own, which is killed if
+%% even that does not end.
+-doc false.
+-spec close_aside(conn()) -> ok.
+close_aside(Conn) ->
+    close_aside(Conn, os:type()).
+
+-doc false.
+-spec close_aside(conn(), os()) -> ok.
+close_aside(#conn{transport = ssl} = Conn, {win32, _Name} = Os) ->
+    Closer = proc_lib:spawn(?MODULE, closer, [Os]),
+    case give_away(Conn, Closer) of
+        ok ->
+            Closer ! {?MODULE, close, Conn},
+            ok;
+        {error, _Reason} ->
+            exit(Closer, kill),
+            close(Conn, Os)
+    end;
+close_aside(Conn, Os) ->
+    close(Conn, Os).
+
+-doc false.
+-spec closer(os()) -> ok.
+%% A closer that finishes first is gone when the kill arrives, which makes the
+%% kill a no-op rather than something to cancel.
+closer(Os) ->
+    {ok, _Timer} = timer:kill_after(?CLOSER_LIFETIME),
+    receive
+        {?MODULE, close, Conn} -> close(Conn, Os)
+    end.
 
 -spec shut(transport(), socket(), timeout(), os()) -> ok.
 shut(ssl, Socket, Grace, {win32, _Name}) ->

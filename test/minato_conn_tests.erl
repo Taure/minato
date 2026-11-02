@@ -274,6 +274,65 @@ elsewhere_a_tls_close_does_not_wait_test() ->
     ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
     minato_backend_server:stop(Server).
 
+%% Set aside by a process that exits straight away, as a pool's caller might: the
+%% session outlives it only if the closer really took it over.
+a_tls_close_set_aside_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    Test = self(),
+    Owner = spawn(fun() -> set_aside(Test) end),
+    ok = minato_conn:give_away(Conn, Owner),
+    Started = erlang:monotonic_time(millisecond),
+    Owner ! {close_aside, Conn},
+    receive
+        {set_aside, Answer} -> ?assertEqual(ok, Answer)
+    end,
+    ?assert(erlang:monotonic_time(millisecond) - Started < 200),
+    ?assertEqual(ok, said(Server, closed, 3000)),
+    ?assert(erlang:monotonic_time(millisecond) - Started >= 1000),
+    minato_backend_server:stop(Server).
+
+set_aside(Test) ->
+    receive
+        {close_aside, Conn} -> Test ! {set_aside, minato_conn:close_aside(Conn, ?WINDOWS)}
+    end.
+
+a_close_that_cannot_be_set_aside_is_done_in_place_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    ok = minato_conn:close(Conn, ?POSIX),
+    Closers = closers(),
+    {Took, ok} = timed(fun() -> minato_conn:close_aside(Conn, ?WINDOWS) end),
+    ?assert(Took < 500),
+    timer:sleep(100),
+    ?assertEqual(Closers, closers()),
+    minato_backend_server:stop(Server).
+
+closers() ->
+    length([
+        Pid
+     || Pid <- processes(), proc_lib:initial_call(Pid) =:= {minato_conn, closer, ['Argument__1']}
+    ]).
+
+elsewhere_a_close_is_not_set_aside_test() ->
+    ok = plain_close_aside(?WINDOWS),
+    ok = plain_close_aside(?POSIX),
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close_aside(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+the_machine_it_runs_on_decides_whether_to_set_a_close_aside_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    ok = minato_conn:close_aside(Conn),
+    ?assertMatch([{startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+plain_close_aside(Os) ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    ok = minato_conn:close_aside(Conn, Os),
+    ?assertMatch([{startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
 %%----------------------------------------------------------------------
 %% Talking to the server
 %%----------------------------------------------------------------------
@@ -300,3 +359,18 @@ timed(Fun) ->
     Started = erlang:monotonic_time(millisecond),
     Result = Fun(),
     {erlang:monotonic_time(millisecond) - Started, Result}.
+
+said(Server, Message, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    said(Server, Message, Deadline, minato_backend_server:received(Server)).
+
+said(Server, Message, Deadline, Received) ->
+    case lists:member(Message, Received) of
+        true ->
+            ok;
+        false ->
+            case erlang:monotonic_time(millisecond) < Deadline of
+                true -> said(Server, Message, Deadline, minato_backend_server:received(Server));
+                false -> {error, never_said}
+            end
+    end.

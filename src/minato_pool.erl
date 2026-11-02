@@ -728,7 +728,7 @@ handle_info(_Message, State) ->
 
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{idle = Idle}) ->
-    _ = [minato_conn:close(Conn) || {Conn, _Since, _Expected} <- Idle],
+    _ = [minato_conn:close_aside(Conn) || {Conn, _Since, _Expected} <- Idle],
     ok.
 
 %%----------------------------------------------------------------------
@@ -973,7 +973,7 @@ aged(#state{max_age = MaxAge} = State, Conn) ->
 
 -spec retired(#state{}, minato_conn:conn()) -> #state{}.
 retired(State, Conn) ->
-    ok = minato_conn:close(Conn),
+    ok = minato_conn:close_aside(Conn),
     ok = counters:add(State#state.counters, ?RETIRED, 1),
     ok = minato_telemetry:event(
         [minato, connection, closed], #{pool => State#state.name, reason => max_age}
@@ -982,7 +982,7 @@ retired(State, Conn) ->
 
 -spec discarded(#state{}, minato_conn:conn()) -> #state{}.
 discarded(State, Conn) ->
-    ok = minato_conn:close(Conn),
+    ok = minato_conn:close_aside(Conn),
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
     ok = minato_telemetry:event(
         [minato, connection, closed], #{pool => State#state.name, reason => discarded}
@@ -1121,7 +1121,7 @@ idle_split([Held | Rest], Cutoff, Floor, Keep, Stale) ->
 
 -spec closed(#state{}, minato_conn:conn()) -> ok.
 closed(#state{name = Name}, Conn) ->
-    ok = minato_conn:close(Conn),
+    ok = minato_conn:close_aside(Conn),
     minato_telemetry:event(
         [minato, connection, closed], #{pool => Name, reason => idle}
     ).
