@@ -307,7 +307,7 @@ closing_with_answers_unread_waits_only_for_the_server(_Config) ->
 -spec closing_a_busy_session_is_bounded([{atom(), term()}]) -> ok.
 closing_a_busy_session_is_bounded(_Config) ->
     {ok, Conn} = minato_conn:connect((verified())#{cancel_timeout => infinity}),
-    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(5)"}),
     {Took, ok} = timed(fun() -> minato_conn:close(Conn) end),
     ?assert(Took < 2000).
 
@@ -323,7 +323,7 @@ on_windows_an_idle_session_closes_once_the_server_has(_Config) ->
 -spec on_windows_closing_a_busy_session_waits_a_second_at_most([{atom(), term()}]) -> ok.
 on_windows_closing_a_busy_session_waits_a_second_at_most(_Config) ->
     {ok, Conn} = minato_conn:connect((verified())#{cancel_timeout => infinity}),
-    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(5)"}),
     {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
     ?assert(Took >= 1000),
     ?assert(Took < 2000).
@@ -346,7 +346,7 @@ a_discarded_busy_connection_does_not_stall_checkouts(_Config) ->
     }),
     ok = filled(tls_discard_pool, 2, 100),
     {ok, Conn} = minato_pool:checkout(tls_discard_pool),
-    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(20)"}),
+    ok = minato_conn:send(Conn, {query, ~"SELECT pg_sleep(5)"}),
     ok = minato_pool:discard(tls_discard_pool, Conn),
     {Took, {ok, Other}} = timed(fun() -> minato_pool:checkout(tls_discard_pool, 10000) end),
     ?assert(Took < 500),

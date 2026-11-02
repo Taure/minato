@@ -17,6 +17,8 @@ messages the server received and require the password not to be among them.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([log/2]).
+
 -define(WINDOWS, {win32, nt}).
 -define(POSIX, {unix, linux}).
 
@@ -329,7 +331,7 @@ set_aside(Test) ->
         {close_aside, Conn} -> Test ! {set_aside, minato_conn:close_aside(Conn, ?WINDOWS)}
     end.
 
-a_close_that_cannot_be_set_aside_is_done_in_place_test() ->
+a_close_that_cannot_be_set_aside_leaves_no_closer_test() ->
     {Server, {ok, Conn}} = tls_connects(#{}, #{}),
     ok = minato_conn:close(Conn, ?POSIX),
     Closers = closers(),
@@ -339,19 +341,43 @@ a_close_that_cannot_be_set_aside_is_done_in_place_test() ->
     ?assertEqual(Closers, closers()),
     minato_backend_server:stop(Server).
 
-an_overdue_closer_is_killed_test() ->
+an_overdue_closer_is_killed_and_logged_test() ->
+    ok = logger:add_handler(overdue_capture, ?MODULE, #{config => self()}),
     Closer = spawn(fun() ->
         receive
             never -> ok
         end
     end),
     Ref = monitor(process, Closer),
-    ok = minato_conn:overdue(Closer),
-    receive
-        {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
-    after 1000 -> error(closer_not_killed)
-    end,
-    ?assertEqual(ok, minato_conn:overdue(Closer)).
+    try
+        ok = minato_conn:overdue(Closer),
+        receive
+            {logged, warning, #{what := tls_close_overdue, closer := Closer}} -> ok
+        after 1000 -> error(not_logged)
+        end,
+        receive
+            {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
+        after 1000 -> error(closer_not_killed)
+        end,
+        ?assertEqual(ok, minato_conn:overdue(Closer))
+    after
+        logger:remove_handler(overdue_capture)
+    end.
+
+a_closer_never_told_to_close_is_killed_test_() ->
+    {timeout, 15, fun() ->
+        Closer = proc_lib:spawn(minato_conn, closer, [?WINDOWS]),
+        Ref = monitor(process, Closer),
+        receive
+            {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
+        after 7000 -> error(closer_lives_on)
+        end
+    end}.
+
+log(#{level := Level, msg := {report, Report}}, #{config := Test}) ->
+    Test ! {logged, Level, Report};
+log(_Event, _Config) ->
+    ok.
 
 closers() ->
     length([

@@ -386,10 +386,10 @@ close_aside(#conn{transport = ssl, socket = Socket, grace = Grace} = Conn, {win3
 close_aside(Conn, Os) ->
     close(Conn, Os).
 
--doc false.
--spec closer(os()) -> ok.
 %% Only the socket is sent, so no copy of the credentials in the connection
 %% lands in the closer's heap.
+-doc false.
+-spec closer(os()) -> ok.
 closer(Os) ->
     {ok, _Timer} = timer:apply_after(?CLOSER_LIFETIME, ?MODULE, overdue, [self()]),
     receive
@@ -600,7 +600,8 @@ the pool, so without asking it lends a connection that is already gone and the
 caller gets a socket error for a statement that never reached a server.
 
 Asking costs one non-blocking read, or on Windows a count of the bytes waiting
-(see `minato_socket:quiet/1`). No bytes waiting means the connection is
+(see `minato_socket:quiet/1`). A connection under `activate/1` answers
+`false` without the socket being asked. No bytes waiting means the connection is
 idle and healthy, which is the answer for a pooled connection. A closed socket
 is the case this exists for. Bytes waiting, on the socket or already read into
 the connection, mean the server said something nobody read, so the session is

@@ -43,8 +43,8 @@ How the server behaves beyond the script.
 `tls` answers `SSLRequest` with `S` and completes a handshake with a certificate
 made for the server, which `client_tls/1` hands the client the trust for.
 `after_terminate` is what happens once `Terminate` or `CancelRequest` is read:
-`close` is what a PostgreSQL does, `hold` keeps the session open and silent until the client
-closes it, and `chatter` keeps writing to it, so a client waiting for the close
+`close` is what PostgreSQL does, `hold` keeps the session open and silent
+until the client closes it, and `chatter` keeps writing to it, so a client waiting for the close
 never waits on a quiet socket.
 """.
 -type opts() :: #{tls => boolean(), after_terminate => close | hold | chatter}.
