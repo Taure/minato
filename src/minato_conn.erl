@@ -91,7 +91,13 @@ the server issued is the whole of the authorisation.
 -export([
     connect/1,
     close/1,
+    close/2,
+    close_aside/1,
+    close_aside/2,
+    closer/1,
+    overdue/1,
     cancel/1,
+    cancel/2,
     give_away/2,
     send/2,
     next/1,
@@ -125,7 +131,10 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
 -define(DEFAULT_CANCEL_TIMEOUT, 5000).
+-define(CLOSE_DRAIN_CAP, 1000).
+-define(CLOSER_LIFETIME, 5000).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 %% eqWAlizer cannot see that the transport field decides what the socket field
@@ -219,7 +228,9 @@ off. See `m:minato_query` for what fills it.
 `timeout` is the per read timeout and applies for the life of the connection.
 `connect_timeout` covers the TCP connect and the TLS handshake. `cancel_timeout`
 is how long a cancelled statement is given to come back before the connection is
-given up on; see `deadline/2`.
+given up on; see `deadline/2`. On Windows it also bounds how long closing a TLS
+connection waits for the server to close first, to at most a second; see
+`close/1`.
 """.
 -type opts() :: #{
     host => inet:socket_address() | inet:hostname(),
@@ -271,6 +282,7 @@ An authentication method the server may ask for.
 -type transport() :: plain() | ssl.
 -type plain() :: gen_tcp | minato_socket.
 -type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
+-type os() :: {atom(), atom()}.
 
 -doc """
 Open a connection and complete the opening exchange.
@@ -330,11 +342,96 @@ Close a connection.
 discovering a closed socket, and a failure to send it is not reported: the
 socket is being closed either way. The send waits no longer than
 `send_timeout`.
+
+On Windows a TLS session waits for the server's own close before it is closed,
+for no longer than `cancel_timeout` and never more than a second. `m:ssl` keeps a
+read outstanding on a socket from `m:socket`, and there a `socket:close/1` that
+races the server's close against that read can wait forever for the read to be
+given back, which leaves the caller of `ssl:close/1` waiting with it (#58). Once
+the server has closed, the read has finished and there is nothing left to race.
+A server busy with a statement reads `Terminate` only when the statement ends, so
+the second is what closing a busy TLS connection costs there. Everywhere else the
+session is closed at once.
 """.
 -spec close(conn()) -> ok.
-close(#conn{transport = Transport, socket = Socket} = Conn) ->
+close(Conn) ->
+    close(Conn, os:type()).
+
+-doc false.
+-spec close(conn(), os()) -> ok.
+close(#conn{transport = Transport, socket = Socket, grace = Grace} = Conn, Os) ->
     _ = terminated(Conn),
-    Transport:close(Socket).
+    shut(Transport, Socket, Grace, Os).
+
+%% For a process that cannot afford the drain `close/1` waits for on Windows,
+%% such as a pool: the close goes to a process of its own, which is killed if
+%% even that does not end.
+-doc false.
+-spec close_aside(conn()) -> ok.
+close_aside(Conn) ->
+    close_aside(Conn, os:type()).
+
+-doc false.
+-spec close_aside(conn(), os()) -> ok.
+close_aside(#conn{transport = ssl, socket = Socket, grace = Grace} = Conn, {win32, _Name} = Os) ->
+    Closer = proc_lib:spawn(?MODULE, closer, [Os]),
+    case give_away(Conn, Closer) of
+        ok ->
+            Closer ! {?MODULE, close, Socket, Grace},
+            ok;
+        {error, _Reason} ->
+            exit(Closer, kill),
+            close(Conn, Os)
+    end;
+close_aside(Conn, Os) ->
+    close(Conn, Os).
+
+%% Only the socket is sent, so no copy of the credentials in the connection
+%% lands in the closer's heap.
+-doc false.
+-spec closer(os()) -> ok.
+closer(Os) ->
+    {ok, _Timer} = timer:apply_after(?CLOSER_LIFETIME, ?MODULE, overdue, [self()]),
+    receive
+        {?MODULE, close, Socket, Grace} ->
+            _ = ssl:send(Socket, minato_protocol:encode(terminate)),
+            shut(ssl, Socket, Grace, Os)
+    end.
+
+%% Killing the closer frees it, but not an ssl process stuck in socket:close/1,
+%% so an overdue close is logged rather than lost.
+-doc false.
+-spec overdue(pid()) -> ok.
+overdue(Closer) ->
+    case is_process_alive(Closer) of
+        true ->
+            ?LOG_WARNING(#{what => tls_close_overdue, closer => Closer}),
+            exit(Closer, kill),
+            ok;
+        false ->
+            ok
+    end.
+
+-spec shut(transport(), socket(), timeout(), os()) -> ok.
+shut(ssl, Socket, Grace, {win32, _Name}) ->
+    _ = ssl:setopts(Socket, [{active, false}]),
+    ok = drained(Socket, erlang:monotonic_time(millisecond) + drain_cap(Grace)),
+    _ = ssl:close(Socket),
+    ok;
+shut(Transport, Socket, _Grace, _Os) ->
+    _ = Transport:close(Socket),
+    ok.
+
+-spec drain_cap(timeout()) -> non_neg_integer().
+drain_cap(infinity) -> ?CLOSE_DRAIN_CAP;
+drain_cap(Grace) -> min(Grace, ?CLOSE_DRAIN_CAP).
+
+-spec drained(ssl:sslsocket(), integer()) -> ok.
+drained(Socket, Deadline) ->
+    case ssl:recv(Socket, 0, remaining(Deadline - erlang:monotonic_time(millisecond), infinity)) of
+        {ok, _Unread} -> drained(Socket, Deadline);
+        {error, _Closed_or_timeout} -> ok
+    end.
 
 -spec terminated(conn()) -> ok | {error, term()}.
 terminated(#conn{transport = minato_socket, send_timeout = Timeout} = Conn) ->
@@ -350,15 +447,20 @@ it. No answer is defined by the protocol: the server either cancels the query or
 does not, and this connection finds out by reading what its query returned.
 """.
 -spec cancel(conn()) -> ok | {error, error()}.
-cancel(#conn{key = undefined}) ->
+cancel(Conn) ->
+    cancel(Conn, os:type()).
+
+-doc false.
+-spec cancel(conn(), os()) -> ok | {error, error()}.
+cancel(#conn{key = undefined}, _Os) ->
     {error, {socket, no_backend_key}};
-cancel(#conn{key = {Pid, Secret}, opts = Opts}) ->
+cancel(#conn{key = Key, grace = Grace, opts = Opts}, Os) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
     Transport = transport(Opts),
     case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts);
+        {ok, Socket} -> requested(Transport, Socket, Host, Key, {Timeout, Grace, Os}, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
@@ -497,7 +599,9 @@ an administrator ends the backend, a failover moves the database. Nothing tells
 the pool, so without asking it lends a connection that is already gone and the
 caller gets a socket error for a statement that never reached a server.
 
-Asking costs one non-blocking read. No bytes waiting means the connection is
+Asking costs one non-blocking read, or on Windows a count of the bytes waiting
+(see `minato_socket:quiet/1`). A connection under `activate/1` answers
+`false` without the socket being asked. No bytes waiting means the connection is
 idle and healthy, which is the answer for a pooled connection. A closed socket
 is the case this exists for. Bytes waiting, on the socket or already read into
 the connection, mean the server said something nobody read, so the session is
@@ -505,6 +609,10 @@ not in the state a caller would assume, and it is cheaper to open a new
 connection than to work out what it said.
 """.
 -spec usable(conn()) -> boolean().
+usable(#conn{waiting = Waiting}) when Waiting =/= undefined ->
+    false;
+usable(#conn{buffer = ~"", pending = [], transport = minato_socket} = Conn) ->
+    minato_socket:quiet(handle(Conn));
 usable(#conn{buffer = ~"", pending = [], transport = Transport, socket = Socket}) ->
     case Transport:recv(Socket, 0, 0) of
         {error, timeout} -> true;
@@ -1197,14 +1305,21 @@ all_methods() ->
 %% Cancelling
 %%----------------------------------------------------------------------
 
--spec cancel(
-    plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), key(), opts()
+%% The server closes a cancel connection as soon as it has read the request, so
+%% the TLS one waits for that close on Windows for the same reason `close/1` does.
+-spec requested(
+    plain(),
+    socket(),
+    inet:socket_address() | inet:hostname(),
+    key(),
+    {timeout(), timeout(), os()},
+    opts()
 ) -> ok | {error, error()}.
-cancel(Transport, Socket, Host, Timeout, {Pid, Secret}, Opts) ->
+requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
     case secured(Transport, Socket, Host, Timeout, Opts) of
-        {ok, Transport, Secured} ->
-            Sent = write(Transport, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
-            _ = Transport:close(Secured),
+        {ok, Secure, Secured} ->
+            Sent = write(Secure, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
+            ok = shut(Secure, Secured, Grace, Os),
             Sent;
         {error, Reason} ->
             {error, Reason}

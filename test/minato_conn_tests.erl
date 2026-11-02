@@ -17,6 +17,11 @@ messages the server received and require the password not to be among them.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([log/2]).
+
+-define(WINDOWS, {win32, nt}).
+-define(POSIX, {unix, linux}).
+
 -define(READY, [
     authentication_ok,
     {parameter_status, ~"server_version", ~"17.4"},
@@ -213,6 +218,220 @@ cancel_without_a_key_is_refused_test() ->
     ok = minato_conn:close(Conn),
     minato_backend_server:stop(Server).
 
+an_idle_connection_is_usable_test() ->
+    lists:foreach(
+        fun(Transport) ->
+            {Server, {ok, Conn}} = connects([?READY], #{transport => Transport}),
+            ?assert(minato_conn:usable(Conn)),
+            ok = minato_conn:close(Conn),
+            minato_backend_server:stop(Server)
+        end,
+        [socket, inet]
+    ).
+
+bytes_the_server_sent_later_are_not_usable_test() ->
+    lists:foreach(
+        fun(Transport) ->
+            Script = [?READY, [{notice_response, #{message => ~"hello"}}]],
+            {Server, {ok, Conn}} = connects(Script, #{transport => Transport}),
+            ok = minato_conn:send(Conn, sync),
+            ?assert(eventually(fun() -> not minato_conn:usable(Conn) end, 100)),
+            ok = minato_conn:close(Conn),
+            minato_backend_server:stop(Server)
+        end,
+        [socket, inet]
+    ).
+
+a_connection_waiting_for_a_message_is_not_usable_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    {ok, Waiting} = minato_conn:activate(Conn),
+    Usable = minato_conn:usable(Waiting),
+    {ok, Read} = minato_conn:deactivate(Waiting),
+    ok = minato_conn:close(Read),
+    minato_backend_server:stop(Server),
+    ?assertNot(Usable).
+
+%%----------------------------------------------------------------------
+%% Closing a TLS session, as Windows does it and as everything else does
+%%----------------------------------------------------------------------
+
+a_tls_session_is_closed_once_the_server_has_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took < 500),
+    ?assertMatch([ssl_request, {startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+on_windows_a_tls_close_waits_for_the_server_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+the_wait_is_bounded_in_total_not_per_read_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => chatter}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    minato_backend_server:stop(Server).
+
+no_cancel_timeout_is_no_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 0}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+    ?assert(Took < 200),
+    minato_backend_server:stop(Server).
+
+the_wait_never_exceeds_a_second_test() ->
+    lists:foreach(
+        fun(Grace) ->
+            {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, Grace),
+            {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?WINDOWS) end),
+            ?assert(Took >= 1000),
+            ?assert(Took < 1500),
+            minato_backend_server:stop(Server)
+        end,
+        [#{}, #{cancel_timeout => infinity}]
+    ).
+
+a_tls_session_reading_for_messages_is_drained_too_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {ok, Active} = minato_conn:activate(Conn),
+    {Took, ok} = timed(fun() -> minato_conn:close(Active, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    minato_backend_server:stop(Server).
+
+elsewhere_a_tls_close_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+%% Set aside by a process that exits straight away, as a pool's caller might: the
+%% session outlives it only if the closer really took it over.
+a_tls_close_set_aside_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    Test = self(),
+    Owner = spawn(fun() -> set_aside(Test) end),
+    ok = minato_conn:give_away(Conn, Owner),
+    Started = erlang:monotonic_time(millisecond),
+    Owner ! {close_aside, Conn},
+    receive
+        {set_aside, Answer} -> ?assertEqual(ok, Answer)
+    end,
+    ?assert(erlang:monotonic_time(millisecond) - Started < 200),
+    ?assertEqual(ok, said(Server, closed, 3000)),
+    ?assert(erlang:monotonic_time(millisecond) - Started >= 1000),
+    minato_backend_server:stop(Server).
+
+set_aside(Test) ->
+    receive
+        {close_aside, Conn} -> Test ! {set_aside, minato_conn:close_aside(Conn, ?WINDOWS)}
+    end.
+
+a_close_that_cannot_be_set_aside_leaves_no_closer_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    ok = minato_conn:close(Conn, ?POSIX),
+    Closers = closers(),
+    {Took, ok} = timed(fun() -> minato_conn:close_aside(Conn, ?WINDOWS) end),
+    ?assert(Took < 500),
+    timer:sleep(100),
+    ?assertEqual(Closers, closers()),
+    minato_backend_server:stop(Server).
+
+an_overdue_closer_is_killed_and_logged_test() ->
+    ok = logger:add_handler(overdue_capture, ?MODULE, #{config => self()}),
+    Closer = spawn(fun() ->
+        receive
+            never -> ok
+        end
+    end),
+    Ref = monitor(process, Closer),
+    try
+        ok = minato_conn:overdue(Closer),
+        receive
+            {logged, warning, #{what := tls_close_overdue, closer := Closer}} -> ok
+        after 1000 -> error(not_logged)
+        end,
+        receive
+            {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
+        after 1000 -> error(closer_not_killed)
+        end,
+        ?assertEqual(ok, minato_conn:overdue(Closer))
+    after
+        logger:remove_handler(overdue_capture)
+    end.
+
+a_closer_never_told_to_close_is_killed_test_() ->
+    {timeout, 15, fun() ->
+        Closer = proc_lib:spawn(minato_conn, closer, [?WINDOWS]),
+        Ref = monitor(process, Closer),
+        receive
+            {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(killed, Reason)
+        after 7000 -> error(closer_lives_on)
+        end
+    end}.
+
+log(#{level := Level, msg := {report, Report}}, #{config := Test}) ->
+    Test ! {logged, Level, Report};
+log(_Event, _Config) ->
+    ok.
+
+closers() ->
+    length([
+        Pid
+     || Pid <- processes(), proc_lib:initial_call(Pid) =:= {minato_conn, closer, ['Argument__1']}
+    ]).
+
+elsewhere_a_close_is_not_set_aside_test() ->
+    ok = plain_close_aside(?WINDOWS),
+    ok = plain_close_aside(?POSIX),
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:close_aside(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ?assertMatch([_, _, terminate, closed], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+the_machine_it_runs_on_decides_whether_to_set_a_close_aside_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    ok = minato_conn:close_aside(Conn),
+    ?assertMatch([{startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+plain_close_aside(Os) ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    ok = minato_conn:close_aside(Conn, Os),
+    ?assertMatch([{startup, _}, terminate], minato_backend_server:received(Server)),
+    minato_backend_server:stop(Server).
+
+on_windows_a_tls_cancel_waits_for_the_server_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{cancel_timeout => 300}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn, ?WINDOWS) end),
+    ?assert(Took >= 300),
+    ?assert(Took < 1000),
+    Received = minato_backend_server:received(Server),
+    ?assert(lists:member({cancel_request, 4242, 777}, Received)),
+    ok = minato_conn:close(Conn, ?POSIX),
+    minato_backend_server:stop(Server).
+
+a_tls_cancel_sends_the_key_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn) end),
+    ?assert(Took < 500),
+    Received = minato_backend_server:received(Server),
+    ?assert(lists:member({cancel_request, 4242, 777}, Received)),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server).
+
+elsewhere_a_tls_cancel_does_not_wait_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{after_terminate => hold}, #{}),
+    {Took, ok} = timed(fun() -> minato_conn:cancel(Conn, ?POSIX) end),
+    ?assert(Took < 200),
+    ok = minato_conn:close(Conn, ?POSIX),
+    minato_backend_server:stop(Server).
+
 %%----------------------------------------------------------------------
 %% Talking to the server
 %%----------------------------------------------------------------------
@@ -227,3 +446,41 @@ opts(Port, Opts) ->
         #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000},
         Opts
     ).
+
+tls_connects(ServerOpts, Opts) ->
+    {ok, _Started} = application:ensure_all_started(ssl),
+    Server = minato_backend_server:start([?READY], ServerOpts#{tls => true}),
+    Port = minato_backend_server:port(Server),
+    Tls = #{ssl => true, ssl_options => minato_backend_server:client_tls(Server)},
+    {Server, minato_conn:connect(opts(Port, maps:merge(Tls, Opts)))}.
+
+timed(Fun) ->
+    Started = erlang:monotonic_time(millisecond),
+    Result = Fun(),
+    {erlang:monotonic_time(millisecond) - Started, Result}.
+
+said(Server, Message, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    said(Server, Message, Deadline, minato_backend_server:received(Server)).
+
+said(Server, Message, Deadline, Received) ->
+    case lists:member(Message, Received) of
+        true ->
+            ok;
+        false ->
+            case erlang:monotonic_time(millisecond) < Deadline of
+                true -> said(Server, Message, Deadline, minato_backend_server:received(Server));
+                false -> {error, never_said}
+            end
+    end.
+
+eventually(_Check, 0) ->
+    false;
+eventually(Check, Attempts) ->
+    case Check() of
+        true ->
+            true;
+        false ->
+            timer:sleep(10),
+            eventually(Check, Attempts - 1)
+    end.
