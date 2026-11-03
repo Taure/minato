@@ -118,6 +118,28 @@ time_test_() ->
         ?_assertError({minato_codec, #{reason := time_out_of_range}}, enc(1083, {25, 0, 0}, binary))
     ].
 
+hour_24_is_only_midnight_at_the_end_of_the_day_test_() ->
+    Rejected = [{24, 0, 1}, {24, 1, 0}, {24, 59, 60}],
+    [
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1083, {24, 0, 0}, binary)),
+        ?_assertEqual(~"24:00:00", enc(1083, {24, 0, 0}, text)),
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1114, {{2000, 1, 1}, {24, 0, 0}}, binary)),
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1184, {{2000, 1, 1}, {24, 0, 0}}, binary))
+    ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{reason := time_out_of_range}}, enc(1083, Time, Format)
+            )
+         || Time <- Rejected, Format <- [binary, text]
+        ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{reason := time_out_of_range}},
+                enc(Oid, {{2026, 11, 3}, Time}, Format)
+            )
+         || Oid <- [1114, 1184], Time <- Rejected, Format <- [binary, text]
+        ].
+
 time_microseconds_option_test_() ->
     Opts = #{datetime_format => microseconds},
     [

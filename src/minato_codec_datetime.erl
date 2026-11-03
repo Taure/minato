@@ -224,8 +224,12 @@ to_day_micros({H, Mi, S}) when is_integer(H), is_integer(Mi), is_integer(S) ->
 to_day_micros(Value) ->
     minato_codec:bad(time, not_a_time, Value).
 
+%% PostgreSQL takes 24:00:00 as the end of a day and refuses any other time in
+%% hour 24 as out of range.
 -spec valid_time(integer(), integer(), integer()) -> ok.
-valid_time(H, Mi, S) when H >= 0, H =< 24, Mi >= 0, Mi =< 59, S >= 0, S =< 60 ->
+valid_time(24, 0, 0) ->
+    ok;
+valid_time(H, Mi, S) when H >= 0, H =< 23, Mi >= 0, Mi =< 59, S >= 0, S =< 60 ->
     ok;
 valid_time(H, Mi, S) ->
     minato_codec:bad(time, time_out_of_range, {H, Mi, S}).
