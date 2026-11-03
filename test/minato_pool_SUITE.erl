@@ -68,8 +68,10 @@ Skips when no server answers.
     a_stale_idle_term_inside_a_transaction_is_not_lent_again/1,
     a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing/1,
     a_connection_given_back_unread_comes_back_idle/1,
-    a_connection_given_back_unread_with_another_nonce_is_closed/1
+    a_connection_given_back_unread_with_another_nonce_is_closed/1,
+    a_connect_that_raises_is_retried/1
 ]).
+-export([flaky_password/0]).
 
 -define(TIMEOUT, 10000).
 -define(POOL, minato_test_pool).
@@ -126,7 +128,8 @@ all() ->
         a_stale_idle_term_inside_a_transaction_is_not_lent_again,
         a_checkout_the_pool_reaches_after_its_caller_left_lends_nothing,
         a_connection_given_back_unread_comes_back_idle,
-        a_connection_given_back_unread_with_another_nonce_is_closed
+        a_connection_given_back_unread_with_another_nonce_is_closed,
+        a_connect_that_raises_is_retried
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -164,6 +167,8 @@ init_per_testcase(a_pool_grows_when_a_caller_finds_none_free, Config) ->
     Config;
 init_per_testcase(a_waiter_is_served_after_a_discard_below_the_floor, Config) ->
     Config;
+init_per_testcase(a_connect_that_raises_is_retried, Config) ->
+    Config;
 init_per_testcase(a_connection_older_than_max_age_is_retired, Config) ->
     {ok, _Pid} = minato:start_pool(?POOL, #{
         size => 1, min_size => 1, max_age => 1, connection => connection()
@@ -195,6 +200,9 @@ end_per_testcase(a_pool_grows_when_a_caller_finds_none_free, _Config) ->
     ok = minato:stop_pool(minato_growth_pool);
 end_per_testcase(a_waiter_is_served_after_a_discard_below_the_floor, _Config) ->
     ok = minato:stop_pool(minato_bare_pool);
+end_per_testcase(a_connect_that_raises_is_retried, _Config) ->
+    _ = persistent_term:erase({?MODULE, password}),
+    ok = minato:stop_pool(minato_raising_pool);
 end_per_testcase(_Case, _Config) ->
     ok = minato:stop_pool(?POOL).
 
@@ -811,6 +819,52 @@ buried(Pids, Attempts) ->
         Alive ->
             timer:sleep(20),
             buried(Alive, Attempts - 1)
+    end.
+
+-doc """
+A connect that raises rather than returning an error is retried.
+
+A password source that throws while it is down, or a server that offers only
+`SCRAM-SHA-256` to a connection that requires channel binding, makes
+`minato_conn:connect/1` raise. The process opening the connection died with it
+and never told the pool, which went on counting the attempt as in flight: the
+pool stayed empty and never tried again.
+""".
+-spec a_connect_that_raises_is_retried([{atom(), term()}]) -> ok.
+a_connect_that_raises_is_retried(_Config) ->
+    Pool = minato_raising_pool,
+    Connection = (connection())#{password => fun ?MODULE:flaky_password/0},
+    {ok, _Pid} = minato:start_pool(Pool, #{size => 1, min_size => 1, connection => Connection}),
+    ok = retried(Pool, 50),
+    ?assertMatch(#{idle := 0}, minato_pool:stats(Pool)),
+    persistent_term:put({?MODULE, password}, maps:get(password, connection())),
+    ok = filled(Pool, 1, 400),
+    ?assertMatch({ok, #{rows := [{1}]}}, minato:query(Pool, ~"SELECT 1", [])),
+    Binding = (connection())#{channel_binding => require},
+    {ok, _Bound} = minato:start_pool(minato_binding_pool, #{size => 1, connection => Binding}),
+    try
+        ?assertEqual(ok, retried(minato_binding_pool, 50))
+    after
+        ok = minato:stop_pool(minato_binding_pool)
+    end.
+
+-doc false.
+-spec flaky_password() -> binary().
+flaky_password() ->
+    case persistent_term:get({?MODULE, password}, undefined) of
+        undefined -> error(password_store_down);
+        Password when is_binary(Password) -> Password
+    end.
+
+retried(Pool, 0) ->
+    error({not_retried, minato_pool:stats(Pool)});
+retried(Pool, Attempts) ->
+    case minato_pool:stats(Pool) of
+        #{disconnects := Disconnects} when Disconnects >= 2 ->
+            ok;
+        _NotYet ->
+            timer:sleep(50),
+            retried(Pool, Attempts - 1)
     end.
 
 filled(_Pool, _Size, 0) ->

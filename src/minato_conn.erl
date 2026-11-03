@@ -90,6 +90,7 @@ the server issued is the whole of the authorisation.
 
 -export([
     connect/1,
+    attempt/1,
     close/1,
     close/2,
     close_aside/1,
@@ -312,6 +313,22 @@ connect(#{user := _} = Opts) ->
         },
         fun() -> connected(opening(minato_secret:connection(Opts))) end
     ).
+
+%% For the pool and the listener, which retry what fails here: a raise comes
+%% back as a reason, without the stacktrace, whose frames can hold the options.
+-doc false.
+-spec attempt(opts()) -> {ok, conn()} | {error, term()}.
+attempt(Opts) ->
+    try
+        connect(Opts)
+    catch
+        error:{Module, #{reason := Reason}} when
+            Module =:= minato_conn; Module =:= minato_auth; Module =:= minato_scram
+        ->
+            {error, {Module, Reason}};
+        Class:_Reason ->
+            {error, {connect_raised, Class}}
+    end.
 
 -spec connected({ok, conn()} | {error, error()}) ->
     {{ok, conn()} | {error, error()}, minato_telemetry:metadata()}.

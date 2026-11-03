@@ -1054,7 +1054,7 @@ connect(Opts) ->
 
 -spec connected(pid(), minato_conn:opts()) -> ok.
 connected(Pool, Opts) ->
-    case minato_conn:connect(Opts) of
+    case minato_conn:attempt(Opts) of
         {ok, Conn} -> handed(Pool, Conn);
         {error, Reason} -> refused(Pool, Reason)
     end.
