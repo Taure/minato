@@ -17,7 +17,7 @@ messages the server received and require the password not to be among them.
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([log/2]).
+-export([log/2, exception/4]).
 
 -define(WINDOWS, {win32, nt}).
 -define(POSIX, {unix, linux}).
@@ -116,6 +116,49 @@ a_password_given_as_a_string_is_answered_as_its_binary_test() ->
     minato_backend_server:stop(Text),
     minato_backend_server:stop(Binary).
 
+a_password_fun_answering_a_string_is_answered_as_its_binary_test() ->
+    Script = [[{authentication_md5_password, ~"salt"}], ?READY],
+    {Text, {ok, AsText}} = connects(Script, #{password => fun text_password/0}),
+    {Binary, {ok, AsBinary}} = connects(Script, #{password => ~"pencil"}),
+    ok = minato_conn:close(AsText),
+    ok = minato_conn:close(AsBinary),
+    ?assertEqual(digest(Binary), digest(Text)),
+    minato_backend_server:stop(Text),
+    minato_backend_server:stop(Binary).
+
+a_password_fun_answering_something_else_raises_without_it_test() ->
+    Server = minato_backend_server:start([[{authentication_md5_password, ~"salt"}]]),
+    Opts = opts(minato_backend_server:port(Server), #{password => fun garbled_password/0}),
+    Handler = {?MODULE, self()},
+    {ok, _Started} = application:ensure_all_started(telemetry),
+    ok = telemetry:attach(Handler, [minato, connect, exception], fun ?MODULE:exception/4, self()),
+    try
+        {Class, Reason, Stacktrace} =
+            try minato_conn:connect(Opts) of
+                Returned -> {returned, Returned, []}
+            catch
+                C:R:S -> {C, R, S}
+            end,
+        ?assertMatch({error, {minato_conn, #{reason := not_text}}}, {Class, Reason}),
+        Metadata =
+            receive
+                {exception, Seen} -> Seen
+            after 1000 -> error(no_exception_event)
+            end,
+        ?assertEqual(
+            nomatch,
+            string:find(io_lib:format("~0tp", [{Reason, Stacktrace, Metadata}]), "s3cr3t-garbled")
+        )
+    after
+        ok = telemetry:detach(Handler),
+        minato_backend_server:stop(Server)
+    end.
+
+-doc false.
+exception(_Event, _Measurements, Metadata, Test) ->
+    Test ! {exception, Metadata},
+    ok.
+
 a_raise_during_connect_is_returned_by_attempt_test() ->
     Server = minato_backend_server:start([[authentication_ok, bind_complete]]),
     Opts = opts(minato_backend_server:port(Server), #{}),
@@ -130,10 +173,29 @@ an_authentication_raise_is_returned_by_attempt_test() ->
     ?assertMatch({error, {minato_auth, _Reason}}, minato_conn:attempt(Opts)),
     minato_backend_server:stop(Server).
 
-any_other_raise_is_returned_by_attempt_as_its_class_test() ->
+a_scram_raise_is_returned_by_attempt_test() ->
+    Server = minato_backend_server:start([
+        [{authentication_sasl, [~"SCRAM-SHA-256"]}],
+        [{authentication_sasl_continue, ~"r=forged,s=c2FsdA==,i=4096"}]
+    ]),
+    Opts = opts(minato_backend_server:port(Server), #{
+        password => ~"pencil", channel_binding => disable
+    }),
+    ?assertMatch({error, {minato_scram, _Reason}}, minato_conn:attempt(Opts)),
+    minato_backend_server:stop(Server).
+
+an_atom_raised_during_connect_is_kept_by_attempt_test() ->
     Server = minato_backend_server:start([[{authentication_md5_password, ~"salt"}]]),
     Opts = opts(minato_backend_server:port(Server), #{password => fun raising_password/0}),
-    ?assertEqual({error, {connect_raised, error}}, minato_conn:attempt(Opts)),
+    ?assertEqual(
+        {error, {connect_raised, error, password_store_down}}, minato_conn:attempt(Opts)
+    ),
+    minato_backend_server:stop(Server).
+
+any_other_raise_is_returned_by_attempt_as_its_class_test() ->
+    Server = minato_backend_server:start([[{authentication_md5_password, ~"salt"}]]),
+    Opts = opts(minato_backend_server:port(Server), #{password => fun throwing_password/0}),
+    ?assertEqual({error, {connect_raised, throw}}, minato_conn:attempt(Opts)),
     minato_backend_server:stop(Server).
 
 a_successful_attempt_is_a_connection_test() ->
@@ -144,6 +206,15 @@ a_successful_attempt_is_a_connection_test() ->
 
 raising_password() ->
     error(password_store_down).
+
+throwing_password() ->
+    throw({store, ~"s3cr3t-thrown"}).
+
+text_password() ->
+    "pencil".
+
+garbled_password() ->
+    ["s3cr3t-garbled", nope].
 
 digest(Server) ->
     [Digest] = [D || {password_message, D} <- minato_backend_server:received(Server)],

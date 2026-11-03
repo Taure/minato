@@ -128,7 +128,9 @@ a_password_given_as_a_fun_is_kept_as_given_test() ->
 a_password_given_as_a_string_is_sealed_as_its_binary_test() ->
     Text = binary_to_list(?PROBE),
     Connection = #{user => ~"u", password => Text},
-    #{connection := #{password := Password}} = minato_secret:pool(#{connection => Connection}),
+    #{connection := #{password := Password}} = minato_secret:seal_options(#{
+        connection => Connection
+    }),
     ?assert(is_function(Password, 0)),
     ?assertEqual(?PROBE, minato_secret:revealed(Password)).
 
@@ -136,7 +138,9 @@ a_password_that_is_not_text_is_refused_without_echoing_it_test() ->
     [
         begin
             {Class, Reason, Stacktrace} =
-                try minato_secret:pool(#{connection => #{user => ~"u", password => NotText}}) of
+                try
+                    minato_secret:seal_options(#{connection => #{user => ~"u", password => NotText}})
+                of
                     Returned -> {returned, Returned, []}
                 catch
                     C:R:S -> {C, R, S}
@@ -156,8 +160,8 @@ the_tls_options_are_sealed_whole_test() ->
 options_without_secrets_are_unchanged_test() ->
     Connection = #{user => ~"u", ssl => true, host => "db"},
     ?assertEqual(Connection, minato_secret:connection(Connection)),
-    ?assertEqual(not_a_map, minato_secret:pool(not_a_map)),
-    ?assertEqual(#{connection => []}, minato_secret:pool(#{connection => []})),
+    ?assertEqual(not_a_map, minato_secret:seal_options(not_a_map)),
+    ?assertEqual(#{connection => []}, minato_secret:seal_options(#{connection => []})),
     ?assertEqual(not_sealed, minato_secret:revealed(not_sealed)).
 
 probe_password() ->

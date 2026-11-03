@@ -75,12 +75,12 @@ declared(Key) ->
         _None -> #{}
     end.
 
-%% A supervisor prints its child specs, so the password goes in sealed.
+%% A supervisor prints its child specs, so the password and ssl_options go in sealed.
 -spec child(module(), atom(), dynamic()) -> supervisor:child_spec().
 child(Module, Name, Opts) ->
     #{
         id => Name,
-        start => {Module, start_link, [Name, minato_secret:pool(Opts)]},
+        start => {Module, start_link, [Name, minato_secret:seal_options(Opts)]},
         restart => permanent,
         shutdown => 5000,
         type => worker

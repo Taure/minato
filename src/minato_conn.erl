@@ -178,7 +178,7 @@ How to reach a server and who to be.
 #{host => inet:socket_address() | inet:hostname(),
   port => inet:port_number(),
   user := binary(),
-  password => binary() | fun(() -> binary()),
+  password => binary() | string() | fun(() -> binary() | string()),
   database => binary(),
   parameters => #{binary() => binary()},
   ssl => boolean(),
@@ -203,8 +203,9 @@ and held in a pool's configuration for a month is a password that expires while
 the pool holds it. Prefer a named function, `fun my_app:db_password/0`, to a
 closure: it prints as its name, and it survives a reload of the module that
 made it, where a closure from a module reloaded twice raises `badfun`. A
-password given as a string is converted to a binary, and one that is not valid
-text raises `{minato_conn, #{reason := not_text}}` without the password.
+password given as a string, or returned as one by the fun, is converted to a
+binary, and one that is not valid text raises
+`{minato_conn, #{reason := not_text}}` without the password.
 
 `parameters` are added to the `StartupMessage` and are how `application_name`
 gets set. Two are sent unless they are given here: `client_encoding` is `UTF8`,
@@ -241,7 +242,7 @@ connection waits for the server to close first, to at most a second; see
     host => inet:socket_address() | inet:hostname(),
     port => inet:port_number(),
     user := binary(),
-    password => binary() | fun(() -> binary()),
+    password => binary() | string() | fun(() -> binary() | string()),
     database => binary(),
     parameters => #{binary() => binary()},
     ssl => boolean(),
@@ -330,6 +331,8 @@ attempt(Opts) ->
             Module =:= minato_conn; Module =:= minato_auth; Module =:= minato_scram
         ->
             {error, {Module, Reason}};
+        Class:Reason when is_atom(Reason) ->
+            {error, {connect_raised, Class, Reason}};
         Class:_Reason ->
             {error, {connect_raised, Class}}
     end.
@@ -1171,7 +1174,7 @@ credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->
 secret(User, Opts) ->
     case maps:get(password, Opts, undefined) of
         undefined -> #{user => User};
-        Password -> #{user => User, password => minato_secret:revealed(Password)}
+        Password -> #{user => User, password => minato_secret:password(Password)}
     end.
 
 -spec bound(minato_auth:credentials(), binary() | undefined, minato_auth:channel_binding()) ->

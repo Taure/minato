@@ -21,8 +21,10 @@ report can only be the leak under test. Skips when no server answers.
     a_connected_pool_and_listener_hold_no_password/1,
     a_borrower_that_crashes_holding_a_connection_reports_no_password/1,
     a_connected_pool_that_is_killed_logs_no_password/1,
-    a_pool_reconnects_after_the_sealing_module_is_upgraded/1
+    a_pool_reconnects_after_the_sealing_module_is_upgraded/1,
+    a_password_fun_answering_a_string_logs_in_over_scram/1
 ]).
+-export([probe_text/0]).
 
 -define(TIMEOUT, 10000).
 -define(PROBE, ~"s3cr3t-minato-probe").
@@ -38,7 +40,8 @@ all() ->
         a_connected_pool_and_listener_hold_no_password,
         a_borrower_that_crashes_holding_a_connection_reports_no_password,
         a_connected_pool_that_is_killed_logs_no_password,
-        a_pool_reconnects_after_the_sealing_module_is_upgraded
+        a_pool_reconnects_after_the_sealing_module_is_upgraded,
+        a_password_fun_answering_a_string_logs_in_over_scram
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -175,7 +178,7 @@ changed(Path) ->
 
 -spec loaded(module(), file:filename(), [erl_parse:abstract_form()]) -> ok.
 loaded(Module, Path, Forms) ->
-    case compile:forms(Forms, [nowarn_unused_function]) of
+    case compile:forms(Forms, []) of
         {ok, Module, Binary} when is_binary(Binary) ->
             _ = code:purge(Module),
             {module, Module} = code:load_binary(Module, Path, Binary),
@@ -206,6 +209,17 @@ queried(Pool, Tries) ->
             timer:sleep(50),
             queried(Pool, Tries - 1)
     end.
+
+-spec a_password_fun_answering_a_string_logs_in_over_scram([{atom(), term()}]) -> ok.
+a_password_fun_answering_a_string_logs_in_over_scram(_Config) ->
+    {ok, Conn} = minato_conn:connect((connection())#{password => fun ?MODULE:probe_text/0}),
+    ?assertMatch({ok, #{rows := [{1}]}, _Conn}, minato_query:query(Conn, ~"SELECT 1", [])),
+    ok = minato_conn:close(Conn).
+
+-doc false.
+-spec probe_text() -> string().
+probe_text() ->
+    binary_to_list(?PROBE).
 
 restarted(_Old, 0) ->
     error(not_restarted);

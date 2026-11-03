@@ -12,12 +12,12 @@
 %% called, while its environment can still be read. A fun from anywhere else is
 %% the caller's own and is called.
 
--export([pool/1, connection/1, revealed/1]).
+-export([seal_options/1, connection/1, revealed/1, password/1]).
 
--spec pool(dynamic()) -> dynamic().
-pool(#{connection := #{} = Connection} = Opts) ->
+-spec seal_options(dynamic()) -> dynamic().
+seal_options(#{connection := #{} = Connection} = Opts) ->
     Opts#{connection => connection(Connection)};
-pool(Opts) ->
+seal_options(Opts) ->
     Opts.
 
 -spec connection(minato_conn:opts()) -> minato_conn:opts().
@@ -35,6 +35,17 @@ revealed(Sealed) when is_function(Sealed, 0) ->
     end;
 revealed(Secret) ->
     Secret.
+
+%% The password as authentication needs it. A fun of the caller's may answer
+%% with a string, which is converted here as a sealed one is, and anything that
+%% is not text raises without the value.
+-spec password(dynamic()) -> binary().
+password(Sealed) ->
+    case revealed(Sealed) of
+        Password when is_binary(Password) -> Password;
+        Password when is_list(Password) -> text(Password);
+        _NotText -> not_text()
+    end.
 
 -spec sealed(term(), dynamic()) -> dynamic().
 sealed(password, Password) when is_binary(Password) ->

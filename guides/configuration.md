@@ -10,7 +10,7 @@ directly.
 | option | default | |
 | --- | --- | --- |
 | `user` | required | the role to authenticate as |
-| `password` | none | a binary, or a `fun(() -> binary())` called once per attempt and never stored; prefer a named `fun my_app:db_password/0` |
+| `password` | none | a binary or a string, or a fun of no arguments returning one, called once per attempt and never stored; prefer a named `fun my_app:db_password/0` |
 | `database` | the user | as PostgreSQL itself defaults |
 | `host` | `"localhost"` | |
 | `port` | `5432` | |
