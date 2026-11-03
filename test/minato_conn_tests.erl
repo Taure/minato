@@ -106,6 +106,49 @@ an_md5_password_is_answered_test() ->
     ),
     minato_backend_server:stop(Server).
 
+a_password_given_as_a_string_is_answered_as_its_binary_test() ->
+    Script = [[{authentication_md5_password, ~"salt"}], ?READY],
+    {Text, {ok, AsText}} = connects(Script, #{password => "pencil"}),
+    {Binary, {ok, AsBinary}} = connects(Script, #{password => ~"pencil"}),
+    ok = minato_conn:close(AsText),
+    ok = minato_conn:close(AsBinary),
+    ?assertEqual(digest(Binary), digest(Text)),
+    minato_backend_server:stop(Text),
+    minato_backend_server:stop(Binary).
+
+a_raise_during_connect_is_returned_by_attempt_test() ->
+    Server = minato_backend_server:start([[authentication_ok, bind_complete]]),
+    Opts = opts(minato_backend_server:port(Server), #{}),
+    ?assertEqual({error, {minato_conn, unexpected_during_startup}}, minato_conn:attempt(Opts)),
+    minato_backend_server:stop(Server).
+
+an_authentication_raise_is_returned_by_attempt_test() ->
+    Server = minato_backend_server:start([[{authentication_sasl, [~"SCRAM-SHA-256"]}]]),
+    Opts = opts(minato_backend_server:port(Server), #{
+        password => ~"pencil", channel_binding => require
+    }),
+    ?assertMatch({error, {minato_auth, _Reason}}, minato_conn:attempt(Opts)),
+    minato_backend_server:stop(Server).
+
+any_other_raise_is_returned_by_attempt_as_its_class_test() ->
+    Server = minato_backend_server:start([[{authentication_md5_password, ~"salt"}]]),
+    Opts = opts(minato_backend_server:port(Server), #{password => fun raising_password/0}),
+    ?assertEqual({error, {connect_raised, error}}, minato_conn:attempt(Opts)),
+    minato_backend_server:stop(Server).
+
+a_successful_attempt_is_a_connection_test() ->
+    Server = minato_backend_server:start([?READY]),
+    {ok, Conn} = minato_conn:attempt(opts(minato_backend_server:port(Server), #{})),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server).
+
+raising_password() ->
+    error(password_store_down).
+
+digest(Server) ->
+    [Digest] = [D || {password_message, D} <- minato_backend_server:received(Server)],
+    Digest.
+
 a_method_outside_the_allowed_list_is_refused_test() ->
     {Server, Result} = connects([[{authentication_md5_password, ~"salt"}]], #{
         password => ~"pencil", auth => [scram_sha_256]

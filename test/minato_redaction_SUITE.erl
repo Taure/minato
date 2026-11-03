@@ -1,11 +1,14 @@
 -module(minato_redaction_SUITE).
 -moduledoc """
-A password given as a binary, against a real PostgreSQL that accepts it.
+A password given as a binary, and a private key in `ssl_options`, against a real
+PostgreSQL that accepts the password.
 
 `minato_secret_tests` covers what the supervisor prints for a pool that never
 connects. This covers the processes that hold live connections: a connected
-pool and listener, a borrower that crashes holding a connection, and a pool
-killed while its connections are open.
+pool and listener, a borrower that crashes holding a connection, a pool killed
+while its connections are open, and a pool and listener that reconnect after a
+hot upgrade of the module that sealed their secrets. The connections are plain,
+so the key is carried in the options without being used.
 
 The role is created here with a password nothing else uses, so a match in any
 report can only be the leak under test. Skips when no server answers.
@@ -17,11 +20,13 @@ report can only be the leak under test. Skips when no server answers.
 -export([
     a_connected_pool_and_listener_hold_no_password/1,
     a_borrower_that_crashes_holding_a_connection_reports_no_password/1,
-    a_connected_pool_that_is_killed_logs_no_password/1
+    a_connected_pool_that_is_killed_logs_no_password/1,
+    a_pool_reconnects_after_the_sealing_module_is_upgraded/1
 ]).
 
 -define(TIMEOUT, 10000).
 -define(PROBE, ~"s3cr3t-minato-probe").
+-define(KEY, ~"s3cr3t-minato-key-der").
 -define(ROLE, ~"minato_redaction_probe").
 -define(POOL, minato_redaction_pool).
 -define(LISTENER, minato_redaction_listener).
@@ -32,7 +37,8 @@ all() ->
     [
         a_connected_pool_and_listener_hold_no_password,
         a_borrower_that_crashes_holding_a_connection_reports_no_password,
-        a_connected_pool_that_is_killed_logs_no_password
+        a_connected_pool_that_is_killed_logs_no_password,
+        a_pool_reconnects_after_the_sealing_module_is_upgraded
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -117,6 +123,90 @@ a_connected_pool_that_is_killed_logs_no_password(_Config) ->
         ok = minato:stop_pool(?POOL)
     end.
 
+-doc """
+A hot upgrade that changes `minato_secret` and purges the old version leaves
+every fun it made raising `badfun` when called. minato reads what such a fun
+holds rather than calling it, so connections the server ends are opened again,
+and a pool the supervisor restarts from the child spec it already held connects.
+""".
+-spec a_pool_reconnects_after_the_sealing_module_is_upgraded([{atom(), term()}]) -> ok.
+a_pool_reconnects_after_the_sealing_module_is_upgraded(_Config) ->
+    {ok, Pid} = minato:start_pool(?POOL, pool()),
+    {ok, Listener} = minato:start_listener(?LISTENER, #{connection => connection()}),
+    try
+        ok = filled(?POOL, 2, 100),
+        ok = minato:listen(?LISTENER, ~"minato_redaction"),
+        ok = upgraded(minato_secret),
+        ok = ended_backends(),
+        ok = queried(?POOL, 100),
+        ok = killed(Pid),
+        ok = restarted(Pid, 100),
+        ok = filled(?POOL, 2, 100),
+        ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1", [])),
+        receive
+            {minato_listener, ?LISTENER, resubscribed} -> ok
+        after ?TIMEOUT -> error(listener_not_resubscribed)
+        end,
+        ?assertEqual(Listener, whereis(?LISTENER))
+    after
+        ok = minato:stop_listener(?LISTENER),
+        ok = minato:stop_pool(?POOL),
+        _ = code:purge(minato_secret),
+        {module, minato_secret} = code:load_file(minato_secret),
+        _ = code:purge(minato_secret)
+    end.
+
+%% A new version of the module, loaded and the old one purged, as a release
+%% upgrade that changed it would leave things.
+-spec upgraded(module()) -> ok.
+upgraded(Module) ->
+    case code:lib_dir(minato) of
+        Lib when is_list(Lib) ->
+            Path = Lib ++ "/src/" ++ atom_to_list(Module) ++ ".erl",
+            loaded(Module, Path, changed(Path))
+    end.
+
+%% The forms epp reads are what the compiler is given back, and go no further.
+-spec changed(file:filename()) -> dynamic().
+changed(Path) ->
+    {ok, Forms} = epp:parse_file(Path, []),
+    {Head, [Eof]} = lists:split(length(Forms) - 1, Forms),
+    Head ++ [{function, 1, upgraded, 0, [{clause, 1, [], [], [{atom, 1, true}]}]}, Eof].
+
+-spec loaded(module(), file:filename(), [erl_parse:abstract_form()]) -> ok.
+loaded(Module, Path, Forms) ->
+    case compile:forms(Forms, [nowarn_unused_function]) of
+        {ok, Module, Binary} when is_binary(Binary) ->
+            _ = code:purge(Module),
+            {module, Module} = code:load_binary(Module, Path, Binary),
+            _ = code:purge(Module),
+            ok
+    end.
+
+killed(Pid) when is_pid(Pid) ->
+    true = exit(Pid, kill),
+    ok.
+
+ended_backends() ->
+    {ok, Admin} = minato_conn:connect(admin()),
+    SQL = iolist_to_binary([
+        ~"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '", ?ROLE, ~"'"
+    ]),
+    {ok, _Result, Used} = minato_query:query(Admin, SQL, []),
+    ok = minato_conn:close(Used),
+    timer:sleep(200).
+
+queried(Pool, 0) ->
+    error({no_answer, minato_pool:stats(Pool)});
+queried(Pool, Tries) ->
+    case minato:query(Pool, ~"SELECT 1", []) of
+        {ok, #{rows := [{1}]}} ->
+            ok;
+        _NotYet ->
+            timer:sleep(50),
+            queried(Pool, Tries - 1)
+    end.
+
 restarted(_Old, 0) ->
     error(not_restarted);
 restarted(Old, Tries) ->
@@ -169,7 +259,9 @@ crash_report(#{msg := {report, #{label := {proc_lib, crash}}}}) -> true;
 crash_report(_Event) -> false.
 
 holds(Term) ->
-    string:find(io_lib:format("~0tp", [Term]), binary_to_list(?PROBE)) =/= nomatch.
+    Printed = io_lib:format("~0tp", [Term]),
+    [Secret || Secret <- [?PROBE, ?KEY], string:find(Printed, binary_to_list(Secret)) =/= nomatch] =/=
+        [].
 
 role() ->
     iolist_to_binary([
@@ -186,7 +278,11 @@ pool() ->
     #{size => 2, min_size => 2, connection => connection()}.
 
 connection() ->
-    (admin())#{user => ?ROLE, password => ?PROBE}.
+    (admin())#{
+        user => ?ROLE,
+        password => ?PROBE,
+        ssl_options => [{key, {'RSAPrivateKey', ?KEY}}, {password, ?PROBE}]
+    }.
 
 admin() ->
     #{

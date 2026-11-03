@@ -193,13 +193,14 @@ The options are also the pool's child spec under `minato_sup`, and a supervisor
 prints its child specs: in its progress report when the pool starts, when a
 pool declared in the application environment fails to start at boot, each time
 a running pool exits abnormally and is restarted, and in
-`sys:get_status(minato_sup)`. A password given as a binary or a string, and a
-`password` in `ssl_options`, is therefore put in the child spec as a fun that
-returns it, which prints as `#Fun<...>`. The pool keeps it the same way, so
-`sys:get_status/1`, a crash report and the processes that open connections do
-not show it either. A pool started with `start_link/2` under a supervisor of
-your own has that supervisor's child spec, which holds the options exactly as
-given.
+`sys:get_status(minato_sup)`. The `password`, when given as a binary or a
+string, and `ssl_options`, which can hold a private key, are therefore put in the
+child spec as funs that return them, which print as `#Fun<...>`. The pool keeps
+them the same way, so `sys:get_status/1`, a crash report and the processes that
+open connections do not show them either. This keeps them out of logs and
+reports; it is not protection from code running on the node, which can read
+them. A pool started with `start_link/2` under a supervisor of your own has that
+supervisor's child spec, which holds the options exactly as given.
 
 `disconnected` decides what a checkout gets when the pool holds no connections
 and the last attempt to open one failed. `fail` is the default and answers

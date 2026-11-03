@@ -200,7 +200,11 @@ PostgreSQL itself does.
 `password` may be a fun, which is called once per connection attempt and never
 stored. That is what a rotating credential needs: a password read at start up
 and held in a pool's configuration for a month is a password that expires while
-the pool holds it.
+the pool holds it. Prefer a named function, `fun my_app:db_password/0`, to a
+closure: it prints as its name, and it survives a reload of the module that
+made it, where a closure from a module reloaded twice raises `badfun`. A
+password given as a string is converted to a binary, and one that is not valid
+text raises `{minato_conn, #{reason := not_text}}` without the password.
 
 `parameters` are added to the `StartupMessage` and are how `application_name`
 gets set. Two are sent unless they are given here: `client_encoding` is `UTF8`,
@@ -1167,8 +1171,7 @@ credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->
 secret(User, Opts) ->
     case maps:get(password, Opts, undefined) of
         undefined -> #{user => User};
-        Password when is_function(Password, 0) -> #{user => User, password => Password()};
-        Password -> #{user => User, password => Password}
+        Password -> #{user => User, password => minato_secret:revealed(Password)}
     end.
 
 -spec bound(minato_auth:credentials(), binary() | undefined, minato_auth:channel_binding()) ->
@@ -1381,7 +1384,7 @@ key(Option) ->
 
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
-    Given = maps:get(ssl_options, Opts, []),
+    Given = minato_secret:revealed(maps:get(ssl_options, Opts, [])),
     Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
 
 %% A default is replaced by the option that answers the same question, not

@@ -11,6 +11,7 @@ what is under test is what the supervisor and the pool print, not a login.
 -export([log/2]).
 
 -define(PROBE, ~"s3cr3t-minato-probe").
+-define(KEY, ~"s3cr3t-minato-key-der").
 -define(POOL, minato_secret_tests_pool).
 -define(LISTENER, minato_secret_tests_listener).
 -define(HANDLER, minato_secret_tests).
@@ -94,43 +95,84 @@ a_pool_declared_in_the_environment_holds_no_password_test() ->
         ok = application:unset_env(minato, pools)
     end.
 
-a_tls_key_password_is_held_as_a_fun_test() ->
+tls_key_material_reaches_no_log_or_status_test() ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = (connection())#{ssl => true, ssl_options => [{password, ?PROBE}]},
-    {ok, _Pid} = minato:start_pool(?POOL, #{size => 1, min_size => 0, connection => Connection}),
+    Connection = (connection())#{ssl => true, ssl_options => tls_secrets()},
+    Logged = captured(fun() ->
+        {ok, _Pid} = minato:start_pool(?POOL, #{size => 1, min_size => 0, connection => Connection})
+    end),
     try
         {ok, Spec} = supervisor:get_childspec(minato_sup, ?POOL),
-        ?assertNot(holds(Spec)),
-        ?assertNot(holds(sys:get_status(?POOL))),
+        [
+            ?assertNot(holds(Term, Secret))
+         || Term <- [Spec, sys:get_status(?POOL), Logged], Secret <- secrets()
+        ],
+        ?assertEqual([], [
+            Event
+         || Event <- Logged, Secret <- secrets(), holds(formatted(Event), Secret)
+        ]),
         #{start := {minato_pool, start_link, [?POOL, #{connection := Sealed}]}} = Spec,
-        #{password := Password, ssl_options := [{password, KeyPassword}]} = Sealed,
-        ?assertEqual(?PROBE, called(Password)),
-        ?assertEqual(?PROBE, called(KeyPassword))
+        #{password := Password, ssl_options := Options} = Sealed,
+        ?assertEqual(?PROBE, minato_secret:revealed(Password)),
+        ?assertEqual(tls_secrets(), minato_secret:revealed(Options))
     after
         ok = minato:stop_pool(?POOL)
     end.
 
 a_password_given_as_a_fun_is_kept_as_given_test() ->
-    Given = fun() -> ?PROBE end,
-    Connection = #{user => ~"u", password => Given, ssl_options => [{password, Given}]},
-    ?assertEqual(Connection, minato_secret:connection(Connection)).
+    Given = fun probe_password/0,
+    Connection = #{user => ~"u", password => Given},
+    ?assertEqual(Connection, minato_secret:connection(Connection)),
+    ?assertEqual(?PROBE, minato_secret:revealed(Given)).
 
-a_password_given_as_a_string_is_sealed_test() ->
+a_password_given_as_a_string_is_sealed_as_its_binary_test() ->
     Text = binary_to_list(?PROBE),
-    Connection = #{user => ~"u", password => Text, ssl_options => [{password, Text}]},
-    #{connection := #{password := Password, ssl_options := [{password, KeyPassword}]}} =
-        minato_secret:pool(#{connection => Connection}),
-    ?assertEqual(Text, called(Password)),
-    ?assertEqual(Text, called(KeyPassword)).
+    Connection = #{user => ~"u", password => Text},
+    #{connection := #{password := Password}} = minato_secret:pool(#{connection => Connection}),
+    ?assert(is_function(Password, 0)),
+    ?assertEqual(?PROBE, minato_secret:revealed(Password)).
 
-options_without_a_password_are_unchanged_test() ->
-    Connection = #{user => ~"u", ssl => true, ssl_options => [{verify, verify_none}]},
+a_password_that_is_not_text_is_refused_without_echoing_it_test() ->
+    [
+        begin
+            {Class, Reason, Stacktrace} =
+                try minato_secret:pool(#{connection => #{user => ~"u", password => NotText}}) of
+                    Returned -> {returned, Returned, []}
+                catch
+                    C:R:S -> {C, R, S}
+                end,
+            ?assertMatch({error, {minato_conn, #{reason := not_text}}}, {Class, Reason}),
+            ?assertNot(holds({Reason, Stacktrace}))
+        end
+     || NotText <- [binary_to_list(?PROBE) ++ [16#110000], binary_to_list(?PROBE) ++ [nope]]
+    ].
+
+the_tls_options_are_sealed_whole_test() ->
+    Options = [{verify, verify_none}],
+    #{ssl_options := Sealed} = minato_secret:connection(#{user => ~"u", ssl_options => Options}),
+    ?assert(is_function(Sealed, 0)),
+    ?assertEqual(Options, minato_secret:revealed(Sealed)).
+
+options_without_secrets_are_unchanged_test() ->
+    Connection = #{user => ~"u", ssl => true, host => "db"},
     ?assertEqual(Connection, minato_secret:connection(Connection)),
     ?assertEqual(not_a_map, minato_secret:pool(not_a_map)),
-    ?assertEqual(#{connection => []}, minato_secret:pool(#{connection => []})).
+    ?assertEqual(#{connection => []}, minato_secret:pool(#{connection => []})),
+    ?assertEqual(not_sealed, minato_secret:revealed(not_sealed)).
 
-called(Sealed) when is_function(Sealed, 0) ->
-    Sealed().
+probe_password() ->
+    ?PROBE.
+
+tls_secrets() ->
+    [
+        {key, {'RSAPrivateKey', ?KEY}},
+        {certs_keys, [#{key => {'RSAPrivateKey', ?KEY}, password => ?PROBE}]},
+        {password, ?PROBE},
+        {verify, verify_none}
+    ].
+
+secrets() ->
+    [?PROBE, ?KEY].
 
 restarted(Pid, kill) ->
     Monitor = erlang:monitor(process, Pid),
@@ -184,7 +226,10 @@ crash_report(#{msg := {report, #{label := {proc_lib, crash}}}}) -> true;
 crash_report(_Event) -> false.
 
 holds(Term) ->
-    string:find(io_lib:format("~0tp", [Term]), binary_to_list(?PROBE)) =/= nomatch.
+    holds(Term, ?PROBE).
+
+holds(Term, Secret) ->
+    string:find(io_lib:format("~0tp", [Term]), binary_to_list(Secret)) =/= nomatch.
 
 pool() ->
     #{size => 1, min_size => 0, connection => connection()}.
