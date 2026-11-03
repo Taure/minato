@@ -310,7 +310,7 @@ connect(#{user := _} = Opts) ->
             user => maps:get(user, Opts),
             ssl => maps:get(ssl, Opts, false)
         },
-        fun() -> connected(opening(Opts)) end
+        fun() -> connected(opening(minato_secret:connection(Opts))) end
     ).
 
 -spec connected({ok, conn()} | {error, error()}) ->

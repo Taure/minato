@@ -190,12 +190,16 @@ pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `invalid_opts`. None of these reasons carries the options.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
-prints its child specs: when a pool declared in the application environment
-fails to start at boot, each time a running pool exits abnormally and is
-restarted, and in `sys:get_status(minato_sup)`. A password given as a binary
-appears in all three. Give it as a fun, as `minato_conn:opts()` allows, to keep
-it out; a fun cannot be written in `sys.config`, so such a pool is started with
-`minato:start_pool/2`.
+prints its child specs: in its progress report when the pool starts, when a
+pool declared in the application environment fails to start at boot, each time
+a running pool exits abnormally and is restarted, and in
+`sys:get_status(minato_sup)`. A password given as a binary or a string, and a
+`password` in `ssl_options`, is therefore put in the child spec as a fun that
+returns it, which prints as `#Fun<...>`. The pool keeps it the same way, so
+`sys:get_status/1`, a crash report and the processes that open connections do
+not show it either. A pool started with `start_link/2` under a supervisor of
+your own has that supervisor's child spec, which holds the options exactly as
+given.
 
 `disconnected` decides what a checkout gets when the pool holds no connections
 and the last attempt to open one failed. `fail` is the default and answers
@@ -627,7 +631,7 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
     process_flag(trap_exit, true),
     State = #state{
         name = Name,
-        opts = Connection,
+        opts = minato_secret:connection(Connection),
         size = Size,
         min_size = min(MinSize, Size),
         disconnected = Disconnected,

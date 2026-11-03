@@ -145,7 +145,7 @@ format_status(Status) ->
 -spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, invalid_connection}.
 init({Name, #{connection := #{user := _} = Connection}}) ->
     process_flag(trap_exit, true),
-    {ok, connect(#state{name = Name, opts = Connection})};
+    {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
 init({_Name, _Opts}) ->
     {stop, invalid_connection}.
 

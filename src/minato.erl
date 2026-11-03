@@ -77,7 +77,7 @@ anyway and the first query waits.
 
 A pool that does not start returns the pool's own reason, such as
 `{error, {invalid_size, 0.5}}`, not the supervisor's `{Reason, ChildSpec}`: the
-child spec holds the password.
+child spec holds the connection options.
 """.
 -spec start_pool(pool(), minato_pool:opts()) -> supervisor:startchild_ret().
 start_pool(Name, Opts) ->
