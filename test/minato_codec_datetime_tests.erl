@@ -140,6 +140,16 @@ hour_24_is_only_midnight_at_the_end_of_the_day_test_() ->
          || Oid <- [1114, 1184], Time <- Rejected, Format <- [binary, text]
         ].
 
+the_time_fields_are_bounded_test_() ->
+    [
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1083, {23, 59, 60}, binary)),
+        ?_assertEqual(<<0:64/signed>>, enc(1083, {0, 0, 0}, binary))
+    ] ++
+        [
+            ?_assertError({minato_codec, #{reason := time_out_of_range}}, enc(1083, Time, binary))
+         || Time <- [{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}, {0, 60, 0}, {0, 0, 61}]
+        ].
+
 time_microseconds_option_test_() ->
     Opts = #{datetime_format => microseconds},
     [

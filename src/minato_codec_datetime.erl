@@ -219,7 +219,7 @@ leap_year(Y) ->
 to_day_micros(Micros) when is_integer(Micros) ->
     Micros;
 to_day_micros({H, Mi, S}) when is_integer(H), is_integer(Mi), is_integer(S) ->
-    valid_time(H, Mi, S),
+    ok = valid_time(H, Mi, S),
     ((H * 3600 + Mi * 60 + S) * 1000000);
 to_day_micros(Value) ->
     minato_codec:bad(time, not_a_time, Value).
@@ -241,7 +241,7 @@ to_unix_micros(_Type, {{Y, M, D}, {H, Mi, S}}) when
     is_integer(Y), is_integer(M), is_integer(D), is_integer(H), is_integer(Mi), is_integer(S)
 ->
     valid_date(Y, M, D),
-    valid_time(H, Mi, S),
+    ok = valid_time(H, Mi, S),
     days_from_civil(Y, M, D) * ?DAY_MICROS + (H * 3600 + Mi * 60 + S) * 1000000;
 to_unix_micros(Type, Value) ->
     minato_codec:bad(Type, not_a_timestamp, Value).
