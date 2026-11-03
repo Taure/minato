@@ -115,6 +115,14 @@ a_password_given_as_a_fun_is_kept_as_given_test() ->
     Connection = #{user => ~"u", password => Given, ssl_options => [{password, Given}]},
     ?assertEqual(Connection, minato_secret:connection(Connection)).
 
+a_password_given_as_a_string_is_sealed_test() ->
+    Text = binary_to_list(?PROBE),
+    Connection = #{user => ~"u", password => Text, ssl_options => [{password, Text}]},
+    #{connection := #{password := Password, ssl_options := [{password, KeyPassword}]}} =
+        minato_secret:pool(#{connection => Connection}),
+    ?assertEqual(Text, called(Password)),
+    ?assertEqual(Text, called(KeyPassword)).
+
 options_without_a_password_are_unchanged_test() ->
     Connection = #{user => ~"u", ssl => true, ssl_options => [{verify, verify_none}]},
     ?assertEqual(Connection, minato_secret:connection(Connection)),
