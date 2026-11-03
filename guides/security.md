@@ -63,7 +63,10 @@ not a thousand. That copy is held as a fun, and neither `sys:get_status/1` on a
 pool or listener nor its crash report shows it. A password given
 as `fun(() -> binary())` is called once per connection attempt, which is what a
 rotating credential needs: one read at start up and kept for a month is a
-credential that expires while you hold it.
+credential that expires while you hold it. Give a named function,
+`fun my_app:db_password/0`, rather than a closure: it prints as its name, and it
+still works after the module that made it is reloaded, where a closure from a
+module that has been reloaded twice raises `badfun`.
 
 ## What reaches a log
 
@@ -82,10 +85,16 @@ has its options in its child spec, and OTP's supervisor prints child specs: in
 the progress report at start up, which a node logging at `debug` writes, when a
 pool declared in the environment fails at boot, when a running pool is
 restarted after an abnormal exit, and in `sys:get_status(minato_sup)`. minato
-puts a password given as a binary, and a `password` in `ssl_options`, into the
-child spec as a fun that returns it, so each of those prints `#Fun<...>` where
-the password would be. The application environment itself still holds what
-`sys.config` gave it. A pool started with `minato_pool:start_link/2` under your
+puts a password given as a binary or a string, and the whole of `ssl_options`,
+which can hold a private key, into the child spec as funs that return them, so
+each of those prints `#Fun<...>` where the secret would be. Pools, listeners
+and connections hold them the same way. The application environment itself
+still holds what `sys.config` gave it.
+
+This is hygiene for logs and reports, not a security boundary. Anyone who can
+run code on the node, from a remote shell or otherwise, can still read the
+secrets: with `erlang:fun_info/2` on the fun, `sys:get_state/1` on a pool,
+`term_to_binary/1`, or a crash dump. A pool started with `minato_pool:start_link/2` under your
 own supervisor has your child spec, which holds the options as given.
 `start_pool/2` and `start_listener/2` return the child's reason without the
 child spec.

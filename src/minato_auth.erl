@@ -139,7 +139,10 @@ offer it detects the mechanism list being stripped on the way.
 """.
 -type channel_binding() :: prefer | require | disable.
 
--doc "The exchange so far. Never holds anything derived from the password.".
+-doc """
+The exchange so far. Holds the password for as long as the exchange may need it,
+so it is not a term to log.
+""".
 -opaque state() :: #state{}.
 
 -doc "What to do with the message that was just decoded.".
