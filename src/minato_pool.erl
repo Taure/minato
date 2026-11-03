@@ -646,6 +646,7 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
 
 -doc false.
 -spec format_status(gen_server:format_status()) -> gen_server:format_status().
+%% The options are already sealed; removing the password is defence in depth.
 format_status(#{state := #state{opts = Opts} = State} = Status) ->
     Status#{state => State#state{opts = maps:remove(password, Opts)}};
 format_status(Status) ->

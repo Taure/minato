@@ -119,6 +119,38 @@ tls_key_material_reaches_no_log_or_status_test() ->
         ok = minato:stop_pool(?POOL)
     end.
 
+a_pool_started_directly_holds_no_secret_test() ->
+    Connection = (connection())#{ssl => true, ssl_options => tls_secrets()},
+    {ok, Pid} = linked(fun() ->
+        minato_pool:start_link(?POOL, #{size => 1, min_size => 0, connection => Connection})
+    end),
+    try
+        Status = sys:get_status(Pid),
+        ?assertEqual([], [Secret || Secret <- secrets(), holds(Status, Secret)])
+    after
+        ok = gen_server:stop(Pid)
+    end.
+
+a_listener_started_directly_holds_no_secret_test() ->
+    Connection = (connection())#{ssl => true, ssl_options => tls_secrets()},
+    {ok, Pid} = linked(fun() ->
+        minato_listener:start_link(?LISTENER, #{connection => Connection})
+    end),
+    try
+        Status = sys:get_status(Pid),
+        ?assertEqual([], [Secret || Secret <- secrets(), holds(Status, Secret)])
+    after
+        ok = gen_server:stop(Pid)
+    end.
+
+linked(Start) ->
+    Trapping = process_flag(trap_exit, true),
+    try
+        Start()
+    after
+        process_flag(trap_exit, Trapping)
+    end.
+
 a_password_given_as_a_fun_is_kept_as_given_test() ->
     Given = fun probe_password/0,
     Connection = #{user => ~"u", password => Given},
