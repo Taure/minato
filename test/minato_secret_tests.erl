@@ -151,6 +151,24 @@ linked(Start) ->
         process_flag(trap_exit, Trapping)
     end.
 
+the_password_is_revealed_as_a_binary_test_() ->
+    Sealed = maps:get(password, minato_secret:connection(#{user => ~"u", password => ?PROBE})),
+    [
+        ?_assertEqual(?PROBE, minato_secret:password(?PROBE)),
+        ?_assertEqual(?PROBE, minato_secret:password(binary_to_list(?PROBE))),
+        ?_assertEqual(?PROBE, minato_secret:password(Sealed)),
+        ?_assertEqual(?PROBE, minato_secret:password(fun probe_text/0)),
+        ?_assertError(
+            {minato_conn, #{reason := not_text, data := undefined}}, minato_secret:password(42)
+        ),
+        ?_assertError(
+            {minato_conn, #{reason := not_text}}, minato_secret:password([16#110000])
+        )
+    ].
+
+probe_text() ->
+    binary_to_list(?PROBE).
+
 a_password_given_as_a_fun_is_kept_as_given_test() ->
     Given = fun probe_password/0,
     Connection = #{user => ~"u", password => Given},

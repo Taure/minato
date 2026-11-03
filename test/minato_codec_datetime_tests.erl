@@ -140,6 +140,20 @@ hour_24_is_only_midnight_at_the_end_of_the_day_test_() ->
          || Oid <- [1114, 1184], Time <- Rejected, Format <- [binary, text]
         ].
 
+a_timestamp_or_date_on_a_day_that_does_not_exist_is_refused_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := day_out_of_range}},
+            enc(Oid, {{2026, 2, 30}, {0, 0, 0}}, Format)
+        )
+     || Oid <- [1114, 1184], Format <- [binary, text]
+    ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{reason := day_out_of_range}}, enc(1082, {2026, 2, 30}, text)
+            )
+        ].
+
 the_time_fields_are_bounded_test_() ->
     [
         ?_assertEqual(<<86400000000:64/signed>>, enc(1083, {23, 59, 60}, binary)),
