@@ -187,7 +187,7 @@ era_of_days(Z) -> (Z - 146096) div 146097.
 
 -spec to_pg_days(term()) -> integer().
 to_pg_days({Y, M, D}) when is_integer(Y), is_integer(M), is_integer(D) ->
-    valid_date(Y, M, D),
+    ok = valid_date(Y, M, D),
     days_from_civil(Y, M, D) - ?DAYS_UNIX_TO_PG;
 to_pg_days(Value) ->
     minato_codec:bad(date, not_a_date, Value).
@@ -240,7 +240,7 @@ to_unix_micros(_Type, Micros) when is_integer(Micros) ->
 to_unix_micros(_Type, {{Y, M, D}, {H, Mi, S}}) when
     is_integer(Y), is_integer(M), is_integer(D), is_integer(H), is_integer(Mi), is_integer(S)
 ->
-    valid_date(Y, M, D),
+    ok = valid_date(Y, M, D),
     ok = valid_time(H, Mi, S),
     days_from_civil(Y, M, D) * ?DAY_MICROS + (H * 3600 + Mi * 60 + S) * 1000000;
 to_unix_micros(Type, Value) ->
@@ -269,7 +269,7 @@ floor_div(A, B) -> -((-A + B - 1) div B).
 
 -spec format_date(term()) -> iodata().
 format_date({Y, M, D}) when is_integer(Y), is_integer(M), is_integer(D) ->
-    valid_date(Y, M, D),
+    ok = valid_date(Y, M, D),
     [pad(Y, 4), $-, pad(M, 2), $-, pad(D, 2)];
 format_date(Value) ->
     minato_codec:bad(date, not_a_date, Value).
