@@ -154,6 +154,7 @@ default, so set it when a server may stop reading.
     borrowed = #{} :: #{pid() => #borrowed{}},
     waiting = queue:new() :: queue:queue(waiter()),
     connecting = 0 :: non_neg_integer(),
+    connectors = #{} :: #{reference() => pid()},
     backoff = ?MINIMUM_BACKOFF :: pos_integer(),
     counters :: counters:counters_ref()
 }).
@@ -726,10 +727,24 @@ handle_info(retry, State) ->
 handle_info(sweep, State) ->
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, swept(State)};
+handle_info({'DOWN', Ref, process, _Pid, Reason}, #state{connectors = Connectors} = State) when
+    is_map_key(Ref, Connectors)
+->
+    Done = State#state{connectors = maps:remove(Ref, Connectors)},
+    case Reason of
+        normal -> {noreply, Done};
+        _Abnormal -> handle_info({connect_failed, {connector_down, down(Reason)}}, Done)
+    end;
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, lost(State, Pid)};
 handle_info(_Message, State) ->
     {noreply, State}.
+
+%% A crash reason can carry a stacktrace, and its frames the options, so only an
+%% atom such as `killed` is kept.
+-spec down(term()) -> atom().
+down(Reason) when is_atom(Reason) -> Reason;
+down(_Reason) -> crashed.
 
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{idle = Idle}) ->
@@ -828,8 +843,7 @@ unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
 grown(#state{size = Size, connecting = Connecting} = State) ->
     case held(State) < Size andalso Connecting =:= 0 of
         true ->
-            ok = connect(State#state.opts),
-            State#state{connecting = Connecting + 1};
+            connect(State);
         false ->
             State
     end.
@@ -1038,20 +1052,26 @@ replenished(State) ->
 
 -doc false.
 -spec fill(#state{}) -> #state{}.
-fill(#state{min_size = Floor, connecting = Connecting} = State) ->
+fill(#state{min_size = Floor} = State) ->
     case Floor - held(State) of
-        Missing when Missing > 0 ->
-            lists:foreach(fun(_) -> connect(State#state.opts) end, lists:seq(1, Missing)),
-            State#state{connecting = Connecting + Missing};
-        _Enough ->
-            State
+        Missing when Missing > 0 -> connects(State, Missing);
+        _Enough -> State
     end.
 
--spec connect(minato_conn:opts()) -> ok.
-connect(Opts) ->
+-spec connects(#state{}, non_neg_integer()) -> #state{}.
+connects(State, 0) ->
+    State;
+connects(State, Count) ->
+    connects(connect(State), Count - 1).
+
+%% The connector is monitored so that one which dies without answering, killed
+%% or crashed outside the connect itself, is counted as a failed connect and
+%% retried rather than held as in flight for good.
+-spec connect(#state{}) -> #state{}.
+connect(#state{opts = Opts, connectors = Connectors, connecting = Connecting} = State) ->
     Pool = self(),
-    _ = spawn(fun() -> connected(Pool, Opts) end),
-    ok.
+    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts) end),
+    State#state{connectors = Connectors#{Ref => Pid}, connecting = Connecting + 1}.
 
 -spec connected(pid(), minato_conn:opts()) -> ok.
 connected(Pool, Opts) ->
