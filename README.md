@@ -2,7 +2,7 @@
 
 港 - harbour. Where connections dock and wait to be dispatched.
 
-An independent PostgreSQL client for Erlang.
+An independent PostgreSQL client for Erlang, and an alternative to [epgsql](https://github.com/epgsql/epgsql) and [pgo](https://github.com/erleans/pgo).
 
 ## Status
 
