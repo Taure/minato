@@ -154,6 +154,7 @@ default, so set it when a server may stop reading.
     borrowed = #{} :: #{pid() => #borrowed{}},
     waiting = queue:new() :: queue:queue(waiter()),
     connecting = 0 :: non_neg_integer(),
+    connectors = #{} :: #{reference() => pid()},
     backoff = ?MINIMUM_BACKOFF :: pos_integer(),
     counters :: counters:counters_ref()
 }).
@@ -190,12 +191,17 @@ pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `invalid_opts`. None of these reasons carries the options.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
-prints its child specs: when a pool declared in the application environment
-fails to start at boot, each time a running pool exits abnormally and is
-restarted, and in `sys:get_status(minato_sup)`. A password given as a binary
-appears in all three. Give it as a fun, as `minato_conn:opts()` allows, to keep
-it out; a fun cannot be written in `sys.config`, so such a pool is started with
-`minato:start_pool/2`.
+prints its child specs: in its progress report when the pool starts, when a
+pool declared in the application environment fails to start at boot, each time
+a running pool exits abnormally and is restarted, and in
+`sys:get_status(minato_sup)`. The `password`, when given as a binary or a
+string, and `ssl_options`, which can hold a private key, are therefore put in the
+child spec as funs that return them, which print as `#Fun<...>`. The pool keeps
+them the same way, so `sys:get_status/1`, a crash report and the processes that
+open connections do not show them either. This keeps them out of logs and
+reports; it is not protection from code running on the node, which can read
+them. A pool started with `start_link/2` under a supervisor of your own has that
+supervisor's child spec, which holds the options exactly as given.
 
 `disconnected` decides what a checkout gets when the pool holds no connections
 and the last attempt to open one failed. `fail` is the default and answers
@@ -627,7 +633,7 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
     process_flag(trap_exit, true),
     State = #state{
         name = Name,
-        opts = Connection,
+        opts = minato_secret:connection(Connection),
         size = Size,
         min_size = min(MinSize, Size),
         disconnected = Disconnected,
@@ -640,6 +646,7 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
 
 -doc false.
 -spec format_status(gen_server:format_status()) -> gen_server:format_status().
+%% The options are already sealed; removing the password is defence in depth.
 format_status(#{state := #state{opts = Opts} = State} = Status) ->
     Status#{state => State#state{opts = maps:remove(password, Opts)}};
 format_status(Status) ->
@@ -721,10 +728,24 @@ handle_info(retry, State) ->
 handle_info(sweep, State) ->
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, swept(State)};
+handle_info({'DOWN', Ref, process, _Pid, Reason}, #state{connectors = Connectors} = State) when
+    is_map_key(Ref, Connectors)
+->
+    Done = State#state{connectors = maps:remove(Ref, Connectors)},
+    case Reason of
+        normal -> {noreply, Done};
+        _Abnormal -> handle_info({connect_failed, {connector_down, down(Reason)}}, Done)
+    end;
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, lost(State, Pid)};
 handle_info(_Message, State) ->
     {noreply, State}.
+
+%% A crash reason can carry a stacktrace, and its frames the options, so only an
+%% atom such as `killed` is kept.
+-spec down(term()) -> atom().
+down(Reason) when is_atom(Reason) -> Reason;
+down(_Reason) -> crashed.
 
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{idle = Idle}) ->
@@ -823,8 +844,7 @@ unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
 grown(#state{size = Size, connecting = Connecting} = State) ->
     case held(State) < Size andalso Connecting =:= 0 of
         true ->
-            ok = connect(State#state.opts),
-            State#state{connecting = Connecting + 1};
+            connect(State);
         false ->
             State
     end.
@@ -1033,24 +1053,30 @@ replenished(State) ->
 
 -doc false.
 -spec fill(#state{}) -> #state{}.
-fill(#state{min_size = Floor, connecting = Connecting} = State) ->
+fill(#state{min_size = Floor} = State) ->
     case Floor - held(State) of
-        Missing when Missing > 0 ->
-            lists:foreach(fun(_) -> connect(State#state.opts) end, lists:seq(1, Missing)),
-            State#state{connecting = Connecting + Missing};
-        _Enough ->
-            State
+        Missing when Missing > 0 -> connects(State, Missing);
+        _Enough -> State
     end.
 
--spec connect(minato_conn:opts()) -> ok.
-connect(Opts) ->
+-spec connects(#state{}, non_neg_integer()) -> #state{}.
+connects(State, 0) ->
+    State;
+connects(State, Count) ->
+    connects(connect(State), Count - 1).
+
+%% The connector is monitored so that one which dies without answering, killed
+%% or crashed outside the connect itself, is counted as a failed connect and
+%% retried rather than held as in flight for good.
+-spec connect(#state{}) -> #state{}.
+connect(#state{opts = Opts, connectors = Connectors, connecting = Connecting} = State) ->
     Pool = self(),
-    _ = spawn(fun() -> connected(Pool, Opts) end),
-    ok.
+    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts) end),
+    State#state{connectors = Connectors#{Ref => Pid}, connecting = Connecting + 1}.
 
 -spec connected(pid(), minato_conn:opts()) -> ok.
 connected(Pool, Opts) ->
-    case minato_conn:connect(Opts) of
+    case minato_conn:attempt(Opts) of
         {ok, Conn} -> handed(Pool, Conn);
         {error, Reason} -> refused(Pool, Reason)
     end.

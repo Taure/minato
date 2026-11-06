@@ -135,6 +135,7 @@ stop(Name) ->
 
 -doc false.
 -spec format_status(gen_server:format_status()) -> gen_server:format_status().
+%% The options are already sealed; removing the password is defence in depth.
 format_status(#{state := #state{opts = Opts} = State} = Status) ->
     Status#{state => State#state{opts = maps:remove(password, Opts)}};
 format_status(Status) ->
@@ -145,7 +146,7 @@ format_status(Status) ->
 -spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, invalid_connection}.
 init({Name, #{connection := #{user := _} = Connection}}) ->
     process_flag(trap_exit, true),
-    {ok, connect(#state{name = Name, opts = Connection})};
+    {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
 init({_Name, _Opts}) ->
     {stop, invalid_connection}.
 
@@ -325,7 +326,7 @@ announced(#state{name = Name, channels = Channels}) ->
 
 -spec connect(#state{}) -> #state{}.
 connect(#state{opts = Opts} = State) ->
-    case minato_conn:connect(Opts) of
+    case minato_conn:attempt(Opts) of
         {ok, Conn} -> resubscribe(State#state{conn = Conn, backoff = ?MINIMUM_BACKOFF});
         {error, _Reason} -> retry(State#state{conn = undefined})
     end.

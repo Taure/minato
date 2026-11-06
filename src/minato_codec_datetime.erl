@@ -187,7 +187,7 @@ era_of_days(Z) -> (Z - 146096) div 146097.
 
 -spec to_pg_days(term()) -> integer().
 to_pg_days({Y, M, D}) when is_integer(Y), is_integer(M), is_integer(D) ->
-    valid_date(Y, M, D),
+    ok = valid_date(Y, M, D),
     days_from_civil(Y, M, D) - ?DAYS_UNIX_TO_PG;
 to_pg_days(Value) ->
     minato_codec:bad(date, not_a_date, Value).
@@ -219,13 +219,17 @@ leap_year(Y) ->
 to_day_micros(Micros) when is_integer(Micros) ->
     Micros;
 to_day_micros({H, Mi, S}) when is_integer(H), is_integer(Mi), is_integer(S) ->
-    valid_time(H, Mi, S),
+    ok = valid_time(H, Mi, S),
     ((H * 3600 + Mi * 60 + S) * 1000000);
 to_day_micros(Value) ->
     minato_codec:bad(time, not_a_time, Value).
 
+%% PostgreSQL takes 24:00:00 as the end of a day and refuses any other time in
+%% hour 24 as out of range.
 -spec valid_time(integer(), integer(), integer()) -> ok.
-valid_time(H, Mi, S) when H >= 0, H =< 24, Mi >= 0, Mi =< 59, S >= 0, S =< 60 ->
+valid_time(24, 0, 0) ->
+    ok;
+valid_time(H, Mi, S) when H >= 0, H =< 23, Mi >= 0, Mi =< 59, S >= 0, S =< 60 ->
     ok;
 valid_time(H, Mi, S) ->
     minato_codec:bad(time, time_out_of_range, {H, Mi, S}).
@@ -236,8 +240,8 @@ to_unix_micros(_Type, Micros) when is_integer(Micros) ->
 to_unix_micros(_Type, {{Y, M, D}, {H, Mi, S}}) when
     is_integer(Y), is_integer(M), is_integer(D), is_integer(H), is_integer(Mi), is_integer(S)
 ->
-    valid_date(Y, M, D),
-    valid_time(H, Mi, S),
+    ok = valid_date(Y, M, D),
+    ok = valid_time(H, Mi, S),
     days_from_civil(Y, M, D) * ?DAY_MICROS + (H * 3600 + Mi * 60 + S) * 1000000;
 to_unix_micros(Type, Value) ->
     minato_codec:bad(Type, not_a_timestamp, Value).
@@ -265,7 +269,7 @@ floor_div(A, B) -> -((-A + B - 1) div B).
 
 -spec format_date(term()) -> iodata().
 format_date({Y, M, D}) when is_integer(Y), is_integer(M), is_integer(D) ->
-    valid_date(Y, M, D),
+    ok = valid_date(Y, M, D),
     [pad(Y, 4), $-, pad(M, 2), $-, pad(D, 2)];
 format_date(Value) ->
     minato_codec:bad(date, not_a_date, Value).

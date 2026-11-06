@@ -27,7 +27,8 @@ Skips when no server answers.
     a_channel_nobody_listens_to_is_dropped/1,
     a_subscriber_that_dies_is_dropped/1,
     a_channel_name_is_quoted_not_interpolated/1,
-    a_dropped_connection_comes_back_and_says_so/1
+    a_dropped_connection_comes_back_and_says_so/1,
+    a_listener_whose_connect_raises_stays_up/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -44,7 +45,8 @@ all() ->
         a_channel_nobody_listens_to_is_dropped,
         a_subscriber_that_dies_is_dropped,
         a_channel_name_is_quoted_not_interpolated,
-        a_dropped_connection_comes_back_and_says_so
+        a_dropped_connection_comes_back_and_says_so,
+        a_listener_whose_connect_raises_stays_up
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -197,6 +199,23 @@ emptied(Attempts) ->
         _Waiting ->
             timer:sleep(20),
             emptied(Attempts - 1)
+    end.
+
+-doc """
+A connect that raises, here one requiring channel binding from a server that
+cannot offer it on a plain socket, is retried like a connect that fails. It
+used to take the listener down, and with it every subscriber, over and over.
+""".
+-spec a_listener_whose_connect_raises_stays_up([{atom(), term()}]) -> ok.
+a_listener_whose_connect_raises_stays_up(_Config) ->
+    Name = minato_raising_listener,
+    Connection = (connection())#{channel_binding => require},
+    {ok, Pid} = minato:start_listener(Name, #{connection => Connection}),
+    try
+        timer:sleep(500),
+        ?assertEqual(Pid, whereis(Name))
+    after
+        ok = minato:stop_listener(Name)
     end.
 
 connection() ->

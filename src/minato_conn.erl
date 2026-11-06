@@ -90,6 +90,7 @@ the server issued is the whole of the authorisation.
 
 -export([
     connect/1,
+    attempt/1,
     close/1,
     close/2,
     close_aside/1,
@@ -177,7 +178,7 @@ How to reach a server and who to be.
 #{host => inet:socket_address() | inet:hostname(),
   port => inet:port_number(),
   user := binary(),
-  password => binary() | fun(() -> binary()),
+  password => binary() | string() | fun(() -> binary() | string()),
   database => binary(),
   parameters => #{binary() => binary()},
   ssl => boolean(),
@@ -199,7 +200,12 @@ PostgreSQL itself does.
 `password` may be a fun, which is called once per connection attempt and never
 stored. That is what a rotating credential needs: a password read at start up
 and held in a pool's configuration for a month is a password that expires while
-the pool holds it.
+the pool holds it. Prefer a named function, `fun my_app:db_password/0`, to a
+closure: it prints as its name, and it survives a reload of the module that
+made it, where a closure from a module reloaded twice raises `badfun`. A
+password given as a string, or returned as one by the fun, is converted to a
+binary, and one that is not valid text raises
+`{minato_conn, #{reason := not_text}}` without the password.
 
 `parameters` are added to the `StartupMessage` and are how `application_name`
 gets set. Two are sent unless they are given here: `client_encoding` is `UTF8`,
@@ -236,7 +242,7 @@ connection waits for the server to close first, to at most a second; see
     host => inet:socket_address() | inet:hostname(),
     port => inet:port_number(),
     user := binary(),
-    password => binary() | fun(() -> binary()),
+    password => binary() | string() | fun(() -> binary() | string()),
     database => binary(),
     parameters => #{binary() => binary()},
     ssl => boolean(),
@@ -310,8 +316,26 @@ connect(#{user := _} = Opts) ->
             user => maps:get(user, Opts),
             ssl => maps:get(ssl, Opts, false)
         },
-        fun() -> connected(opening(Opts)) end
+        fun() -> connected(opening(minato_secret:connection(Opts))) end
     ).
+
+%% For the pool and the listener, which retry what fails here: a raise comes
+%% back as a reason, without the stacktrace, whose frames can hold the options.
+-doc false.
+-spec attempt(opts()) -> {ok, conn()} | {error, term()}.
+attempt(Opts) ->
+    try
+        connect(Opts)
+    catch
+        error:{Module, #{reason := Reason}} when
+            Module =:= minato_conn; Module =:= minato_auth; Module =:= minato_scram
+        ->
+            {error, {Module, Reason}};
+        Class:Reason when is_atom(Reason) ->
+            {error, {connect_raised, Class, Reason}};
+        Class:_Reason ->
+            {error, {connect_raised, Class}}
+    end.
 
 -spec connected({ok, conn()} | {error, error()}) ->
     {{ok, conn()} | {error, error()}, minato_telemetry:metadata()}.
@@ -1150,8 +1174,7 @@ credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->
 secret(User, Opts) ->
     case maps:get(password, Opts, undefined) of
         undefined -> #{user => User};
-        Password when is_function(Password, 0) -> #{user => User, password => Password()};
-        Password -> #{user => User, password => Password}
+        Password -> #{user => User, password => minato_secret:password(Password)}
     end.
 
 -spec bound(minato_auth:credentials(), binary() | undefined, minato_auth:channel_binding()) ->
@@ -1364,7 +1387,7 @@ key(Option) ->
 
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
-    Given = maps:get(ssl_options, Opts, []),
+    Given = minato_secret:revealed(maps:get(ssl_options, Opts, [])),
     Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
 
 %% A default is replaced by the option that answers the same question, not

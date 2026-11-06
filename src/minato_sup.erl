@@ -37,8 +37,7 @@ start_pool(Name, Opts) ->
 start_listener(Name, Opts) ->
     unwrapped(supervisor:start_child(?MODULE, child(minato_listener, Name, Opts))).
 
-%% A start error carries the child spec, and with it the connection options,
-%% password included.
+%% A start error carries the child spec, and with it the connection options.
 -spec unwrapped(supervisor:startchild_ret()) -> supervisor:startchild_ret().
 unwrapped({error, {already_started, Pid}} = Started) when is_pid(Pid) -> Started;
 unwrapped({error, {Reason, _ChildSpec}}) -> {error, Reason};
@@ -76,11 +75,12 @@ declared(Key) ->
         _None -> #{}
     end.
 
+%% A supervisor prints its child specs, so the password and ssl_options go in sealed.
 -spec child(module(), atom(), dynamic()) -> supervisor:child_spec().
 child(Module, Name, Opts) ->
     #{
         id => Name,
-        start => {Module, start_link, [Name, Opts]},
+        start => {Module, start_link, [Name, minato_secret:seal_options(Opts)]},
         restart => permanent,
         shutdown => 5000,
         type => worker
