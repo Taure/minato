@@ -51,10 +51,13 @@ binary and never a string written as a list.
 
 An array is rectangular: every row of a dimension has the same length and the
 same depth. One that is not is refused with `ragged_array`, naming the row or
-element that does not fit. So is a list where an element belongs, which is what
-a string handed to an `_int4` is. An array with no elements has no dimensions,
+element that does not fit. An array with no elements has no dimensions,
 whatever lists it was written with: `[[],[]]` encodes as `[]` does, which is
 also how the server stores it.
+
+A string written as a list is a list, and nothing tells it from a row. Handed
+to an array of numbers, `["12","34"]` is the 2 by 2 array of four character
+codes, and `[1,"2"]` is ragged.
 
 Lower bounds are not represented in the Erlang term. An array with a lower bound
 other than 1 decodes to the same list as one with a lower bound of 1, and every

@@ -91,9 +91,13 @@ where `sent(V)` is what `SELECT $1::text[]` returns for `V`. Inside `{array, _}`
 an element is a binary, never a string written as a list.
 
 Rows must all be the same length and depth: anything else is refused with
-`ragged_array` before a byte is sent, and so is a string handed to an array of
-numbers. An array with no elements has no dimensions, so `[[], []]` is `[]`.
-Lower bounds other than 1 are read and dropped.
+`ragged_array` before a byte is sent. An array with no elements has no
+dimensions, so `[[], []]` is `[]`. Lower bounds other than 1 are read and
+dropped.
+
+A string written as a list is a list here too. `["12", "34"]` handed to an
+`int4[]` is the 2 by 2 array of the four character codes, where it used to
+raise `not_an_integer`: convert the strings, minato cannot tell them from rows.
 
 ## A type minato has no codec for
 

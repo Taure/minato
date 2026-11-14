@@ -218,6 +218,20 @@ a_list_in_a_list_is_one_string_where_an_element_can_be_a_list_test_() ->
             ?_assertEqual(~"{ab,cd}", enc(?TEXT_ARRAY, [[~"a", ~"b"], [~"c", ~"d"]], text))
         ].
 
+a_string_in_an_array_of_numbers_is_a_row_of_its_characters_test_() ->
+    [
+        ?_assertEqual([[$1, $2], [$3, $4]], roundtrip(?INT4_ARRAY, ["12", "34"], binary)),
+        ?_assertEqual(~"{{49,50}}", enc(?INT4_ARRAY, ["12"], text)),
+        ?_assertError(
+            {minato_codec, #{reason := ragged_array, value := "2"}},
+            enc(?INT4_ARRAY, [1, "2"], binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := uuid, reason := not_a_uuid}},
+            enc(2951, ["0196f0a9-1c4f-7e21-9b3a-6d2c5e8f1a44"], binary)
+        )
+    ].
+
 a_list_is_a_string_exactly_where_the_element_codec_takes_one_test_() ->
     [
         {atom_to_list(Name), fun() ->
