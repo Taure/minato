@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:${MINATO_PG_TAG:-17}
     container_name: minato-differential-postgres
     command:
       - -c
@@ -20,7 +20,7 @@ services:
       retries: 20
 
   postgres-tls:
-    image: postgres:17
+    image: postgres:${MINATO_PG_TAG:-17}
     container_name: minato-tls-postgres
     user: root
     volumes:

@@ -148,8 +148,25 @@ a_high_iteration_count_authenticates(_Config) ->
 seed() ->
     drop_roles(),
     execute(~"SET password_encryption = 'md5'; CREATE ROLE minato_md5 LOGIN PASSWORD 'pencil'"),
-    execute(~"SET scram_iterations = 1; CREATE ROLE minato_weak LOGIN PASSWORD 'pencil'"),
-    execute(~"SET scram_iterations = 8192; CREATE ROLE minato_slow LOGIN PASSWORD 'pencil'").
+    execute([~"CREATE ROLE minato_weak LOGIN PASSWORD '", verifier(1), ~"'"]),
+    execute([~"CREATE ROLE minato_slow LOGIN PASSWORD '", verifier(8192), ~"'"]).
+
+%% The server takes a verifier in place of a password and stores it as given,
+%% which is the only way to an iteration count of the test's choosing on a
+%% server older than 16, where `scram_iterations` arrived.
+verifier(Iterations) ->
+    Salt = crypto:strong_rand_bytes(16),
+    Held = minato_scram_server:new(?PASSWORD, #{salt => Salt, iterations => Iterations}),
+    [
+        ~"SCRAM-SHA-256$",
+        integer_to_binary(Iterations),
+        ~":",
+        base64:encode(Salt),
+        ~"$",
+        base64:encode(minato_scram_server:stored_key(Held)),
+        ~":",
+        base64:encode(minato_scram_server:server_key(Held))
+    ].
 
 drop_roles() ->
     execute(~"DROP ROLE IF EXISTS minato_md5, minato_weak, minato_slow").
