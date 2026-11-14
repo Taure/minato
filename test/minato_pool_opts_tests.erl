@@ -44,13 +44,13 @@ options_that_are_not_a_map_are_refused_without_echoing_them_test() ->
     end.
 
 a_refused_pool_under_the_supervisor_returns_only_the_reason_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Result = minato:start_pool(?POOL, sized(0.5)),
     ?assertEqual({error, {invalid_size, 0.5}}, Result),
     ?assertEqual(undefined, whereis(?POOL)).
 
 a_running_pool_reports_its_status_without_the_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{min_size => 0}),
     try
         Status = sys:get_status(?POOL),
@@ -60,7 +60,7 @@ a_running_pool_reports_its_status_without_the_password_test() ->
     end.
 
 a_running_listener_reports_its_status_without_the_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     {ok, _Pid} = minato:start_listener(minato_pool_opts_tests_listener, #{
         connection => connection()
     }),
@@ -89,14 +89,14 @@ a_connection_that_is_not_a_map_is_refused_test() ->
     ).
 
 a_listener_without_a_connection_returns_no_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     ?assertEqual(
         {error, invalid_connection},
         minato:start_listener(minato_pool_opts_tests_listener, unnested())
     ).
 
 zero_and_infinity_timeouts_are_accepted_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{
         min_size => 0, max_idle => 0, max_age => 0
     }),
@@ -131,3 +131,11 @@ sized(Size) ->
 
 connection() ->
     #{host => "127.0.0.1", port => 1, user => ~"u", password => ~"s3cret", database => ~"d"}.
+
+%% A run that was cut short leaves what it started under the supervisor, and
+%% the next run would find the name taken.
+ready() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    _ = minato:stop_pool(?POOL),
+    _ = minato:stop_listener(minato_pool_opts_tests_listener),
+    ok.

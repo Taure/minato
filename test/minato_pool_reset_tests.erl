@@ -31,7 +31,7 @@ a_checkout_gives_up_after_the_pool_and_one_more_test_() ->
     {timeout, 30, fun a_checkout_gives_up_after_the_pool_and_one_more/0}.
 
 a_checkout_gives_up_after_the_pool_and_one_more() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([
         ?READY, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET
     ]),
@@ -53,7 +53,7 @@ a_refused_reset_reports_only_its_sqlstate_test_() ->
     {timeout, 30, fun a_refused_reset_reports_only_its_sqlstate/0}.
 
 a_refused_reset_reports_only_its_sqlstate() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([?READY, ?REFUSED, ?REFUSED]),
     {ok, _Pid} = minato:start_pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
@@ -74,7 +74,7 @@ a_connection_with_no_transaction_is_reset_without_a_rollback_test_() ->
     {timeout, 30, fun a_connection_with_no_transaction_is_reset_without_a_rollback/0}.
 
 a_connection_with_no_transaction_is_reset_without_a_rollback() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([?READY, ?SHOWN]),
     {ok, _Pid} = minato:start_pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
@@ -86,6 +86,13 @@ a_connection_with_no_transaction_is_reset_without_a_rollback() ->
         ok = minato:stop_pool(?POOL),
         minato_backend_server:stop(Server)
     end.
+
+%% A run that was cut short leaves what it started under the supervisor, and
+%% the next run would find the name taken.
+ready() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    _ = minato:stop_pool(?POOL),
+    ok.
 
 connection(Server) ->
     #{
