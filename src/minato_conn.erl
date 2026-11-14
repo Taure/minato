@@ -48,6 +48,11 @@ told explicitly on a socket upgrade. Anything passed in `ssl_options` replaces
 the default for that option and nothing else, so turning verification off is
 possible and has to be written down.
 
+`{server_name_indication, disable}` is not a way to write it down. It keeps the
+name out of the handshake, and the certificate is still checked for `host`,
+which `m:ssl` alone would stop doing. `{verify, verify_none}`, a `verify_fun`
+or a `customize_hostname_check` is what changes the check.
+
 Under TLS the SCRAM exchange is bound to the session by default:
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, which puts the hash of the
 server's certificate inside the material the client proof covers. A man in the
@@ -126,6 +131,7 @@ the server issued is the whole of the authorisation.
     origin/1,
     pooled/2
 ]).
+-export([verified/3]).
 
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
@@ -1522,7 +1528,50 @@ key(Option) ->
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
     Given = minato_secret:revealed(maps:get(ssl_options, Opts, [])),
-    Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
+    Options = Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)],
+    hostname_checked(server_name(Host), Options).
+
+%% `{server_name_indication, disable}` asks for the name to stay out of the
+%% handshake, and `m:ssl` takes it to mean the certificate need not carry the
+%% name either. Those are two decisions, and only the first was made, so the
+%% check `m:ssl` drops is put back as a `verify_fun`. A caller who gave a
+%% `verify_fun` or turned verification off has made the second one.
+-spec hostname_checked(string(), [ssl:tls_client_option()]) -> [ssl:tls_client_option()].
+hostname_checked(Name, Options) ->
+    Unnamed = proplists:get_value(server_name_indication, Options) =:= disable,
+    Verifying = proplists:get_value(verify, Options) =:= verify_peer,
+    Own = proplists:is_defined(verify_fun, Options),
+    case Unnamed andalso Verifying andalso not Own of
+        true ->
+            Customize = proplists:get_value(customize_hostname_check, Options, []),
+            [{verify_fun, {fun ?MODULE:verified/3, {reference(Name), Customize}}} | Options];
+        false ->
+            Options
+    end.
+
+-spec reference(string()) -> {ip, inet:ip_address()} | {dns_id, string()}.
+reference(Name) ->
+    case inet:parse_strict_address(Name) of
+        {ok, Address} -> {ip, Address};
+        {error, _Reason} -> {dns_id, Name}
+    end.
+
+-doc false.
+-spec verified(dynamic(), dynamic(), State) ->
+    {valid, State} | {unknown, State} | {fail, term()}
+when
+    State :: {{ip, inet:ip_address()} | {dns_id, string()}, [term()]}.
+verified(_Certificate, {bad_cert, _Why} = Reason, _State) ->
+    {fail, Reason};
+verified(_Certificate, {extension, _Extension}, State) ->
+    {unknown, State};
+verified(_Certificate, valid, State) ->
+    {valid, State};
+verified(Certificate, valid_peer, {Reference, Customize} = State) ->
+    case public_key:pkix_verify_hostname(Certificate, [Reference], Customize) of
+        true -> {valid, State};
+        false -> {fail, {bad_cert, hostname_check_failed}}
+    end.
 
 %% A default is replaced by the option that answers the same question, not
 %% merely by one spelled the same way. `cacertfile` and `cacerts` are one

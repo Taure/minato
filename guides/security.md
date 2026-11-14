@@ -28,6 +28,14 @@ explicitly on a socket upgrade. Anything in `ssl_options` replaces that one
 default and nothing else, so turning verification off is possible and has to be
 written down where a reviewer can see it.
 
+`{server_name_indication, disable}` keeps the server's name out of the
+handshake, where it travels in the clear, and that is all it does here. `m:ssl`
+on its own also stops checking the certificate for the name when it is given
+that option; minato puts the check back, against `host`, so the option cannot
+be used to turn hostname verification off by accident. The ways to turn it off
+are the ones that say so: `{verify, verify_none}`, a `verify_fun` of your own,
+or a `customize_hostname_check` whose `match_fun` accepts what you mean it to.
+
 ## Channel binding
 
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, on by default under TLS.
@@ -147,7 +155,8 @@ server refused.
   PostgreSQL will use it, but nothing in minato tests that path.
 - **No `sslmode=verify-ca` distinct from `verify-full`.** Verification checks the
   chain and the hostname; a deployment that wants the chain without the hostname
-  can say so in `ssl_options`, and should write down why.
+  can say so in `ssl_options` with a `customize_hostname_check` whose
+  `match_fun` accepts any name, and should write down why.
 - **No secret redaction pass over values you pass to `logger` yourself.** minato
   keeps its own output clean; what your handlers do with `{error, {pgsql_error,
   Fields}}` is yours.

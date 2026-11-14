@@ -139,6 +139,52 @@ a_connect_timeout_covers_the_tls_request_and_the_handshake_together_test_() ->
     end}.
 
 %%----------------------------------------------------------------------
+%% A certificate for somebody else
+%%----------------------------------------------------------------------
+
+%% The server's certificate is for `localhost`. Leaving the name out of the
+%% handshake must not also leave it out of what the certificate is checked for.
+the_hostname_is_checked_with_no_server_name_sent_test_() ->
+    [
+        {Label, fun() ->
+            Server = tls_server([?READY]),
+            Trusted = proplists:lookup_all(cacerts, minato_backend_server:client_tls(Server)),
+            Opts = opts(minato_backend_server:port(Server), #{
+                host => Host,
+                socket_options => [inet],
+                ssl => true,
+                ssl_options => Trusted ++ [{server_name_indication, disable} | Given]
+            }),
+            Result = minato_conn:connect(Opts),
+            _ = [minato_conn:close(Conn) || {ok, Conn} <- [Result]],
+            minato_backend_server:stop(Server),
+            ?assertMatch(Expected, element(1, Result), Result)
+        end}
+     || {Label, Host, Given, Expected} <- [
+            {"the name the certificate carries", "localhost", [], ok},
+            {"another name", "127.0.0.1", [], error},
+            {"another name, with verification turned off", "127.0.0.1", [{verify, verify_none}],
+                ok},
+            {"another name, with a check of the caller's own", "127.0.0.1",
+                [{customize_hostname_check, [{match_fun, fun any_hostname/2}]}], ok}
+        ]
+    ].
+
+any_hostname(_Reference, _Presented) ->
+    true.
+
+a_hostname_check_refuses_what_validation_refused_test_() ->
+    State = {{dns_id, "localhost"}, []},
+    [
+        ?_assertEqual(
+            {fail, {bad_cert, cert_expired}},
+            minato_conn:verified(undefined, {bad_cert, cert_expired}, State)
+        ),
+        ?_assertEqual({unknown, State}, minato_conn:verified(undefined, {extension, any}, State)),
+        ?_assertEqual({valid, State}, minato_conn:verified(undefined, valid, State))
+    ].
+
+%%----------------------------------------------------------------------
 %% Channel binding that was required
 %%----------------------------------------------------------------------
 
