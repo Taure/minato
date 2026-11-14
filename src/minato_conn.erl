@@ -54,7 +54,7 @@ server's certificate inside the material the client proof covers. A man in the
 middle holding a certificate the client accepts can otherwise relay the whole
 exchange and keep the session; with binding, the hash it bound to is not the one
 the real server sees, and the proof is refused. `channel_binding => require`
-refuses to connect without it.
+refuses to connect without it, whatever the server asks for instead.
 
 ## A refusal that arrives as a closed socket
 
@@ -221,8 +221,20 @@ affects the binary format.
 
 `channel_binding` decides whether SCRAM is tied to the TLS session. It defaults
 to `prefer` under `ssl => true` and `disable` without it, since there is nothing
-to bind to on a plain socket. `require` refuses to connect at all unless the
-server offers `SCRAM-SHA-256-PLUS`.
+to bind to on a plain socket. `require` connects through `SCRAM-SHA-256-PLUS`
+or not at all: a server that asks for a cleartext or MD5 password, or for
+nothing, is refused with `{error, {channel_binding_required, Method}}` before
+anything is answered, and one that offers SCRAM without `-PLUS` raises
+`{minato_auth, #{reason := {channel_binding_not_offered, _}}}`. Those are the
+semantics of `channel_binding=require` in libpq.
+
+`auth` is the list of methods the server may ask for, and it defaults to all
+four. It is what `require_auth` is in libpq, with `scram_sha_256` for
+`scram-sha-256`, `md5` for `md5`, `cleartext` for `password` and `none` for
+`none`. A method outside the list is refused with
+`{error, {auth_method_refused, Method}}` before it is answered, so
+`auth => [scram_sha_256]` is a connection that never sends a password or an MD5
+digest of one, and never accepts a server that asks for nothing.
 
 `transport` is `socket`, which is `m:minato_socket` over the socket NIFs, or
 `inet`, the driver every BEAM program uses. `socket` is the default: it does
@@ -283,7 +295,8 @@ An authentication method the server may ask for.
     | {tls, term()}
     | tls_refused
     | cleartext_password_refused
-    | {auth_method_refused, method()}.
+    | {auth_method_refused, method()}
+    | {channel_binding_required, method()}.
 
 -doc "The map carried by an `error({minato_conn, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
@@ -1326,10 +1339,24 @@ store(#conn{parameters = Parameters} = Conn, Name, Value) ->
 -spec permitted(minato_protocol:backend(), conn(), boolean()) -> ok | {error, error()}.
 permitted(Message, #conn{transport = Transport, opts = Opts}, Asked) ->
     case method(Message, Asked) of
-        undefined -> ok;
-        cleartext when Transport =/= ssl -> {error, cleartext_password_refused};
-        Method -> allowed(Method, maps:get(auth, Opts, all_methods()))
+        undefined ->
+            ok;
+        cleartext when Transport =/= ssl ->
+            {error, cleartext_password_refused};
+        Method ->
+            Binding = maps:get(channel_binding, Opts, prefer(Transport)),
+            bindable(Method, Binding, maps:get(auth, Opts, all_methods()))
     end.
+
+%% Only SCRAM can be bound to the TLS session, so a connection that requires
+%% binding has nothing to say to a server that asks for anything else. Whether
+%% the SCRAM on offer is the bound one is `m:minato_auth`'s to decide, because
+%% it is what reads the mechanism list.
+-spec bindable(method(), minato_auth:channel_binding(), [method()]) -> ok | {error, error()}.
+bindable(Method, require, _Methods) when Method =/= scram_sha_256 ->
+    {error, {channel_binding_required, Method}};
+bindable(Method, _Binding, Methods) ->
+    allowed(Method, Methods).
 
 -spec method(minato_protocol:backend(), boolean()) -> method() | undefined.
 method(authentication_ok, false) -> none;

@@ -17,8 +17,8 @@ directly.
 | `parameters` | see below | added to the `StartupMessage` |
 | `ssl` | `false` | |
 | `ssl_options` | verify against the OS trust store | each option replaces one default |
-| `channel_binding` | `prefer` under TLS, `disable` without | `require` refuses to connect without it |
-| `auth` | every method | `[scram_sha_256]` to accept nothing else |
+| `channel_binding` | `prefer` under TLS, `disable` without | `require` accepts `SCRAM-SHA-256-PLUS` and refuses every other method, including a server that asks for no password |
+| `auth` | every method | the methods a server may ask for, as libpq's `require_auth`; `[scram_sha_256]` to accept nothing else |
 | `connect_timeout` | `5000` | covers the TCP connect and the TLS handshake |
 | `timeout` | `15000` | the per read timeout, and the default statement deadline |
 | `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second |

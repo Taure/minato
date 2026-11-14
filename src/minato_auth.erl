@@ -43,12 +43,12 @@ MD5, is asking the client to hand over something weaker than the exchange it
 already began, which is what a man in the middle who cannot finish SCRAM would
 do next.
 
-That guard is worth having but it is not a policy. A server that asks for
-cleartext in its very first message is answered, because that is what
-supporting cleartext means, and minato has no way yet to be told which methods
-are acceptable. A `require_auth` style option belongs with the connection layer,
-along with TLS, since both are decisions about the transport rather than about
-the exchange.
+That guard is not a policy. A server that asks for cleartext in its very first
+message is answered, because that is what supporting cleartext means. Which
+methods are acceptable at all is the connection's to say, with `auth` in
+`t:minato_conn:opts/0`, since it is a decision about the transport rather than
+about the exchange. The one policy that lives here is `channel_binding =>
+require`, below, because it is a statement about the exchange itself.
 
 ## Methods
 
@@ -81,11 +81,20 @@ authentication message at all raises here, for the same reason.
 `channel_binding_data`, which is the hash of the server's certificate and comes
 from the connection layer, since only it has the TLS session.
 
-`channel_binding => require` refuses to authenticate at all without it. `prefer`
-takes it when both sides have it, and falls back to plain SCRAM with a `y,,`
-header, which tells a server that does support binding that its mechanism list
-was stripped on the way. `disable` never binds. See `m:minato_scram` for what
-each header means.
+`prefer` takes it when both sides have it, and falls back to plain SCRAM with a
+`y,,` header, which tells a server that does support binding that its mechanism
+list was stripped on the way. `disable` never binds. See `m:minato_scram` for
+what each header means.
+
+`channel_binding => require` means the exchange ends bound or does not end.
+Only `SCRAM-SHA-256-PLUS` is answered. `AuthenticationCleartextPassword`,
+`AuthenticationMD5Password`, an `AuthenticationSASL` that does not offer
+`-PLUS`, and an `AuthenticationOk` from a server that asked for nothing all
+raise, and they raise before the password is read, so nothing derived from it
+has been sent. Without that, requiring binding would only choose between the
+mechanisms a server offered, and a server, or whoever is answering in its
+place, could ask for something that cannot be bound instead. That is what
+`channel_binding=require` means in libpq as well.
 """.
 
 -export([init/1, step/2]).
@@ -130,8 +139,9 @@ away from its iteration count defaults.
 What to do about channel binding.
 
 `prefer` uses `SCRAM-SHA-256-PLUS` when the server offers it and there is
-binding data to use, and plain SCRAM otherwise. `require` refuses to
-authenticate without it. `disable` never binds.
+binding data to use, and plain SCRAM otherwise. `require` answers
+`SCRAM-SHA-256-PLUS` and nothing else, whatever the server asks for. `disable`
+never binds.
 
 `prefer` still tells the truth in the gs2 header: a client with binding data
 whose server did not offer `-PLUS` sends `y,,`, which is how a server that did
@@ -183,6 +193,8 @@ arrives outside an exchange. Raises `error({minato_scram, _})` for a server that
 breaks SCRAM or fails to prove itself; see `m:minato_scram`.
 """.
 -spec step(minato_protocol:backend(), state()) -> step().
+step(authentication_ok, #state{sasl = none, binding = require, user = User}) ->
+    bad(authentication_ok, channel_binding_required, User);
 step(authentication_ok, #state{sasl = none}) ->
     authenticated;
 step(authentication_ok, #state{sasl = verified}) ->
@@ -205,12 +217,16 @@ step(Message, #state{user = User}) ->
 -spec cleartext(sasl(), state()) -> step().
 cleartext({pending, _Client}, #state{user = User}) ->
     bad(authentication_cleartext_password, method_changed_mid_exchange, User);
+cleartext(_Sasl, #state{binding = require, user = User}) ->
+    bad(authentication_cleartext_password, channel_binding_required, User);
 cleartext(_Sasl, State) ->
     {send, {password, password(State, authentication_cleartext_password)}, State}.
 
 -spec md5(sasl(), binary(), state()) -> step().
 md5({pending, _Client}, _Salt, #state{user = User}) ->
     bad(authentication_md5_password, method_changed_mid_exchange, User);
+md5(_Sasl, _Salt, #state{binding = require, user = User}) ->
+    bad(authentication_md5_password, channel_binding_required, User);
 md5(_Sasl, Salt, #state{user = User} = State) ->
     Password = password(State, authentication_md5_password),
     {send, {password, md5_digest(User, Password, Salt)}, State}.
@@ -240,18 +256,29 @@ sasl_final(_Sasl, _Data, #state{user = User}) ->
     bad(authentication_sasl_final, no_sasl_exchange_in_progress, User).
 
 -spec mechanism([binary()], state()) -> {binary(), minato_scram:binding()}.
-mechanism(Mechanisms, #state{user = User} = State) ->
+mechanism(Mechanisms, #state{binding = require, binding_data = Hash} = State) when
+    is_binary(Hash)
+->
+    case lists:member(?SCRAM_SHA_256_PLUS, Mechanisms) of
+        true -> {?SCRAM_SHA_256_PLUS, {tls_server_end_point, Hash}};
+        false -> unbound(Mechanisms, State)
+    end;
+mechanism(Mechanisms, #state{binding = require} = State) ->
+    unbound(Mechanisms, State);
+mechanism(Mechanisms, State) ->
     Offered = lists:member(?SCRAM_SHA_256_PLUS, Mechanisms),
     case bindable(State) of
         {ok, Hash} when Offered ->
             {?SCRAM_SHA_256_PLUS, {tls_server_end_point, Hash}};
         {ok, _Hash} ->
             plain(Mechanisms, State, unoffered);
-        required ->
-            bad(authentication_sasl, {channel_binding_not_offered, Mechanisms}, User);
         none ->
             plain(Mechanisms, State, none)
     end.
+
+-spec unbound([binary()], state()) -> no_return().
+unbound(Mechanisms, #state{user = User}) ->
+    bad(authentication_sasl, {channel_binding_not_offered, Mechanisms}, User).
 
 -spec plain([binary()], state(), minato_scram:binding()) -> {binary(), minato_scram:binding()}.
 plain(Mechanisms, #state{user = User}, Binding) ->
@@ -260,9 +287,8 @@ plain(Mechanisms, #state{user = User}, Binding) ->
         false -> bad(authentication_sasl, {no_supported_mechanism, Mechanisms}, User)
     end.
 
--spec bindable(state()) -> {ok, binary()} | required | none.
+-spec bindable(state()) -> {ok, binary()} | none.
 bindable(#state{binding = disable}) -> none;
-bindable(#state{binding_data = undefined, binding = require}) -> required;
 bindable(#state{binding_data = undefined}) -> none;
 bindable(#state{binding_data = Hash}) -> {ok, Hash}.
 

@@ -40,8 +40,17 @@ server's certificate is inside the material the client proof covers, so the
 relay's proof is computed over the wrong certificate and the server refuses it.
 
 - `prefer` (default under TLS) uses it when the server offers it
-- `require` refuses to connect without it
+- `require` authenticates with `SCRAM-SHA-256-PLUS` or not at all
 - `disable` never binds
+
+`require` is a statement about the whole exchange, not only about SCRAM. The
+server chooses which method to ask for, so somebody answering in its place can
+ask for a cleartext password, for MD5, or for nothing, and none of those can
+carry a binding. Under `require` each of them is refused before a byte of the
+password is read: `{error, {channel_binding_required, Method}}`. A server that
+offers SCRAM without `-PLUS`, and `require` on a connection with no TLS under
+it, raise `{minato_auth, #{reason := {channel_binding_not_offered,
+Mechanisms}}}` with nothing sent, which a pool reports as a failed connect.
 
 A client that can bind but is offered no `-PLUS` mechanism sends `y,,` in the
 gs2 header, which is how a server that *does* support binding learns its
@@ -54,6 +63,22 @@ that PostgreSQL offers, with one rule that is not configurable: **a cleartext
 password is refused on a plain socket**, always. The password opens every future
 connection too, so handing it to whoever is on the wire is worse than failing to
 connect.
+
+The default is permissive because a client cannot know how a server it has not
+met is configured. A deployment does know, and should say so: the server picks
+the method, so a client that accepts all of them will hand an MD5 response, or
+over TLS the password itself, to anything that asks. `auth` is what libpq calls
+`require_auth`:
+
+| `auth` | `require_auth` | the server asked for |
+| --- | --- | --- |
+| `scram_sha_256` | `scram-sha-256` | SASL, with or without channel binding |
+| `md5` | `md5` | an MD5 response |
+| `cleartext` | `password` | the password itself |
+| `none` | `none` | nothing: `trust`, or a method that needs no answer |
+
+A method outside the list is refused with `{error, {auth_method_refused,
+Method}}` before anything is sent in answer to it.
 
 ## Credentials
 
