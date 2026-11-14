@@ -14,8 +14,10 @@ started it.
 The script is a list of answers, one per frontend message read. `{raw, Bytes}`
 writes bytes as they are, which is how the single byte answer to `SSLRequest`
 is given; `{then, First, Milliseconds, Second}` writes one answer, waits, and
-writes another, which is a server saying something nobody asked for; anything
-else is a list of `m:minato_backend_writer` messages. When
+writes another, which is a server saying something nobody asked for;
+`{reply, {Module, Function}}` is whatever `Module:Function(Message)` answers
+for the message that was read, for an answer that has to quote the client;
+anything else is a list of `m:minato_backend_writer` messages. When
 the script runs out the server keeps reading and answers nothing, which is what
 a client waiting on a message it will never get has to cope with.
 A `Terminate` is never answered, as no server would, and ends the conversation,
@@ -40,7 +42,8 @@ to observe.
 -type answer() ::
     [minato_backend_writer:message()]
     | {raw, iodata()}
-    | {then, answer(), Milliseconds :: non_neg_integer(), answer()}.
+    | {then, answer(), Milliseconds :: non_neg_integer(), answer()}
+    | {reply, {module(), atom()}}.
 
 -doc """
 How the server behaves beyond the script.
@@ -251,9 +254,15 @@ served(Peer, {ok, {cancel_request, _Pid, _Secret} = Message, _Rest}, _StartedUp,
     terminated(Peer);
 served(Peer, {ok, Message, Rest}, StartedUp, Script) ->
     told(Peer, Message),
-    answer(Peer, Rest, started_up(Message, StartedUp), Script);
+    answer(Peer, Rest, started_up(Message, StartedUp), replied(Message, Script));
 served(Peer, closed, _StartedUp, _Script) ->
     Peer.
+
+-spec replied(term(), [answer()]) -> [answer()].
+replied(Message, [{reply, {Module, Function}} | Script]) ->
+    [Module:Function(Message) | Script];
+replied(_Message, Script) ->
+    Script.
 
 -spec told(peer(), term()) -> ok.
 told(#{owner := Owner, acceptor := Acceptor}, Message) ->
