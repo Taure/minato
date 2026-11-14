@@ -595,7 +595,7 @@ raw(Remaining, <<-1:32/signed, Rest/binary>>) when Remaining > 0 ->
 raw(Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0, Length >= 0 ->
     {Value, Tail} = cut(Length, Rest),
     [Value | raw(Remaining - 1, Tail)];
-raw(_Remaining, <<Length:32/signed, _Rest/binary>>) ->
+raw(Remaining, <<Length:32/signed, _Rest/binary>>) when Remaining > 0, Length < -1 ->
     bad(data_row, {negative_column_length, Length}, Length);
 raw(_Remaining, Payload) ->
     bad(data_row, malformed, Payload).
@@ -622,7 +622,7 @@ decoded_tuple(
 ->
     [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Remaining - 1, Rest)];
 decoded_tuple(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>) when
-    Remaining > 0, Length < 0
+    Remaining > 0, Length < -1
 ->
     bad(data_row, {negative_column_length, Length}, Length);
 decoded_tuple([_Column | _Columns], Remaining, <<Length:32/signed, Rest/binary>>) when
@@ -651,7 +651,7 @@ decoded_map(
 ->
     decoded_map(Columns, Remaining - 1, Rest, Row#{Key => minato_codec:decode(Decoder, Value)});
 decoded_map(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>, _Row) when
-    Remaining > 0, Length < 0
+    Remaining > 0, Length < -1
 ->
     bad(data_row, {negative_column_length, Length}, Length);
 decoded_map([_Column | _Columns], Remaining, <<Length:32/signed, Rest/binary>>, _Row) when

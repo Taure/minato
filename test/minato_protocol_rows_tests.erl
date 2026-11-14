@@ -302,6 +302,10 @@ a_payload_that_does_not_fit_its_columns_is_refused_test_() ->
             {"no room for a count", <<0>>, malformed, <<0>>},
             {"an empty column the description does not have", payload(columns() ++ [~""]),
                 column_count_mismatch, {0, 1}},
+            {"a null column the description does not have", payload(columns() ++ [null]),
+                column_count_mismatch, {0, 1}},
+            {"two null columns the description does not have", payload(columns() ++ [null, null]),
+                column_count_mismatch, {0, 2}},
             {"a null column after the count ran out", <<0:16, -1:32/signed>>, column_count_mismatch,
                 {3, 0}},
             {"a column after the count ran out", <<0:16, 1:32, "x">>, column_count_mismatch,
@@ -360,5 +364,21 @@ a_payload_splits_into_its_columns_test_() ->
         ?_assertError(
             {minato_protocol, #{reason := malformed, data := <<0>>}},
             minato_protocol:columns(<<0:16, 0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<-1:32/signed>>}},
+            minato_protocol:columns(<<0:16, -1:32/signed>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<1:32, "x">>}},
+            minato_protocol:columns(<<0:16, 1:32, "x">>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<-1:32/signed>>}},
+            minato_protocol:columns(<<1:16, 1:32, "x", -1:32/signed>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := {negative_column_length, -2}, data := -2}},
+            minato_protocol:columns(<<1:16, -2:32/signed>>)
         )
     ].
