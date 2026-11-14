@@ -20,7 +20,7 @@ rejects outright (a NUL byte in `text`, a year outside 1..9999) belong in the
 pure codec tests, not here.
 """.
 
--export([types/0, sql_name/1, fixed/1, generate/3, element_entry/1, encoded/4]).
+-export([types/0, sql_name/1, fixed/1, nested/1, generate/3, element_entry/1, encoded/4]).
 
 -doc "One type under test: what to call it in SQL and which OID carries it.".
 -type entry() :: #{
@@ -298,6 +298,49 @@ element_representation_cases(Name, _Entry) when
     ];
 element_representation_cases(_Name, _Entry) ->
     [].
+
+%%----------------------------------------------------------------------
+%% More than one dimension
+%%----------------------------------------------------------------------
+
+-doc """
+Arrays of two to six dimensions for an array type, built from the first two of
+its element's fixed cases that come back exactly as they went out.
+
+Where the element is `iodata()` the value is wrapped in `{array, Nested}`,
+because a bare list inside a list is one string there and not a row.
+""".
+-spec nested(entry()) -> [value_case()].
+nested(#{kind := array, name := {array, Name}}) ->
+    Cases = [as_case(Case) || Case <- scalar_cases(Name)],
+    [A, B | _] = [
+        Value
+     || #{value := Value, expected := Expected, opts := Opts} <- Cases,
+        Value =:= Expected,
+        Opts =:= #{}
+    ],
+    [
+        #{value => dimensional(Name, Nested), expected => Nested, opts => #{}}
+     || Nested <- [
+            [[A, B], [B, A]],
+            [[A, null], [null, B]],
+            [[null, null], [null, null]],
+            [[A]],
+            [[A], [B], [null]],
+            [[A, B, A]],
+            [[[A, B]], [[B, null]]],
+            [[[A], [B]], [[B], [A]], [[null], [A]]],
+            [[[[[[A, B]]]]]]
+        ]
+    ].
+
+-spec dimensional(minato_oid:name(), [term()]) -> term().
+dimensional(Name, Nested) when
+    Name =:= bytea; Name =:= text; Name =:= varchar; Name =:= json; Name =:= jsonb
+->
+    {array, Nested};
+dimensional(_Name, Nested) ->
+    Nested.
 
 %%----------------------------------------------------------------------
 %% Generation

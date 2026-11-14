@@ -6,8 +6,9 @@ a type it has no codec for.
 ## The table
 
 Every type below works in both wire formats, and every one of them has an array
-type that works too. Arrays are lists; encoding writes one dimension, decoding
-reads any number and nests.
+type that works too. Arrays are lists, and an array of more than one dimension
+is a list of lists in both directions; see [Arrays](#arrays) for the one case
+that needs saying out loud.
 
 | PostgreSQL | Erlang out | Erlang in |
 | --- | --- | --- |
@@ -65,6 +66,34 @@ gives an integer count from the Unix epoch instead, which is lossless.
 **`uuid` is the readable form by default.** `uuid_format => binary` gives the
 raw 16 bytes, which is what you want if you are hashing or comparing them in
 bulk.
+
+## Arrays
+
+A list is an array, and a list of lists is an array of two dimensions, up to
+the six PostgreSQL has:
+
+```erlang
+{ok, #{rows := [{[[1, 2], [3, 4]]}]}} =
+    minato:query(main, ~"SELECT $1::int4[]", [[[1, 2], [3, 4]]]).
+```
+
+That holds wherever an element cannot itself be a list. For `text`, `varchar`,
+`json`, `jsonb` and `bytea` it can, because a string may be given as `iodata()`,
+so there a list inside a list is one string, as it has always been. Wrap the
+value in `{array, _}` to say that every list in it is a dimension:
+
+```erlang
+[~"ab", ~"cd"]     = sent([[~"a", ~"b"], [~"c", ~"d"]]),
+[[~"a", ~"b"], [~"c", ~"d"]] = sent({array, [[~"a", ~"b"], [~"c", ~"d"]]}).
+```
+
+where `sent(V)` is what `SELECT $1::text[]` returns for `V`. Inside `{array, _}`
+an element is a binary, never a string written as a list.
+
+Rows must all be the same length and depth: anything else is refused with
+`ragged_array` before a byte is sent, and so is a string handed to an array of
+numbers. An array with no elements has no dimensions, so `[[], []]` is `[]`.
+Lower bounds other than 1 are read and dropped.
 
 ## A type minato has no codec for
 

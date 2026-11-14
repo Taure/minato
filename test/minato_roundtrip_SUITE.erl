@@ -27,7 +27,9 @@ Skips when no server answers.
     every_type_round_trips_generated/1,
     every_scalar_round_trips_through_a_table/1,
     a_null_round_trips_for_every_type/1,
-    every_type_round_trips_inside_an_array_column/1
+    every_type_round_trips_inside_an_array_column/1,
+    every_type_round_trips_in_more_than_one_dimension/1,
+    lower_bounds_other_than_one_are_read/1
 ]).
 
 -define(TIMEOUT, 20000).
@@ -42,7 +44,9 @@ all() ->
         every_type_round_trips_generated,
         every_scalar_round_trips_through_a_table,
         a_null_round_trips_for_every_type,
-        every_type_round_trips_inside_an_array_column
+        every_type_round_trips_inside_an_array_column,
+        every_type_round_trips_in_more_than_one_dimension,
+        lower_bounds_other_than_one_are_read
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -86,6 +90,27 @@ a_null_round_trips_for_every_type(_Config) ->
 -spec every_type_round_trips_inside_an_array_column([{atom(), term()}]) -> ok.
 every_type_round_trips_inside_an_array_column(_Config) ->
     report([stored(Entry, minato_corpus:generate(Entry, 5, ?SEED)) || Entry <- arrays()]).
+
+-spec every_type_round_trips_in_more_than_one_dimension([{atom(), term()}]) -> ok.
+every_type_round_trips_in_more_than_one_dimension(_Config) ->
+    report(
+        [parameters(Entry, minato_corpus:nested(Entry)) || Entry <- arrays()] ++
+            [stored(Entry, minato_corpus:nested(Entry)) || Entry <- arrays()]
+    ).
+
+-spec lower_bounds_other_than_one_are_read([{atom(), term()}]) -> ok.
+lower_bounds_other_than_one_are_read(_Config) ->
+    Shifted = ~"SELECT '[0:1][-5:-4]={{1,2},{3,4}}'::int4[], '[3:4]={a,NULL}'::text[]",
+    ?assertMatch(
+        {ok, #{rows := [{[[1, 2], [3, 4]], [~"a", null]}]}},
+        minato:query(?POOL, Shifted, [])
+    ),
+    {ok, [#{rows := Rows}]} = minato:simple(?POOL, Shifted),
+    ?assertEqual([{[[1, 2], [3, 4]], [~"a", null]}], Rows),
+    ?assertMatch(
+        {ok, #{rows := [{[], 0}]}},
+        minato:query(?POOL, ~"SELECT $1::int4[], cardinality($1::int4[])", [[[], []]])
+    ).
 
 %%----------------------------------------------------------------------
 %% Running a corpus through the client
