@@ -206,3 +206,73 @@ samples() ->
         {close, portal, ~"p1"},
         terminate
     ].
+
+%%----------------------------------------------------------------------
+%% Lengths and counts that do not fit their field
+%%----------------------------------------------------------------------
+
+%% The same 16 MiB binary many times over is iodata of any size that costs 16 MiB
+%% to hold, and an encoder that only measures it never builds the whole.
+sized(Bytes) ->
+    Chunk = binary:copy(~"a", 16#1000000),
+    [lists:duplicate(Bytes div 16#1000000, Chunk), binary:part(Chunk, 0, Bytes rem 16#1000000)].
+
+the_longest_message_postgresql_accepts_is_encoded_test() ->
+    [Header | _Payload] = minato_protocol:encode({query, sized(16#3FFFFFFF - 5)}),
+    ?assertEqual(<<$Q, 16#3FFFFFFF:32>>, Header).
+
+a_message_one_byte_longer_is_refused_test() ->
+    ?assertError(
+        {minato_protocol, #{
+            message := frontend,
+            reason := message_too_long,
+            data := {$Q, 16#40000000, 16#3FFFFFFF}
+        }},
+        minato_protocol:encode({query, sized(16#3FFFFFFF - 4)})
+    ).
+
+a_parameter_that_would_wrap_its_length_is_refused_test_() ->
+    Wrapping = sized(16#100000000 + 5),
+    [
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({bind, ~"", ~"", [binary], [Wrapping], [binary]})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({bind, ~"", ~"", [binary], [~"a", Wrapping, null], []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({parse, ~"", Wrapping, []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({password, Wrapping})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({sasl_initial_response, ~"SCRAM-SHA-256", Wrapping})
+        )
+    ].
+
+a_count_that_would_wrap_is_refused_test_() ->
+    Most = lists:duplicate(65535, null),
+    [
+        ?_assertMatch(
+            <<$B, _:32, 0, 0, 0:16, 65535:16, _/binary>>,
+            enc({bind, ~"", ~"", [], Most, []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values, data := {65536, 65535}}},
+            minato_protocol:encode({bind, ~"", ~"", [], [null | Most], []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values}},
+            minato_protocol:encode({parse, ~"", ~"SELECT 1", lists:duplicate(65536, 23)})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values}},
+            minato_protocol:encode({bind, ~"", ~"", [], [], lists:duplicate(65536, binary)})
+        )
+    ].

@@ -495,6 +495,10 @@ A list is written as a single send, which is what the extended query protocol
 wants: `Parse`, `Bind`, `Execute` and `Sync` in one write is one round trip
 rather than four.
 
+A message too long for the protocol's length field raises
+`error({minato_protocol, _})` before any of the list is written; see
+`m:minato_protocol_frontend`.
+
 A pooled connection used this way has to have every answer read before it goes
 back with `minato_pool:checkin/2`. One with answers still unread is closed by
 the next checkout, so discard it with `minato_pool:discard/2` instead.

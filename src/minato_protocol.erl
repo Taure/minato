@@ -373,6 +373,10 @@ Encoding is total for every well formed message and raises `function_clause` on
 anything else, because a frontend message is built by minato itself and a term
 that does not fit is a mistake in the calling code rather than something the
 network did.
+
+A message too long for its length field, or with more values than its count
+field holds, raises `error({minato_protocol, t:report/0})` instead of being
+written with the field wrapped. See `m:minato_protocol_frontend`.
 """.
 -spec encode(frontend()) -> iodata().
 encode(Message) ->

@@ -29,6 +29,18 @@ the protocol reads the length of those lists: an empty list means every value
 is text, a single element applies to every value, and any other length has to
 match the number of values.
 
+## Lengths are checked, not truncated
+
+A length is 32 bits on the wire and a count is 16, and a number that does not
+fit would be written modulo the field: a parameter over 4 GiB would announce a
+short message, and the server would read the rest of it as messages of its own.
+So nothing is ever written modulo anything. A message longer than
+1,073,741,823 bytes, which is the longest PostgreSQL itself accepts, raises
+`error({minato_protocol, #{reason := message_too_long}})`, and a `Parse` or
+`Bind` with more than 65,535 parameters or format codes raises
+`too_many_values`. Both are raised while encoding, so nothing of the message
+has been sent. A parameter is part of its `Bind`, so the same bound covers it.
+
 ## What is not enforced
 
 An encoder writes the message it is given. It does not check that
@@ -42,6 +54,8 @@ drives the exchange, which knows the session; this module only knows bytes.
 -define(PROTOCOL_VERSION, 196608).
 -define(SSL_REQUEST, 80877103).
 -define(CANCEL_REQUEST, 80877102).
+-define(LONGEST_MESSAGE, 16#3FFFFFFF).
+-define(MOST_VALUES, 16#FFFF).
 
 -doc "Encode one frontend message.".
 -spec encode(minato_protocol:frontend()) -> iodata().
@@ -87,11 +101,18 @@ encode(terminate) ->
 
 -spec typed(byte(), iodata()) -> iodata().
 typed(Type, Payload) ->
-    [<<Type, (iolist_size(Payload) + 4):32>>, Payload].
+    [<<Type, (message_length(Type, Payload)):32>>, Payload].
 
 -spec untyped(iodata()) -> iodata().
 untyped(Payload) ->
-    [<<(iolist_size(Payload) + 4):32>>, Payload].
+    [<<(message_length(startup, Payload)):32>>, Payload].
+
+-spec message_length(byte() | startup, iodata()) -> pos_integer().
+message_length(Type, Payload) ->
+    case iolist_size(Payload) + 4 of
+        Length when Length =< ?LONGEST_MESSAGE -> Length;
+        Length -> minato_protocol:bad(frontend, message_too_long, {Type, Length, ?LONGEST_MESSAGE})
+    end.
 
 -spec startup_parameters(#{binary() => binary()}) -> iodata().
 startup_parameters(Parameters) ->
@@ -99,7 +120,10 @@ startup_parameters(Parameters) ->
 
 -spec count([term()]) -> binary().
 count(Values) ->
-    <<(length(Values)):16>>.
+    case length(Values) of
+        Count when Count =< ?MOST_VALUES -> <<Count:16>>;
+        Count -> minato_protocol:bad(frontend, too_many_values, {Count, ?MOST_VALUES})
+    end.
 
 -spec formats([minato_codec:format()]) -> iodata().
 formats(Formats) ->
