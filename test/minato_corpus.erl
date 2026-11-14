@@ -307,8 +307,8 @@ element_representation_cases(_Name, _Entry) ->
 Arrays of two to six dimensions for an array type, built from the first two of
 its element's fixed cases that come back exactly as they went out.
 
-Where the element is `iodata()` the value is wrapped in `{array, Nested}`,
-because a bare list inside a list is one string there and not a row.
+The value is wrapped in `{array, Nested}`, which is the only way to say that a
+list inside a list is a row.
 """.
 -spec nested(entry()) -> [value_case()].
 nested(#{kind := array, name := {array, Name}}) ->
@@ -320,7 +320,7 @@ nested(#{kind := array, name := {array, Name}}) ->
         Opts =:= #{}
     ],
     [
-        #{value => dimensional(Name, Nested), expected => Nested, opts => #{}}
+        #{value => {array, Nested}, expected => Nested, opts => #{}}
      || Nested <- [
             [[A, B], [B, A]],
             [[A, null], [null, B]],
@@ -333,14 +333,6 @@ nested(#{kind := array, name := {array, Name}}) ->
             [[[[[[A, B]]]]]]
         ]
     ].
-
--spec dimensional(minato_oid:name(), [term()]) -> term().
-dimensional(Name, Nested) when
-    Name =:= bytea; Name =:= text; Name =:= varchar; Name =:= json; Name =:= jsonb
-->
-    {array, Nested};
-dimensional(_Name, Nested) ->
-    Nested.
 
 %%----------------------------------------------------------------------
 %% Generation

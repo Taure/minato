@@ -7,8 +7,7 @@ a type it has no codec for.
 
 Every type below works in both wire formats, and every one of them has an array
 type that works too. Arrays are lists, and an array of more than one dimension
-is a list of lists in both directions; see [Arrays](#arrays) for the one case
-that needs saying out loud.
+decodes to a list of lists; see [Arrays](#arrays) for how to send one.
 
 | PostgreSQL | Erlang out | Erlang in |
 | --- | --- | --- |
@@ -69,35 +68,42 @@ bulk.
 
 ## Arrays
 
-A list is an array, and a list of lists is an array of two dimensions, up to
-the six PostgreSQL has:
+A list is an array of one dimension, and each element is a value of the
+element type:
+
+```erlang
+{ok, #{rows := [{[1, 2, 3]}]}} =
+    minato:query(main, ~"SELECT $1::int4[]", [[1, 2, 3]]).
+```
+
+An array of more than one dimension, up to the six PostgreSQL has, decodes to a
+list of lists. To send one, wrap it in `{array, _}`, which says that every list
+in it is a dimension:
 
 ```erlang
 {ok, #{rows := [{[[1, 2], [3, 4]]}]}} =
-    minato:query(main, ~"SELECT $1::int4[]", [[[1, 2], [3, 4]]]).
+    minato:query(main, ~"SELECT $1::int4[]", [{array, [[1, 2], [3, 4]]}]).
 ```
 
-That holds wherever an element cannot itself be a list. For `text`, `varchar`,
-`json`, `jsonb` and `bytea` it can, because a string may be given as `iodata()`,
-so there a list inside a list is one string, as it has always been. Wrap the
-value in `{array, _}` to say that every list in it is a dimension:
+Without the wrapper a list is never a row. For `text`, `varchar`, `json`,
+`jsonb` and `bytea` a list inside a list is one string, given as `iodata()`,
+and for every other element type it is refused by the element's codec, as it
+always was:
 
 ```erlang
-[~"ab", ~"cd"]     = sent([[~"a", ~"b"], [~"c", ~"d"]]),
+[~"ab", ~"cd"]               = sent([[~"a", ~"b"], [~"c", ~"d"]]),
 [[~"a", ~"b"], [~"c", ~"d"]] = sent({array, [[~"a", ~"b"], [~"c", ~"d"]]}).
 ```
 
-where `sent(V)` is what `SELECT $1::text[]` returns for `V`. Inside `{array, _}`
-an element is a binary, never a string written as a list.
+where `sent(V)` is what `SELECT $1::text[]` returns for `V`. So
+`["12", "34"]` handed to an `int4[]` raises `not_an_integer`: a string written
+as a list is a list, and read as a row it would be stored as character codes.
+Inside `{array, _}` an element is never a string written as a list.
 
 Rows must all be the same length and depth: anything else is refused with
-`ragged_array` before a byte is sent. An array with no elements has no
-dimensions, so `[[], []]` is `[]`. Lower bounds other than 1 are read and
-dropped.
-
-A string written as a list is a list here too. `["12", "34"]` handed to an
-`int4[]` is the 2 by 2 array of the four character codes, where it used to
-raise `not_an_integer`: convert the strings, minato cannot tell them from rows.
+`ragged_array` before a byte is sent, and a seventh dimension with
+`dimensions_out_of_range`. An array with no elements has no dimensions, so
+`{array, [[], []]}` is `[]`. Lower bounds other than 1 are read and dropped.
 
 ## A type minato has no codec for
 

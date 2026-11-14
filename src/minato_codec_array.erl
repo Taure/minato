@@ -37,27 +37,26 @@ in row-major order: a 2 by 2 array is `[[1,2],[3,4]]` in both directions.
 
 **Decoding handles any number of dimensions.**
 
-**Encoding reads a list inside a list as a row wherever an element cannot be a
-list**, which is every element type except the `iodata()` ones: `bool`, the
-integers, the floats, `numeric`, `uuid` and the temporal types. So
-`[[1,2],[3,4]]` is a 2 by 2 `_int4`.
+**Encoding adds a dimension only when asked to.** A plain list is a one
+dimensional array, and each of its elements is a value for the element codec:
+`[1,2,3]` is an `_int4` of three, and `[~"a", "bc"]` a `_text` of two, the
+second given as `iodata()`. A list where the element codec wants something else
+is refused by that codec, as any other wrong value is, so `[[1,2],[3,4]]` and
+`["12","34"]` handed to `_int4` both raise `not_an_integer`. A string written
+as a list is a list, and nothing tells it from a row; read as one it would be
+stored as its character codes.
 
-For `_text`, `_varchar`, `_json`, `_jsonb` and `_bytea` a list is already a
-value, a string given as `iodata()`, so `[[~"a",~"b"],[~"c",~"d"]]` is and stays
-the one dimensional array of `ab` and `cd`. To send those as rows, say so:
-`{array, [[~"a",~"b"],[~"c",~"d"]]}`. Inside that tuple every list is a
-dimension and nothing else is, for every element type, so an element there is a
-binary and never a string written as a list.
+To send more than one dimension, say so: `{array, [[1,2],[3,4]]}` is a 2 by 2
+`_int4`. Inside that tuple every list is a dimension and nothing else is, for
+every element type, so an element there is never a string written as a list.
+What a multi-dimensional array decodes to goes back as `{array, Decoded}`.
 
 An array is rectangular: every row of a dimension has the same length and the
 same depth. One that is not is refused with `ragged_array`, naming the row or
 element that does not fit. An array with no elements has no dimensions,
-whatever lists it was written with: `[[],[]]` encodes as `[]` does, which is
-also how the server stores it.
-
-A string written as a list is a list, and nothing tells it from a row. Handed
-to an array of numbers, `["12","34"]` is the 2 by 2 array of four character
-codes, and `[1,"2"]` is ragged.
+whatever lists it was written with: `{array, [[],[]]}` encodes as `[]` does,
+which is also how the server stores it. More than six dimensions are refused
+with `dimensions_out_of_range`, in either direction and either format.
 
 Lower bounds are not represented in the Erlang term. An array with a lower bound
 other than 1 decodes to the same list as one with a lower bound of 1, and every
@@ -92,21 +91,9 @@ array type OID. See the module documentation for what a list inside it means.
 encode(Oid, {array, List}, Format, Opts) when is_list(List) ->
     written(Oid, element_oid(Oid), List, dimensions, Format, Opts);
 encode(Oid, List, Format, Opts) when is_list(List) ->
-    ElementOid = element_oid(Oid),
-    written(Oid, ElementOid, List, nesting(ElementOid), Format, Opts);
+    written(Oid, element_oid(Oid), List, values, Format, Opts);
 encode(Oid, Value, _Format, _Opts) ->
     minato_codec:bad({array, Oid}, not_a_list, Value).
-
--spec nesting(minato_oid:oid()) -> nesting().
-nesting(ElementOid) ->
-    case minato_oid:name(ElementOid) of
-        Name when
-            Name =:= bytea; Name =:= text; Name =:= varchar; Name =:= json; Name =:= jsonb
-        ->
-            values;
-        _ ->
-            dimensions
-    end.
 
 -spec written(
     minato_oid:oid(),
@@ -383,29 +370,29 @@ strip_dimension_prefix(Bin) ->
 
 -spec parse(minato_oid:oid(), binary(), minato_codec:opts()) -> [minato_codec:value()].
 parse(Oid, Bin, Opts) ->
-    case list(Bin, element_oid(Oid), Opts, 1) of
+    case list(Bin, Oid, element_oid(Oid), Opts, 1) of
         {List, ~""} -> List;
         {_List, Trailing} -> minato_codec:bad({array, Oid}, trailing_bytes, Trailing)
     end.
 
--spec list(binary(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
+-spec list(binary(), minato_oid:oid(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
     {[minato_codec:value()], binary()}.
-list(Bin, _ElementOid, _Opts, Depth) when Depth > ?MAX_DIMENSIONS ->
-    minato_codec:bad(array, dimensions_out_of_range, Bin);
-list(<<${, $}, Rest/binary>>, _ElementOid, _Opts, _Depth) ->
+list(Bin, Oid, _ElementOid, _Opts, Depth) when Depth > ?MAX_DIMENSIONS ->
+    minato_codec:bad({array, Oid}, dimensions_out_of_range, Bin);
+list(<<${, $}, Rest/binary>>, _Oid, _ElementOid, _Opts, _Depth) ->
     {[], Rest};
-list(<<${, Rest/binary>>, ElementOid, Opts, Depth) ->
-    items(Rest, ElementOid, Opts, Depth);
-list(Bin, _ElementOid, _Opts, _Depth) ->
+list(<<${, Rest/binary>>, Oid, ElementOid, Opts, Depth) ->
+    items(Rest, Oid, ElementOid, Opts, Depth);
+list(Bin, _Oid, _ElementOid, _Opts, _Depth) ->
     minato_codec:bad(array, malformed_text, Bin).
 
--spec items(binary(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
+-spec items(binary(), minato_oid:oid(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
     {[minato_codec:value()], binary()}.
-items(Bin, ElementOid, Opts, Depth) ->
-    {Value, Rest} = item(Bin, ElementOid, Opts, Depth),
+items(Bin, Oid, ElementOid, Opts, Depth) ->
+    {Value, Rest} = item(Bin, Oid, ElementOid, Opts, Depth),
     case Rest of
         <<$,, Tail/binary>> ->
-            {Values, Trailing} = items(Tail, ElementOid, Opts, Depth),
+            {Values, Trailing} = items(Tail, Oid, ElementOid, Opts, Depth),
             {[Value | Values], Trailing};
         <<$}, Tail/binary>> ->
             {[Value], Tail};
@@ -413,14 +400,14 @@ items(Bin, ElementOid, Opts, Depth) ->
             minato_codec:bad(array, malformed_text, Rest)
     end.
 
--spec item(binary(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
+-spec item(binary(), minato_oid:oid(), minato_oid:oid(), minato_codec:opts(), pos_integer()) ->
     {minato_codec:value(), binary()}.
-item(<<${, _/binary>> = Bin, ElementOid, Opts, Depth) ->
-    list(Bin, ElementOid, Opts, Depth + 1);
-item(<<$", Rest/binary>>, ElementOid, Opts, _Depth) ->
+item(<<${, _/binary>> = Bin, Oid, ElementOid, Opts, Depth) ->
+    list(Bin, Oid, ElementOid, Opts, Depth + 1);
+item(<<$", Rest/binary>>, _Oid, ElementOid, Opts, _Depth) ->
     {Raw, Tail} = quoted(Rest, ~""),
     {minato_codec:decode(ElementOid, Raw, text, Opts), Tail};
-item(Bin, ElementOid, Opts, _Depth) ->
+item(Bin, _Oid, ElementOid, Opts, _Depth) ->
     {Raw, Tail} = bare(Bin, 0),
     case is_null_literal(Raw) of
         true -> {null, Tail};

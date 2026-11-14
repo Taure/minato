@@ -27,14 +27,13 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   already did, where it raised `column_longer_than_the_message`, or
   `negative_column_length` when the extra column was NULL. Bytes after the
   last column make `minato_protocol:columns/1` raise `malformed`.
-- A list inside a list is a row of an array wherever an element cannot itself
-  be a list, so `[[1,2],[3,4]]` is a 2 by 2 `_int4` where it raised
-  `not_an_integer`, and what a multi-dimensional array decodes to can be sent
-  back. For `_text`, `_varchar`, `_json`, `_jsonb` and `_bytea` a list is
-  still one string, and `{array, Nested}` sends those as rows. A list that is
-  not rectangular raises `ragged_array`. A string written as a list and handed
-  to an array of numbers no longer raises: `["12"]` is a row of two character
-  codes.
+- `{array, Rows}` as a parameter sends an array of more than one dimension,
+  for every element type and in both formats: `{array, [[1,2],[3,4]]}` is a
+  2 by 2 `_int4`, and what a multi-dimensional array decodes to goes back as
+  `{array, Decoded}`. A plain list is one dimension and raises what it always
+  raised for a list inside it, so `[[1,2]]` and `["12"]` handed to `_int4` are
+  still `not_an_integer`. Rows that are not rectangular raise `ragged_array`
+  and a seventh dimension `dimensions_out_of_range`.
 - A `date` or `timestamp` the binary format cannot hold, or that would land on
   the value meaning `infinity`, raises
   `{minato_codec, #{reason := out_of_range}}` instead of being written wrapped.
@@ -128,6 +127,10 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - PostgreSQL 14 to 18, and PgBouncer 1.26 in transaction mode. See
   "PgBouncer and connection poolers" in the configuration guide for what does
   not cross a pooler.
+
+### Features
+
+- *(codec)* Send an array of more than one dimension only as `{array, Rows}`
 
 ### Bug Fixes
 
