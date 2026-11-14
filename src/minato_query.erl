@@ -576,6 +576,10 @@ described(Conn, Name, Parameters, End) ->
             ended(Read, statement(Name, Parameters, []), End);
         {ok, {notice_response, _Fields}, Read} ->
             described(Read, Name, Parameters, End);
+        {ok, {notification_response, _Pid, _Channel, _Payload}, Read} ->
+            described(Read, Name, Parameters, End);
+        {ok, {parameter_status, _Name, _Value}, Read} ->
+            described(Read, Name, Parameters, End);
         {ok, {error_response, Reported}, Read} when End =:= flush ->
             abort(Read, {pgsql_error, Reported});
         {ok, {error_response, Reported}, Read} ->

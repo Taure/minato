@@ -50,7 +50,8 @@ Skips when no server answers.
     a_prepared_statement_refused_over_a_parameter_runs_again/1,
     a_value_that_will_not_decode_is_read_past/1,
     a_value_that_will_not_decode_in_a_simple_query_is_read_past/1,
-    a_value_that_will_not_decode_keeps_the_transaction/1
+    a_value_that_will_not_decode_keeps_the_transaction/1,
+    a_notification_waiting_on_the_connection_does_not_stop_a_statement/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -88,7 +89,8 @@ all() ->
         a_prepared_statement_refused_over_a_parameter_runs_again,
         a_value_that_will_not_decode_is_read_past,
         a_value_that_will_not_decode_in_a_simple_query_is_read_past,
-        a_value_that_will_not_decode_keeps_the_transaction
+        a_value_that_will_not_decode_keeps_the_transaction,
+        a_notification_waiting_on_the_connection_does_not_stop_a_statement
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -409,6 +411,25 @@ a_value_that_will_not_decode_keeps_the_transaction(Config) ->
         {ok, #{rows := [{~"kept"}]}, _Read},
         minato_query:query(Committed, ~"SELECT name FROM minato_rows", [])
     ).
+
+%% A session that ran `LISTEN` is sent a `NotificationResponse` whenever one
+%% is raised, and an idle one finds it in front of the answer to its next
+%% statement.
+-spec a_notification_waiting_on_the_connection_does_not_stop_a_statement([{atom(), term()}]) ->
+    ok.
+a_notification_waiting_on_the_connection_does_not_stop_a_statement(_Config) ->
+    {ok, Conn} = minato_conn:connect(opts()),
+    {ok, _Listening, Listening} = minato_query:simple(Conn, ~"LISTEN minato_waiting"),
+    {ok, Other} = minato_conn:connect(opts()),
+    {ok, _Notified, Notified} = minato_query:simple(Other, ~"NOTIFY minato_waiting, 'one'"),
+    ok = minato_conn:close(Notified),
+    ok = timer:sleep(200),
+    {ok, #{rows := Unnamed}, Read} = minato_query:query(Listening, ~"SELECT $1::int4", [1]),
+    {ok, _Again, Again} = minato_query:simple(Read, ~"NOTIFY minato_waiting, 'two'"),
+    {ok, Statement, Prepared} = minato_query:prepare(Again, ~"waiting", ~"SELECT $1::int4"),
+    {ok, #{rows := Named}, Done} = minato_query:execute(Prepared, Statement, [2]),
+    ok = minato_conn:close(Done),
+    ?assertEqual({[{1}], [{2}]}, {Unnamed, Named}).
 
 activity(Backend) ->
     {ok, Observer} = minato_conn:connect(opts()),

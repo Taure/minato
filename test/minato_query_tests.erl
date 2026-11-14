@@ -147,6 +147,21 @@ a_notice_while_preparing_is_passed_over_test() ->
     {_Server, Conn} = connected(Script),
     ?assertMatch({ok, _Statement, _Ready}, minato_query:prepare(Conn, ~"mine", ~"SELECT")).
 
+%% Both can arrive at any time: a `NOTIFY` for a channel the session listens
+%% on, and a setting the server reloaded.
+what_the_server_says_unasked_while_preparing_is_passed_over_test_() ->
+    [
+        {atom_to_list(element(1, Unasked)), fun() ->
+            Script = [[Unasked, parse_complete], [{parameter_description, []}, no_data], ?IDLE],
+            {_Server, Conn} = connected(Script),
+            ?assertMatch({ok, _Statement, _Ready}, minato_query:prepare(Conn, ~"mine", ~"SELECT"))
+        end}
+     || Unasked <- [
+            {notification_response, 77, ~"channel", ~"payload"},
+            {parameter_status, ~"TimeZone", ~"Europe/Stockholm"}
+        ]
+    ].
+
 an_answer_that_does_not_belong_to_a_describe_is_raised_test() ->
     {_Server, Conn} = connected([[bind_complete]]),
     ?assertError(
