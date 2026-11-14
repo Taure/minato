@@ -302,26 +302,86 @@ left_ready({minato_codec, _Report}) -> true;
 left_ready({minato_query, #{reason := parameter_count_mismatch}}) -> true;
 left_ready(_Reason) -> false.
 
+%% A kept statement is only as good as what the server made of the SQL when it
+%% was parsed. Four things say it may have gone stale, and each is answered by
+%% parsing again and running once more, never twice and never in a transaction
+%% the error has already aborted: `0A000`; `26000`; `08P01`, which is a pooler
+%% having parsed the statement afresh on another backend, where it has another
+%% number of columns; and parameters the server would now give other types.
+%% The last shows as a refusal in class 42 from the server, or as a value that
+%% will not encode as the type kept here.
 -spec reused(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 reused(Conn, Sql, Statement, Parameters, Opts) ->
-    case run(Conn, Statement, Parameters, Opts) of
-        {error, {pgsql_error, #{code := ~"0A000"}}, Stale} ->
-            replanned(Stale, Sql, Statement, Parameters, Opts);
-        {error, {pgsql_error, #{code := ~"26000"}} = Reason, Missing} ->
-            deallocated(minato_conn:forget(Missing, Sql), Sql, Parameters, Opts, Reason);
-        Answer ->
-            Answer
+    try encoded(Statement, Parameters, Opts) of
+        Encoded ->
+            case bound(Conn, Statement, Encoded, Opts) of
+                {error, {pgsql_error, #{code := Code}} = Reason, Read} ->
+                    Doubt = doubt(Code, Statement),
+                    Status = minato_conn:transaction_status(Read),
+                    refused(Doubt, Status, Read, Sql, Statement, Parameters, Opts, Reason);
+                Answer ->
+                    Answer
+            end
+    catch
+        error:{minato_codec, _Report} = Reason:Stacktrace ->
+            case minato_conn:transaction_status(Conn) of
+                failed ->
+                    reraise(error, Reason, Stacktrace);
+                _Parses ->
+                    Unchanged = {raise, Reason, Stacktrace},
+                    described_again(Conn, Sql, Statement, Parameters, Opts, Unchanged)
+            end
     end.
 
--spec deallocated(conn(), binary(), [term()], minato_protocol:opts(), error()) ->
+-spec doubt(binary(), statement()) -> none | replanned | deallocated | retyped.
+doubt(~"0A000", _Statement) -> replanned;
+doubt(~"08P01", _Statement) -> replanned;
+doubt(~"26000", _Statement) -> deallocated;
+doubt(_Code, #statement{parameters = []}) -> none;
+doubt(<<"42", _Condition:3/binary>>, _Statement) -> retyped;
+doubt(_Code, _Statement) -> none.
+
+-spec refused(
+    none | replanned | deallocated | retyped,
+    minato_protocol:transaction_status(),
+    conn(),
+    binary(),
+    statement(),
+    [term()],
+    minato_protocol:opts(),
+    error()
+) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-deallocated(Conn, Sql, Parameters, Opts, Reason) ->
+refused(none, _Status, Conn, _Sql, _Statement, _Parameters, _Opts, Reason) ->
+    {error, Reason, Conn};
+refused(replanned, idle, Conn, Sql, Statement, Parameters, Opts, _Reason) ->
+    replanned(Conn, Sql, Statement, Parameters, Opts);
+refused(retyped, idle, Conn, Sql, Statement, Parameters, Opts, Reason) ->
+    described_again(Conn, Sql, Statement, Parameters, Opts, {error, Reason});
+refused(deallocated, Status, Conn, Sql, _Statement, Parameters, Opts, Reason) ->
+    deallocated(minato_conn:forget(Conn, Sql), Sql, Parameters, Opts, Status, Reason);
+refused(_Stale, _Open, Conn, Sql, Statement, _Parameters, _Opts, Reason) ->
+    case close(minato_conn:forget(Conn, Sql), Statement) of
+        {ok, Closed} -> {error, Reason, Closed};
+        Failed -> Failed
+    end.
+
+-spec deallocated(
+    conn(),
+    binary(),
+    [term()],
+    minato_protocol:opts(),
+    minato_protocol:transaction_status(),
+    error()
+) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+deallocated(Conn, Sql, Parameters, Opts, Status, Reason) ->
     ?LOG_INFO(
         #{event => cached_statement_deallocated, sql => statement_for_log(Sql)},
         #{domain => [minato]}
     ),
-    case minato_conn:transaction_status(Conn) of
+    case Status of
         idle -> parsed(Conn, Sql, Parameters, Opts);
         _Open -> {error, Reason, Conn}
     end.
@@ -333,11 +393,35 @@ replanned(Conn, Sql, Statement, Parameters, Opts) ->
         #{event => cached_plan_invalidated, sql => statement_for_log(Sql)},
         #{domain => [minato]}
     ),
-    Forgotten = minato_conn:forget(Conn, Sql),
-    case close(Forgotten, Statement) of
+    case close(minato_conn:forget(Conn, Sql), Statement) of
         {ok, Closed} -> parsed(Closed, Sql, Parameters, Opts);
-        {error, Reason} -> {error, Reason}
+        Failed -> Failed
     end.
+
+%% Asks the server what it makes of the SQL now, unnamed and in one round
+%% trip. Parameters of other types than the kept ones mean the kept statement
+%% is stale and is replaced; the same types mean it was not the statement, and
+%% the call ends the way it was going to.
+-spec described_again(
+    conn(),
+    binary(),
+    statement(),
+    [term()],
+    minato_protocol:opts(),
+    {raise, term(), erlang:raise_stacktrace()} | {error, error()}
+) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+described_again(Conn, Sql, #statement{parameters = Kept} = Statement, Parameters, Opts, Unchanged) ->
+    case prepare(Conn, ?UNNAMED, Sql) of
+        {ok, #statement{parameters = Kept}, Ready} -> unchanged(Unchanged, Ready);
+        {ok, _Retyped, Ready} -> replanned(Ready, Sql, Statement, Parameters, Opts);
+        Failed -> Failed
+    end.
+
+-spec unchanged({raise, term(), erlang:raise_stacktrace()} | {error, error()}, conn()) ->
+    {error, error(), conn()}.
+unchanged({raise, Reason, Stacktrace}, _Conn) -> reraise(error, Reason, Stacktrace);
+unchanged({error, Reason}, Conn) -> {error, Reason, Conn}.
 
 -doc """
 Parse a statement under a name and keep it for the life of the connection.

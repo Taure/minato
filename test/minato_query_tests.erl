@@ -16,6 +16,7 @@ counts the round trips.
 -include_lib("eunit/include/eunit.hrl").
 
 -define(INT4, 23).
+-define(INT8, 20).
 -define(TEXT, 25).
 
 -define(READY, [
@@ -25,6 +26,8 @@ counts the round trips.
     {ready_for_query, idle}
 ]).
 -define(IDLE, [{ready_for_query, idle}]).
+-define(FAILED, [{ready_for_query, failed}]).
+-define(OPEN, [{ready_for_query, transaction}]).
 -define(SQL, ~"SELECT a FROM t WHERE a = $1").
 
 %%----------------------------------------------------------------------
@@ -195,6 +198,225 @@ an_unnamed_statement_with_a_value_that_does_not_fit_is_ended_with_a_sync_test() 
     ?assertMatch({ok, [#{rows := [{~"1"}]}], _Next}, minato_query:simple(Conn, ~"SELECT 1")).
 
 %%----------------------------------------------------------------------
+%% A kept statement the server stops accepting
+%%----------------------------------------------------------------------
+
+a_plan_that_changed_is_parsed_again_and_run_once_more_test() ->
+    Script =
+        kept() ++ stale(~"0A000", idle) ++ [[close_complete], ?IDLE] ++
+            parsed([?INT4], [?INT8]) ++ ran([<<9:64>>]),
+    {Server, Conn} = connected(Script),
+    {Name, Kept} = keep(Server, Conn),
+    {ok, Result, Renewed} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertMatch(#{rows := [{9}]}, Result),
+    ?assertEqual({1, 64}, minato_conn:statements(Renewed)),
+    Asked = asked(Server),
+    ?assertEqual(
+        [bind, execute, sync, close, sync, parse, describe, flush, bind, execute, sync],
+        kinds(Asked)
+    ),
+    ?assert(lists:member({close, statement, Name}, Asked)),
+    [Again] = [Parsed || {parse, Parsed, _Sql, _Oids} <- Asked],
+    ?assertNotEqual(Name, Again).
+
+a_plan_that_changed_twice_is_returned_and_not_run_a_third_time_test() ->
+    Script =
+        kept() ++ stale(~"0A000", idle) ++ [[close_complete], ?IDLE] ++
+            parsed([?INT4], [?INT4]) ++ stale(~"0A000", idle) ++ ran([<<9:32>>]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertMatch(
+        {error, {pgsql_error, #{code := ~"0A000"}}, _Read}, minato_query:cached(Kept, ?SQL, [7])
+    ),
+    ?assertEqual(
+        [bind, execute, sync, close, sync, parse, describe, flush, bind, execute, sync],
+        kinds(asked(Server))
+    ).
+
+%% A pooler that follows named statements parses one again on a backend that
+%% has not seen it. After a column was added that is another statement than
+%% the one described here, and `Bind` is refused over the count.
+a_statement_bound_with_the_wrong_number_of_columns_is_parsed_again_test() ->
+    Script =
+        kept() ++ stale(~"08P01", idle) ++ [[close_complete], ?IDLE] ++
+            parsed([?INT4], [?INT4, ?INT4]) ++ ran([<<9:32>>, null]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertMatch({ok, #{rows := [{9, null}]}, _Read}, minato_query:cached(Kept, ?SQL, [7])),
+    ?assertEqual(
+        [bind, execute, sync, close, sync, parse, describe, flush, bind, execute, sync],
+        kinds(asked(Server))
+    ).
+
+a_plan_that_changed_inside_a_transaction_is_not_run_again_test() ->
+    Script = kept() ++ stale(~"0A000", failed) ++ [[close_complete], ?FAILED],
+    {Server, Conn} = connected(Script),
+    {Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := Code}}, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual(~"0A000", Code),
+    ?assertEqual(failed, minato_conn:transaction_status(Aborted)),
+    ?assertEqual({0, 64}, minato_conn:statements(Aborted)),
+    ?assertEqual(
+        [bind, execute, sync, {close, statement, Name}, sync],
+        [named(Message) || Message <- asked(Server)]
+    ).
+
+a_statement_the_server_no_longer_has_is_parsed_again_test() ->
+    Script = kept() ++ stale(~"26000", idle) ++ parsed([?INT4], [?INT4]) ++ ran([<<9:32>>]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertMatch({ok, #{rows := [{9}]}, _Read}, minato_query:cached(Kept, ?SQL, [7])),
+    ?assertEqual(
+        [bind, execute, sync, parse, describe, flush, bind, execute, sync],
+        kinds(asked(Server))
+    ).
+
+a_statement_gone_inside_a_transaction_is_returned_test() ->
+    Script = kept() ++ stale(~"26000", failed),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := Code}}, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual(~"26000", Code),
+    ?assertEqual({0, 64}, minato_conn:statements(Aborted)),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+an_error_that_is_about_the_data_is_returned_as_it_is_test() ->
+    Script = kept() ++ stale(~"23505", idle),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := Code}}, Read} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual(~"23505", Code),
+    ?assertEqual({1, 64}, minato_conn:statements(Read)),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+%%----------------------------------------------------------------------
+%% A kept statement whose parameters the server would now describe otherwise
+%%----------------------------------------------------------------------
+
+%% The column the parameter is compared with was an integer when the statement
+%% was parsed and is text now. The value is right for what the table is.
+a_value_for_what_the_table_has_become_is_not_refused_test() ->
+    Script =
+        kept() ++ prepared([?TEXT], [?TEXT]) ++ [[close_complete], ?IDLE] ++
+            parsed([?TEXT], [?TEXT]) ++ ran([~"seven"]),
+    {Server, Conn} = connected(Script),
+    {Name, Kept} = keep(Server, Conn),
+    {ok, Result, Renewed} = minato_query:cached(Kept, ?SQL, [~"seven"]),
+    ?assertMatch(#{rows := [{~"seven"}]}, Result),
+    ?assertEqual({1, 64}, minato_conn:statements(Renewed)),
+    Asked = asked(Server),
+    ?assertEqual(
+        [parse, describe, sync, close, sync, parse, describe, flush, bind, execute, sync],
+        kinds(Asked)
+    ),
+    ?assertMatch([{parse, ~"", ?SQL, []}, {describe, statement, ~""}, sync | _Rest], Asked),
+    ?assert(lists:member({close, statement, Name}, Asked)),
+    ?assertMatch({bind, ~"", _New, [binary], [~"seven"], [binary]}, lists:keyfind(bind, 1, Asked)).
+
+a_value_that_fits_neither_is_raised_once_the_server_has_been_asked_test() ->
+    Script = kept() ++ prepared([?INT4], [?INT4]) ++ ran([<<8:32>>]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertError(
+        {minato_codec, #{reason := not_an_integer}}, minato_query:cached(Kept, ?SQL, [~"seven"])
+    ),
+    ?assertEqual([parse, describe, sync], kinds(asked(Server))),
+    ?assertMatch({ok, #{rows := [{8}]}, _Read}, minato_query:cached(Kept, ?SQL, [8])),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+a_value_that_does_not_fit_in_a_failed_transaction_asks_nothing_test() ->
+    Script = kept() ++ stale(~"22012", failed),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    {error, _Divided, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
+    _ = asked(Server),
+    ?assertError({minato_codec, _Report}, minato_query:cached(Aborted, ?SQL, [~"seven"])),
+    ?assertEqual([], asked(Server)).
+
+a_statement_that_no_longer_parses_is_returned_as_the_server_put_it_test() ->
+    Script = kept() ++ [[refused(~"42P01")], [], ?IDLE],
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertMatch(
+        {error, {pgsql_error, #{code := ~"42P01"}}, _Read},
+        minato_query:cached(Kept, ?SQL, [~"seven"])
+    ),
+    ?assertEqual([parse, describe, sync], kinds(asked(Server))).
+
+the_wrong_number_of_values_for_a_kept_statement_asks_nothing_test() ->
+    {Server, Conn} = connected(kept() ++ ran([<<8:32>>])),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertError(
+        {minato_query, #{reason := parameter_count_mismatch, data := {1, 0}}},
+        minato_query:cached(Kept, ?SQL, [])
+    ),
+    ?assertEqual([], asked(Server)),
+    ?assertMatch({ok, #{rows := [{8}]}, _Read}, minato_query:cached(Kept, ?SQL, [8])).
+
+%% The server refuses the statement it kept, over the types it was parsed
+%% with: the operator it was planned around no longer exists for them.
+a_refusal_over_types_that_have_changed_is_parsed_again_test() ->
+    Script =
+        kept() ++ stale(~"42883", idle) ++ prepared([?INT8], [?INT8]) ++
+            [[close_complete], ?IDLE] ++ parsed([?INT8], [?INT8]) ++ ran([<<7:64>>]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertMatch({ok, #{rows := [{7}]}, _Read}, minato_query:cached(Kept, ?SQL, [7])),
+    ?assertEqual(
+        [
+            bind,
+            execute,
+            sync,
+            parse,
+            describe,
+            sync,
+            close,
+            sync,
+            parse,
+            describe,
+            flush,
+            bind,
+            execute,
+            sync
+        ],
+        kinds(asked(Server))
+    ).
+
+a_refusal_over_types_that_have_not_changed_is_returned_test() ->
+    Script = kept() ++ stale(~"42883", idle) ++ prepared([?INT4], [?INT4]) ++ ran([<<8:32>>]),
+    {Server, Conn} = connected(Script),
+    {_Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := Code}}, Read} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual(~"42883", Code),
+    ?assertEqual({1, 64}, minato_conn:statements(Read)),
+    ?assertEqual([bind, execute, sync, parse, describe, sync], kinds(asked(Server))),
+    ?assertMatch({ok, #{rows := [{8}]}, _Next}, minato_query:cached(Read, ?SQL, [8])),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+a_refusal_over_types_inside_a_transaction_drops_the_statement_test() ->
+    Script = kept() ++ stale(~"42883", failed) ++ [[close_complete], ?FAILED],
+    {Server, Conn} = connected(Script),
+    {Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := Code}}, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual(~"42883", Code),
+    ?assertEqual({0, 64}, minato_conn:statements(Aborted)),
+    ?assertEqual(
+        [bind, execute, sync, {close, statement, Name}, sync],
+        [named(Message) || Message <- asked(Server)]
+    ).
+
+a_refused_statement_without_parameters_is_not_asked_about_test() ->
+    Sql = ~"SELECT f()",
+    Script = parsed([], [?INT4]) ++ ran([<<7:32>>]) ++ stale(~"42883", idle),
+    {Server, Conn} = connected(Script),
+    {ok, _First, Kept} = minato_query:cached(Conn, Sql, []),
+    _ = asked(Server),
+    ?assertMatch(
+        {error, {pgsql_error, #{code := ~"42883"}}, _Read}, minato_query:cached(Kept, Sql, [])
+    ),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+%%----------------------------------------------------------------------
 %% A connection with no room to keep a statement
 %%----------------------------------------------------------------------
 
@@ -247,6 +469,10 @@ column(Oid) ->
 ran(Row) ->
     [[bind_complete], [{data_row, Row}, {command_complete, ~"SELECT 1"}], ?IDLE].
 
+%% What it answers them with when it will not run the statement.
+stale(Code, Status) ->
+    [[refused(Code)], [], [{ready_for_query, Status}]].
+
 refused(Code) ->
     {error_response, #{severity => ~"ERROR", code => Code, message => ~"refused"}}.
 
@@ -257,6 +483,15 @@ selected(Row) ->
         {command_complete, ~"SELECT 1"},
         {ready_for_query, idle}
     ].
+
+%% A first use of `?SQL` that keeps it.
+kept() ->
+    parsed([?INT4], [?INT4]) ++ ran([<<1:32>>]).
+
+keep(Server, Conn) ->
+    {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+    [{parse, Name, _Sql, _Oids} | _Rest] = asked(Server),
+    {Name, Kept}.
 
 %%----------------------------------------------------------------------
 %% Helpers
@@ -281,6 +516,9 @@ kinds(Messages) ->
 
 kind(Message) when is_atom(Message) -> Message;
 kind(Message) -> element(1, Message).
+
+named({close, statement, _Name} = Close) -> Close;
+named(Message) -> kind(Message).
 
 round_trips(Messages) ->
     length([Message || Message <- Messages, lists:member(kind(Message), [flush, sync, query])]).

@@ -36,6 +36,8 @@ A group skips when its pooler does not answer.
     a_pool_is_served_and_reset_through_the_pooler/1,
     a_notification_does_not_reach_a_listener_behind_the_pooler/1,
     a_kept_statement_follows_the_client_to_another_backend/1,
+    a_plan_that_changed_is_refused_until_the_pooler_reconnects/1,
+    a_statement_the_pooler_parsed_again_with_another_column_is_parsed_again/1,
     a_kept_statement_is_parsed_and_first_run_on_one_backend/1,
     a_kept_statement_lost_to_another_backend_is_parsed_again/1,
     a_connection_that_keeps_no_statements_is_answered_by_any_backend/1
@@ -53,7 +55,13 @@ all() ->
 -spec groups() -> [{atom(), [term()], [atom()]}].
 groups() ->
     [
-        {prepared, [], either() ++ [a_kept_statement_follows_the_client_to_another_backend]},
+        {prepared, [],
+            either() ++
+                [
+                    a_kept_statement_follows_the_client_to_another_backend,
+                    a_plan_that_changed_is_refused_until_the_pooler_reconnects,
+                    a_statement_the_pooler_parsed_again_with_another_column_is_parsed_again
+                ]},
         {unprepared, [],
             either() ++
                 [
@@ -242,6 +250,51 @@ a_kept_statement_follows_the_client_to_another_backend(Config) ->
     ?assertEqual(First, Moved),
     ok = minato_conn:close(Twice).
 
+%% PgBouncer keeps one statement on a backend for each SQL text, whatever
+%% name a client gave it, so parsing again under another name is answered with
+%% the plan that was refused. Its own remedy is `RECONNECT`, after which the
+%% statement is parsed by a backend that has not seen it.
+-spec a_plan_that_changed_is_refused_until_the_pooler_reconnects([{atom(), term()}]) -> ok.
+a_plan_that_changed_is_refused_until_the_pooler_reconnects(Config) ->
+    ok = reconnected(Config),
+    Sql = distinct(~"SELECT * FROM minato_pooled"),
+    ok = on_the_server(
+        ~"DROP TABLE IF EXISTS minato_pooled; CREATE TABLE minato_pooled (a int4); INSERT INTO minato_pooled VALUES (1)"
+    ),
+    {ok, _First, Once} = minato_query:cached(connected(Config), Sql, []),
+    {ok, _Second, Kept} = minato_query:cached(Once, Sql, []),
+    ok = on_the_server(~"ALTER TABLE minato_pooled ADD b int4"),
+    {error, {pgsql_error, #{code := Code}}, Refused} = minato_query:cached(Kept, Sql, []),
+    ?assertEqual(~"0A000", Code),
+    ?assertEqual({0, 64}, minato_conn:statements(Refused)),
+    ok = reconnected(Config),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Refused, Sql, []),
+    ?assertEqual([{1, null}], Rows),
+    ok = minato_conn:close(Renewed),
+    ok = on_the_server(~"DROP TABLE minato_pooled").
+
+%% After `RECONNECT` the statement minato kept is one the new backend parses
+%% for itself, as the table now is, and the columns asked for in `Bind` are
+%% those of the table as it was: 08P01.
+-spec a_statement_the_pooler_parsed_again_with_another_column_is_parsed_again(
+    [{atom(), term()}]
+) -> ok.
+a_statement_the_pooler_parsed_again_with_another_column_is_parsed_again(Config) ->
+    ok = reconnected(Config),
+    Sql = distinct(~"SELECT * FROM minato_pooled"),
+    ok = on_the_server(
+        ~"DROP TABLE IF EXISTS minato_pooled; CREATE TABLE minato_pooled (a int4, b int4); INSERT INTO minato_pooled VALUES (1, 2)"
+    ),
+    {ok, _First, Kept} = minato_query:cached(connected(Config), Sql, []),
+    ok = on_the_server(~"ALTER TABLE minato_pooled ADD c int4"),
+    ok = reconnected(Config),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Kept, Sql, []),
+    ?assertEqual([{1, 2, null}], Rows),
+    {ok, #{rows := Again}, Reused} = minato_query:cached(Renewed, Sql, []),
+    ?assertEqual([{1, 2, null}], Again),
+    ok = minato_conn:close(Reused),
+    ok = on_the_server(~"DROP TABLE minato_pooled").
+
 %%----------------------------------------------------------------------
 %% max_prepared_statements at zero
 %%----------------------------------------------------------------------
@@ -281,6 +334,43 @@ a_connection_that_keeps_no_statements_is_answered_by_any_backend(Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+%% The pooler tells statements apart by their text, across clients and across
+%% runs of this suite, so a case that changes a table brings its own.
+distinct(Sql) ->
+    Mark = integer_to_binary(erlang:unique_integer([positive])),
+    Started = integer_to_binary(erlang:system_time(microsecond)),
+    <<Sql/binary, " /* ", Started/binary, " ", Mark/binary, " */">>.
+
+on_the_server(Sql) ->
+    {ok, Direct} = minato_conn:connect(server()),
+    {ok, _Results, Read} = minato_query:simple(Direct, Sql),
+    minato_conn:close(Read).
+
+%% `RECONNECT` closes a server connection once it is released, so both are
+%% asked for until neither is one of the two there were.
+reconnected(Config) ->
+    Before = backends(Config),
+    {ok, Admin} = minato_conn:connect((pooler(Config))#{database => ~"pgbouncer"}),
+    {ok, _Result, Told} = minato_query:simple(Admin, ~"RECONNECT"),
+    ok = minato_conn:close(Told),
+    replaced(Config, Before, 50).
+
+replaced(Config, Before, Left) when Left > 0 ->
+    case [Backend || Backend <- backends(Config), lists:member(Backend, Before)] of
+        [] ->
+            ok;
+        _Still ->
+            ok = timer:sleep(100),
+            replaced(Config, Before, Left - 1)
+    end.
+
+backends(Config) ->
+    {First, One} = held(Config),
+    {Second, Other} = held(Config),
+    ok = released(One),
+    ok = released(Other),
+    [First, Second].
 
 both_backends_idle(Config) ->
     {First, One} = held(Config),
