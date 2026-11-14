@@ -63,8 +63,13 @@ is no longer the only bound. It bounds a whole write, so a single value of
 hundreds of megabytes over a slow link needs it raised, or `infinity`. A TLS
 session on the socket transport is written by `ssl`, which takes no deadline of
 its own, so there the socket under the session is shut down when the time runs
-out and the connection is closed whatever `send_timeout_close` says. That one
-needs the `minato` application running, which is where the timer is addressed.
+out and the connection is closed whatever `send_timeout_close` says. With the
+`minato` application running that costs a timer; without it the bound still
+holds, and costs a process per write.
+
+Closing is bounded as well. `minato_conn:close/1` gives `Terminate` the shorter
+of `send_timeout` and one second, writes nothing behind bytes the server has
+not taken, and does not raise.
 
 Anything else is refused at connect rather than silently dropped. If you hit
 that with an option the driver takes, it is a gap in the list rather than a
@@ -233,7 +238,10 @@ queries whose column names you chose.
 ```
 
 `pools` and `listeners` are started by minato's supervisor, so they come up with
-the application rather than after it. `log_statements` puts the SQL in events
+the application rather than after it. `minato_overdue` and `minato_sup` are
+minato's own processes and not names for either: declared, the application does
+not start, and `minato:start_pool/2` answers `{error, {reserved_name, Name}}`.
+`log_statements` puts the SQL in events
 and logs; it is read per call, so it can be turned on while something is
 happening and off again afterwards. `log_values` leaves the values a failure
 quotes in query events and in the error a parameter that would not encode

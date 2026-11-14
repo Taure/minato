@@ -147,6 +147,13 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(txn)* Roll back on a connection an exception left out of step
 - *(conn)* Give a TLS write on the socket transport a deadline
 - *(protocol)* Call a column the description does not have a count mismatch
+- *(query)* Notice a kept statement that has gone stale, and renew it once
+- *(query)* Pass over what the server says unasked while a statement is described
+- *(conn)* A close neither raises nor waits on a peer that stopped reading
+- *(protocol)* Call a null column the description does not have a count mismatch
+- *(codec)* Name the date field that is wrong, and refuse what the wire cannot hold
+- *(codec)* Write an array of more than one dimension
+- *(overdue)* Keep minato's own names, and the write deadline, whatever is started
 
 ### Documentation
 
@@ -154,11 +161,20 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(guides)* Say that a value that would not encode is raised redacted
 - Say which PostgreSQL versions are tested and what crosses a pooler
 - Add a security policy
+- *(codec)* Say what a string in an array of numbers becomes
+- What a kept statement, a close, an array and a date now do for a caller
+
+### Perf
+
+- *(query)* Parse and run a kept statement in one exchange
 
 ### Miscellaneous
 
 - *(types)* State what the new code and its tests hand eqWAlizer and the linter
 - *(mutate)* Point rebar3_mutate at the tests of modules tested under other names
+- *(types)* Ask the transport's own module about a closing socket, and drop a macro nothing uses
+- *(app)* List minato_overdue among the registered names
+- *(deps)* Pin every plugin to a version and resolve the lock again from nothing
 
 ### Testing
 
@@ -174,6 +190,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - Cover the edges mutation testing found nothing watching
 - *(traces)* Find the guide from where rebar3 runs, not from the build directory
 - Bounds, refused text and row lengths that mutation testing found unasserted
+- *(bench)* Time the first use of a kept statement
+- *(pool)* End only the backends the pool suite opened
+- What minato and minato_listener do, against a scripted server
+- Stop waiting on a scripted server that has already answered
+- *(codec)* What minato_codec decides for itself, which mutation testing found unwatched
 
 ## [1.1.6] - 2026-11-06
 
