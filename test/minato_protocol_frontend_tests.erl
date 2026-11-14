@@ -37,6 +37,29 @@ startup_carries_every_parameter_test() ->
         minato_frontend_reader:read(enc({startup, Parameters}))
     ).
 
+a_startup_parameter_cannot_end_early_test_() ->
+    Smuggled = <<"minato", 0, "options", 0, "-c session_preload_libraries=x">>,
+    [
+        ?_assertError(
+            {minato_protocol, #{
+                message := startup, reason := null_byte_in_parameter, data := ~"user"
+            }},
+            minato_protocol:encode({startup, #{~"user" => Smuggled}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := null_byte_in_parameter, data := ~"database"}},
+            minato_protocol:encode({startup, #{~"user" => ~"minato", ~"database" => <<0>>}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := null_byte_in_parameter}},
+            minato_protocol:encode({startup, #{<<"us", 0, "er">> => ~"minato"}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := empty_parameter_name}},
+            minato_protocol:encode({startup, #{~"" => ~"minato"}})
+        )
+    ].
+
 ssl_request_test() ->
     ?assertEqual(<<0, 0, 0, 8, 4, 210, 22, 47>>, enc(ssl_request)).
 

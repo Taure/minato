@@ -41,6 +41,16 @@ So nothing is ever written modulo anything. A message longer than
 `too_many_values`. Both are raised while encoding, so nothing of the message
 has been sent. A parameter is part of its `Bind`, so the same bound covers it.
 
+## A string cannot end early
+
+Strings are null terminated, so a null byte inside one ends it where the caller
+did not mean it to. In a `StartupMessage` that is worse than a truncated name:
+the bytes after it are read as the next parameter, so a database name taken
+from outside could carry an `options` of its own. A startup parameter whose name
+or value holds a null byte, and a name that is empty, raise
+`error({minato_protocol, #{message := startup}})` naming the parameter and not
+its value.
+
 ## What is not enforced
 
 An encoder writes the message it is given. It does not check that
@@ -116,7 +126,20 @@ message_length(Type, Payload) ->
 
 -spec startup_parameters(#{binary() => binary()}) -> iodata().
 startup_parameters(Parameters) ->
-    [[Name, 0, Value, 0] || Name := Value <- Parameters].
+    [[parameter_name(Name), 0, parameter_value(Name, Value), 0] || Name := Value <- Parameters].
+
+-spec parameter_name(binary()) -> binary().
+parameter_name(~"") ->
+    minato_protocol:bad(startup, empty_parameter_name, ~"");
+parameter_name(Name) ->
+    parameter_value(Name, Name).
+
+-spec parameter_value(binary(), binary()) -> binary().
+parameter_value(Name, Value) ->
+    case binary:match(Value, <<0>>) of
+        nomatch -> Value;
+        _Found -> minato_protocol:bad(startup, null_byte_in_parameter, Name)
+    end.
 
 -spec count([term()]) -> binary().
 count(Values) ->

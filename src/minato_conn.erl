@@ -207,6 +207,11 @@ password given as a string, or returned as one by the fun, is converted to a
 binary, and one that is not valid text raises
 `{minato_conn, #{reason := not_text}}` without the password.
 
+`user`, `database` and everything in `parameters` go into the `StartupMessage`
+as null terminated strings, so none of them may hold a null byte: `connect/1`
+raises `{minato_conn, #{reason := null_byte_in_parameter}}` naming the parameter
+before it opens a socket.
+
 `parameters` are added to the `StartupMessage` and are how `application_name`
 gets set. Two are sent unless they are given here: `client_encoding` is `UTF8`,
 because the codecs decode text as UTF-8 and a server sending LATIN1 would put
@@ -346,6 +351,7 @@ connected({error, Reason}) ->
 
 -spec opening(opts()) -> {ok, conn()} | {error, error()}.
 opening(Opts) ->
+    ok = terminator_free(startup_parameters(maps:get(user, Opts), Opts)),
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
@@ -1169,6 +1175,22 @@ startup_parameters(User, Opts) ->
     Defaults = #{~"client_encoding" => ~"UTF8", ~"DateStyle" => ~"ISO, MDY"},
     Base = #{~"user" => User, ~"database" => maps:get(database, Opts, User)},
     maps:merge(maps:merge(Defaults, Given), Base).
+
+%% A null byte ends a string in the startup packet, so one inside a value makes
+%% whatever follows it a parameter of its own. Checked before the socket is
+%% opened, so that nothing is connected only to be given up on, and reported by
+%% name: the value is not in the reason.
+-spec terminator_free(#{binary() => binary()}) -> ok.
+terminator_free(Parameters) ->
+    _ = [
+        bad(startup, null_byte_in_parameter, Name)
+     || Name := Value <- Parameters, holds_null(Name) orelse holds_null(Value)
+    ],
+    ok.
+
+-spec holds_null(term()) -> boolean().
+holds_null(Text) when is_binary(Text) -> binary:match(Text, <<0>>) =/= nomatch;
+holds_null(_NotText) -> false.
 
 -spec credentials(conn(), binary(), opts()) -> minato_auth:credentials().
 credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->

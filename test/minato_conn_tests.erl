@@ -72,6 +72,33 @@ the_parameters_and_the_key_the_server_sent_are_kept_test() ->
     ok = minato_conn:close(Conn),
     minato_backend_server:stop(Server).
 
+a_null_byte_in_a_startup_parameter_is_refused_before_connecting_test_() ->
+    Smuggled = <<"minato_test", 0, "options", 0, "-c statement_timeout=1">>,
+    [
+        {Label, fun() ->
+            Server = minato_backend_server:start([?READY]),
+            Port = minato_backend_server:port(Server),
+            ?assertError(
+                {minato_conn, #{reason := null_byte_in_parameter, data := Name}},
+                minato_conn:connect(opts(Port, Opts))
+            ),
+            ?assertEqual(
+                {error, {minato_conn, null_byte_in_parameter}},
+                minato_conn:attempt(opts(Port, Opts))
+            ),
+            ?assertEqual([], minato_backend_server:received(Server)),
+            minato_backend_server:stop(Server)
+        end}
+     || {Label, Name, Opts} <- [
+            {"database", ~"database", #{database => Smuggled}},
+            {"user", ~"user", #{user => <<"mina", 0, "to">>, database => ~"minato_test"}},
+            {"options", ~"options", #{parameters => #{~"options" => <<"-c a=b", 0>>}}},
+            {"a name", <<"application", 0, "name">>, #{
+                parameters => #{<<"application", 0, "name">> => ~"tests"}
+            }}
+        ]
+    ].
+
 a_notice_during_startup_is_read_past_test() ->
     Script = [
         [
