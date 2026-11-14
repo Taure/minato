@@ -389,3 +389,27 @@ columns_of(Columns) ->
          || Column <- Columns
         ]
     ]).
+
+%%----------------------------------------------------------------------
+%% Where the retention decision turns
+%%----------------------------------------------------------------------
+
+%% A message of exactly this many bytes, so a buffer can be built to a size.
+sized(Size) ->
+    <<$S, (Size - 1):32, "a", 0, (binary:copy(~"b", Size - 8))/binary, 0>>.
+
+%% The start of a row that has not all arrived, of exactly this many bytes.
+arriving(Size) ->
+    <<$D, 1000:32, (binary:copy(~"c", Size - 5))/binary>>.
+
+retained(Buffer) ->
+    {[_Message], Rest} = minato_protocol:frame(Buffer),
+    binary:referenced_byte_size(Rest).
+
+%% A remainder of 64 bytes or fewer is a binary of its own whatever the framer
+%% decides, so the decision only shows on one that is larger.
+a_remainder_is_copied_when_it_is_a_quarter_of_the_buffer_or_less_test_() ->
+    [
+        ?_assertEqual(100, retained(<<(sized(300))/binary, (arriving(100))/binary>>)),
+        ?_assertEqual(400, retained(<<(sized(299))/binary, (arriving(101))/binary>>))
+    ].

@@ -182,6 +182,25 @@ a_preferred_binding_still_answers_the_other_methods_test_() ->
         )
     ].
 
+a_preferred_binding_is_used_when_the_server_offers_it_test() ->
+    Step = minato_auth:step(
+        {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}, preferring()
+    ),
+    ?assertMatch({send, {sasl_initial_response, ~"SCRAM-SHA-256-PLUS", _Data}, _State}, Step),
+    ?assertMatch(<<"p=tls-server-end-point,,", _/binary>>, client_first(Step)).
+
+a_preferred_binding_the_server_does_not_offer_is_flagged_test() ->
+    Step = minato_auth:step({authentication_sasl, [~"SCRAM-SHA-256"]}, preferring()),
+    ?assertMatch(<<"y,,", _/binary>>, client_first(Step)).
+
+preferring() ->
+    minato_auth:init(#{
+        user => ?USER,
+        password => ?PASSWORD,
+        channel_binding => prefer,
+        channel_binding_data => ~"hash"
+    }).
+
 required(undefined) ->
     minato_auth:init(#{user => ?USER, password => ?PASSWORD, channel_binding => require});
 required(Hash) ->

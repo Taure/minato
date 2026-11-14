@@ -623,3 +623,80 @@ columns_of(Columns) ->
          || Column <- Columns
         ]
     ]).
+
+%%----------------------------------------------------------------------
+%% Messages cut short, and messages with something after their end
+%%----------------------------------------------------------------------
+
+authentication_rejects_a_payload_after_a_method_that_has_none_test() ->
+    ?assertError({minato_protocol, #{reason := malformed}}, dec($R, <<3:32, 1>>)).
+
+notification_response_rejects_trailing_bytes_test() ->
+    ?assertError(
+        {minato_protocol, #{message := notification_response, reason := trailing_bytes}},
+        dec($A, <<42:32, "chan", 0, "hello", 0, "extra">>)
+    ).
+
+notification_response_rejects_a_payload_too_short_for_a_process_id_test() ->
+    ?assertError(
+        {minato_protocol, #{message := notification_response, reason := malformed}},
+        dec($A, <<0, 0, 42>>)
+    ).
+
+row_description_with_no_fields_test() ->
+    ?assertEqual({row_description, []}, dec($T, <<0:16>>)).
+
+row_description_rejects_a_payload_too_short_for_a_count_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<0>>}},
+        dec($T, <<0>>)
+    ).
+
+row_description_rejects_a_field_cut_short_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<1, 2>>}},
+        dec($T, <<1:16, "id", 0, 1, 2>>)
+    ).
+
+row_description_rejects_bytes_after_its_last_field_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<1>>}},
+        dec($T, <<0:16, 1>>)
+    ).
+
+parameter_description_rejects_a_payload_too_short_for_a_count_test() ->
+    ?assertError(
+        {minato_protocol, #{message := parameter_description, reason := malformed}},
+        dec($t, <<0>>)
+    ).
+
+parameter_description_rejects_bytes_after_its_last_parameter_test() ->
+    ?assertError(
+        {minato_protocol, #{
+            message := parameter_description, reason := malformed, data := <<23:32>>
+        }},
+        dec($t, <<0:16, 23:32>>)
+    ).
+
+a_negative_count_is_not_read_as_a_number_test() ->
+    ?assertEqual({command_complete, {select, ~"-1"}}, dec($C, <<"SELECT -1", 0>>)).
+
+a_word_outside_the_vocabulary_is_kept_up_to_a_length_test_() ->
+    Word = fun(Size) -> binary:copy(~"W", Size) end,
+    [
+        ?_assertEqual(
+            {command_complete, {Word(255), undefined}}, dec($C, <<(Word(255))/binary, 0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{
+                message := command_complete, reason := tag_word_too_long, data := 256
+            }},
+            dec($C, <<(Word(256))/binary, 0>>)
+        )
+    ].
+
+a_word_outside_the_vocabulary_has_to_be_text_test() ->
+    ?assertError(
+        {minato_protocol, #{message := command_complete, reason := tag_word_not_utf8}},
+        dec($C, <<"FROB", 255, 0>>)
+    ).

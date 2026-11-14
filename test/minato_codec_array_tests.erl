@@ -287,3 +287,72 @@ header(NDim, Sizes, Elements) ->
 
 wire(null) -> null;
 wire(IoData) -> iolist_to_binary(IoData).
+
+%%----------------------------------------------------------------------
+%% Edges the cases above leave between them
+%%----------------------------------------------------------------------
+
+a_header_cut_short_is_not_an_empty_array_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := {malformed, binary}}},
+            minato_codec:decode(?INT4_ARRAY, <<0:32/signed, 0:32>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := {malformed, binary}}},
+            minato_codec:decode(?INT4_ARRAY, <<7:32/signed, 0:32>>, binary)
+        )
+    ].
+
+a_dimension_of_minus_one_is_refused_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := negative_dimension, value := -1}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [-1], ~""), binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := truncated_dimensions}},
+            minato_codec:decode(?INT4_ARRAY, <<1:32/signed, 0:32, 23:32, -1:32/signed>>, binary)
+        )
+    ].
+
+elements_are_counted_against_the_bytes_before_any_is_read_test_() ->
+    Refused = fun(Elements) ->
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements, value := Elements}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [3], Elements), binary)
+        )
+    end,
+    [
+        Refused(<<-1:32/signed, -1:32/signed>>),
+        Refused(<<-1:32/signed, -1:32/signed, 0, 0, 0>>)
+    ].
+
+an_element_longer_than_what_is_left_is_refused_test() ->
+    ?assertError(
+        {minato_codec, #{reason := truncated_elements}},
+        minato_codec:decode(?INT4_ARRAY, header(1, [1], <<8:32/signed, 1, 2>>), binary)
+    ).
+
+an_array_of_a_type_that_has_no_elements_is_refused_test() ->
+    ?assertError(
+        {minato_codec, #{reason := not_an_array_type}},
+        minato_codec_array:decode(23, header(1, [1], <<4:32/signed, 1:32/signed>>), binary, #{})
+    ).
+
+rows_of_one_keep_their_shape_test_() ->
+    Two = <<4:32/signed, 1:32/signed, 4:32/signed, 2:32/signed>>,
+    [
+        ?_assertEqual(
+            [[1], [2]], minato_codec:decode(?INT4_ARRAY, header(2, [2, 1], Two), binary)
+        ),
+        ?_assertEqual(
+            [[[1]], [[2]]], minato_codec:decode(?INT4_ARRAY, header(3, [2, 1, 1], Two), binary)
+        )
+    ].
+
+only_the_whole_word_is_null_test() ->
+    ?assertEqual(
+        [~"nulx", ~"nuxx", ~"nxxx", ~"xull", ~"nxll"],
+        minato_codec:decode(?TEXT_ARRAY, ~"{nulx,nuxx,nxxx,xull,nxll}", text)
+    ).

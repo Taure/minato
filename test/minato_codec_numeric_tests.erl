@@ -280,3 +280,68 @@ a_float_form_keeps_the_specials_test() ->
 decoded(Value, Opts) ->
     Wire = iolist_to_binary(minato_codec_numeric:encode(numeric, Value, binary, #{})),
     minato_codec_numeric:decode(numeric, Wire, binary, Opts).
+
+%%----------------------------------------------------------------------
+%% Edges the cases above leave between them
+%%----------------------------------------------------------------------
+
+a_digit_out_of_range_is_named_wherever_it_stands_test_() ->
+    Refused = fun(Wire) ->
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range, value := 10000}},
+            minato_codec:decode(?NUMERIC, Wire, binary)
+        )
+    end,
+    [
+        {"a later group of the whole part",
+            Refused(<<2:16, 1:16/signed, 0:16, 0:16, 1:16, 10000:16>>)},
+        {"a whole group of the fraction",
+            Refused(<<2:16, 0:16/signed, 0:16, 4:16, 1:16, 10000:16>>)},
+        {"the last, partly shown group of the fraction",
+            Refused(<<1:16, -1:16/signed, 0:16, 2:16, 10000:16>>)}
+    ].
+
+the_largest_digit_is_read_wherever_it_stands_test_() ->
+    [
+        ?_assertEqual(
+            ~"19999",
+            minato_codec:decode(?NUMERIC, <<2:16, 1:16/signed, 0:16, 0:16, 1:16, 9999:16>>, binary)
+        ),
+        ?_assertEqual(
+            ~"0.9999",
+            minato_codec:decode(?NUMERIC, <<1:16, -1:16/signed, 0:16, 4:16, 9999:16>>, binary)
+        ),
+        ?_assertEqual(
+            ~"0.99",
+            minato_codec:decode(?NUMERIC, <<1:16, -1:16/signed, 0:16, 2:16, 9999:16>>, binary)
+        )
+    ].
+
+a_negative_sign_on_no_digits_is_zero_test() ->
+    ?assertEqual(
+        ~"0", minato_codec:decode(?NUMERIC, <<0:16, 0:16/signed, 16#4000:16, 0:16>>, binary)
+    ).
+
+an_exponent_of_zero_changes_nothing_test_() ->
+    [
+        {binary_to_list(Written), [
+            ?_assertEqual(enc(~"1", binary), enc(Written, binary)),
+            ?_assertEqual(~"1", roundtrip(Written, binary))
+        ]}
+     || Written <- [~"1e0", ~"1e00", ~"1E-0", ~"1e+0"]
+    ].
+
+zero_to_any_power_is_zero_test_() ->
+    [
+        {binary_to_list(Written), [
+            ?_assertEqual(enc(~"0", binary), enc(Written, binary)),
+            ?_assertEqual(~"0", roundtrip(Written, binary))
+        ]}
+     || Written <- [~"0e1", ~"0e5", ~"00e2"]
+    ].
+
+leading_zeros_are_not_digits_test_() ->
+    [
+        {binary_to_list(Written), ?_assertEqual(Plain, roundtrip(Written, binary))}
+     || {Written, Plain} <- [{~"007", ~"7"}, {~"000", ~"0"}, {~"00.5", ~"0.5"}, {~"0010e1", ~"100"}]
+    ].

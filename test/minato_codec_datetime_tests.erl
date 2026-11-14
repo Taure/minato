@@ -311,3 +311,193 @@ roundtrip_text(Oid, Value) ->
 
 wire(null) -> null;
 wire(IoData) -> iolist_to_binary(IoData).
+
+%%----------------------------------------------------------------------
+%% The calendar, a day at a time
+%%----------------------------------------------------------------------
+
+every_day_of_a_year_around_each_rule_matches_otp_test() ->
+    Years = [
+        1,
+        2,
+        3,
+        4,
+        5,
+        99,
+        100,
+        101,
+        399,
+        400,
+        401,
+        1582,
+        1899,
+        1900,
+        1901,
+        1969,
+        1970,
+        1999,
+        2000,
+        2001,
+        2099,
+        2100,
+        2101,
+        2399,
+        2400,
+        2401,
+        9999
+    ],
+    Disagreed = [
+        calendar:gregorian_days_to_date(Day)
+     || Year <- Years,
+        Day <- lists:seq(
+            calendar:date_to_gregorian_days(Year, 1, 1),
+            calendar:date_to_gregorian_days(Year, 12, 31)
+        ),
+        not agrees_with_otp(Day)
+    ],
+    ?assertEqual([], Disagreed).
+
+agrees_with_otp(Gregorian) ->
+    {Year, Month, Day} = Date = calendar:gregorian_days_to_date(Gregorian),
+    Unix = Gregorian - calendar:date_to_gregorian_days(1970, 1, 1),
+    minato_codec_datetime:civil_from_days(Unix) =:= Date andalso
+        minato_codec_datetime:days_from_civil(Year, Month, Day) =:= Unix.
+
+%% OTP's calendar stops at year zero. Before it, each day has to be the one
+%% after the day before, in both directions, across two 400 year eras.
+every_day_before_year_one_follows_the_one_before_test() ->
+    First = minato_codec_datetime:days_from_civil(-801, 1, 1),
+    Last = minato_codec_datetime:days_from_civil(1, 1, 1),
+    ?assertEqual({-801, 1, 1}, minato_codec_datetime:civil_from_days(First)),
+    ?assertEqual(ok, walked(First, Last, {-801, 1, 1})).
+
+walked(Last, Last, _Date) ->
+    ok;
+walked(Day, Last, Date) ->
+    {Year, Month, DayOfMonth} = Next = following(Date),
+    Read = minato_codec_datetime:civil_from_days(Day + 1),
+    Written = minato_codec_datetime:days_from_civil(Year, Month, DayOfMonth),
+    case Read =:= Next andalso Written =:= Day + 1 of
+        true -> walked(Day + 1, Last, Next);
+        false -> {after_day, Date, Read, Written}
+    end.
+
+following({Year, 12, 31}) ->
+    {Year + 1, 1, 1};
+following({Year, Month, Day}) ->
+    case Day =:= last_day(Year, Month) of
+        true -> {Year, Month + 1, 1};
+        false -> {Year, Month, Day + 1}
+    end.
+
+last_day(Year, 2) ->
+    case Year rem 4 =:= 0 andalso (Year rem 100 =/= 0 orelse Year rem 400 =:= 0) of
+        true -> 29;
+        false -> 28
+    end;
+last_day(_Year, Month) when Month =:= 4; Month =:= 6; Month =:= 9; Month =:= 11 -> 30;
+last_day(_Year, _Month) ->
+    31.
+
+each_month_ends_where_it_ends_test_() ->
+    [
+        {integer_to_list(Year) ++ "-" ++ integer_to_list(Month), [
+            ?_assertMatch(<<_:32>>, enc(1082, {Year, Month, last_day(Year, Month)}, binary)),
+            ?_assertError(
+                {minato_codec, #{reason := day_out_of_range}},
+                enc(1082, {Year, Month, last_day(Year, Month) + 1}, binary)
+            )
+        ]}
+     || Year <- [1900, 2000, 2023, 2024], Month <- lists:seq(1, 12)
+    ].
+
+a_date_outside_the_calendar_is_refused_test_() ->
+    [
+        ?_assertError({minato_codec, #{reason := month_out_of_range}}, enc(1082, Date, binary))
+     || Date <- [{2024, 0, 1}, {2024, 13, 1}, {2024, 1, 0}]
+    ].
+
+the_last_second_of_a_minute_may_be_a_leap_second_test_() ->
+    [
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1083, {23, 59, 60}, binary)),
+        ?_assertEqual(<<86400000000:64/signed>>, enc(1083, {24, 0, 0}, binary)),
+        ?_assertEqual(<<86399000000:64/signed>>, enc(1083, {23, 59, 59}, binary)),
+        ?_assertError(
+            {minato_codec, #{reason := time_out_of_range}}, enc(1083, {24, 0, 1}, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := time_out_of_range}}, enc(1083, {24, 1, 0}, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := time_out_of_range}}, enc(1083, {23, 60, 0}, binary)
+        )
+    ].
+
+%%----------------------------------------------------------------------
+%% Before the epoch, and below the second
+%%----------------------------------------------------------------------
+
+a_moment_before_1970_rounds_towards_the_past_test_() ->
+    Read = fun(UnixMicros) ->
+        minato_codec:decode(1114, <<(UnixMicros - ?PG_EPOCH_MICROS):64/signed>>, binary)
+    end,
+    [
+        ?_assertEqual({{1969, 12, 31}, {23, 59, 59}}, Read(-1)),
+        ?_assertEqual({{1969, 12, 31}, {23, 59, 59}}, Read(-1000000)),
+        ?_assertEqual({{1969, 12, 31}, {23, 59, 58}}, Read(-1000001)),
+        ?_assertEqual({{1969, 12, 31}, {0, 0, 0}}, Read(-86400000000)),
+        ?_assertEqual({{1969, 12, 30}, {23, 59, 59}}, Read(-86400000001)),
+        ?_assertEqual({{1970, 1, 1}, {1, 2, 3}}, Read(3723999999))
+    ].
+
+a_time_is_read_down_to_the_second_test_() ->
+    [
+        ?_assertEqual({1, 2, 3}, minato_codec:decode(1083, <<3723999999:64/signed>>, binary)),
+        ?_assertEqual({23, 59, 59}, minato_codec:decode(1083, <<86399000000:64/signed>>, binary))
+    ].
+
+a_fraction_is_written_without_trailing_zeros_test_() ->
+    [
+        ?_assertEqual(~"00:00:00.5", enc(1083, 500000, text)),
+        ?_assertEqual(~"00:00:00.000001", enc(1083, 1, text)),
+        ?_assertEqual(~"01:02:03.04", enc(1083, 3723040000, text)),
+        ?_assertEqual(~"01:02:03", enc(1083, 3723000000, text)),
+        ?_assertEqual(~"10:20:30.1002", enc(1083, 37230100200, text)),
+        ?_assertEqual(~"2000-01-01 00:00:00.25", enc(1114, ?PG_EPOCH_MICROS + 250000, text)),
+        ?_assertEqual(~"1969-12-31 23:59:59.999999", enc(1114, -1, text)),
+        ?_assertEqual(~"1969-12-30 00:00:00", enc(1114, -172800000000, text))
+    ].
+
+a_fraction_is_read_to_the_microsecond_test_() ->
+    Read = fun(Text) ->
+        minato_codec:decode(1083, Text, text, #{datetime_format => microseconds})
+    end,
+    [
+        ?_assertEqual(500000, Read(~"00:00:00.5")),
+        ?_assertEqual(1, Read(~"00:00:00.000001")),
+        ?_assertEqual(123456, Read(~"00:00:00.123456")),
+        ?_assertEqual(120000, Read(~"00:00:00.12")),
+        ?_assertEqual(3723004000, Read(~"01:02:03.004")),
+        ?_assertEqual(86399000000, Read(~"23:59:59")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"00:00:00.1234567")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"00:00:00.")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"00:00")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"aa:00:00"))
+    ].
+
+an_offset_is_taken_off_to_the_second_test_() ->
+    Read = fun(Offset) ->
+        Text = <<"2024-01-15 13:45:30", Offset/binary>>,
+        minato_codec:decode(1184, Text, text, #{datetime_format => microseconds})
+    end,
+    Utc = Read(~"+00"),
+    [
+        ?_assertEqual(Utc, Read(~"")),
+        ?_assertEqual(Utc - 3600000000, Read(~"+01")),
+        ?_assertEqual(Utc - 5400000000, Read(~"+01:30")),
+        ?_assertEqual(Utc - 3723000000, Read(~"+01:02:03")),
+        ?_assertEqual(Utc + 3723000000, Read(~"-01:02:03")),
+        ?_assertError(
+            {minato_codec, #{reason := malformed_offset}}, Read(~"+01:02:03:04")
+        )
+    ].
