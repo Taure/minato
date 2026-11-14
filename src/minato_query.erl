@@ -164,7 +164,7 @@ be found, so anything with a value in it belongs in `query/3`.
 simple(Conn, Sql, Opts) ->
     Bounded = bounded(Conn, Opts),
     Decoding = decoding(Opts),
-    observed(simple, Sql, fun() ->
+    observed(Bounded, simple, Sql, fun() ->
         case minato_conn:send(Bounded, {query, Sql}) of
             ok -> collect(Bounded, Decoding, minato_protocol:decoder([], Decoding));
             {error, Reason} -> {error, Reason}
@@ -193,7 +193,7 @@ That is the price of not guessing them, and `prepare/3` pays it once.
 query(Conn, Sql, Parameters, Opts) ->
     Bounded = bounded(Conn, Opts),
     Decoding = decoding(Opts),
-    observed(unnamed, Sql, fun() ->
+    observed(Bounded, unnamed, Sql, fun() ->
         case describe(Bounded, ?UNNAMED, Sql) of
             {ok, Statement, Described} -> run(Described, Statement, Parameters, Decoding);
             Failed -> Failed
@@ -239,7 +239,7 @@ cached(Conn, Sql, Parameters, Opts) ->
     Key = iolist_to_binary(Sql),
     Bounded = bounded(Conn, Opts),
     Decoding = decoding(Opts),
-    observed(cached, Key, fun() ->
+    observed(Bounded, cached, Key, fun() ->
         case minato_conn:recall(Bounded, Key) of
             undefined -> parsed(Bounded, Key, Parameters, Decoding);
             Statement -> reused(Bounded, Key, Statement, Parameters, Decoding)
@@ -342,7 +342,7 @@ a heavy price for what is usually a typo.
 execute(Conn, Statement, Parameters, Opts) ->
     Bounded = bounded(Conn, Opts),
     Decoding = decoding(Opts),
-    observed(prepared, name(Statement), fun() ->
+    observed(Bounded, prepared, name(Statement), fun() ->
         run(Bounded, Statement, Parameters, Decoding)
     end).
 
@@ -385,25 +385,36 @@ close(Conn, #statement{name = Name}) ->
 %% Instrumentation
 %%----------------------------------------------------------------------
 
--spec observed(atom(), iodata(), fun(() -> Answer)) -> Answer.
-observed(Path, Sql, Fun) ->
-    Metadata = maps:merge(#{path => Path}, minato_telemetry:statements(Sql)),
-    minato_telemetry:span([minato, query], Metadata, fun() -> reported(cleared(Fun())) end).
+-spec observed(conn(), atom(), iodata(), fun(() -> Answer)) -> Answer.
+observed(Conn, Path, Sql, Fun) ->
+    Origin = (minato_conn:origin(Conn))#{path => Path},
+    Metadata = maps:merge(Origin, minato_telemetry:statements(Sql)),
+    minato_telemetry:span([minato, query], Metadata, fun() ->
+        try
+            reported(cleared(Fun()), Origin)
+        catch
+            Class:Reason:Stacktrace ->
+                erlang:raise(
+                    Class, minato_telemetry:reason(Reason), minato_telemetry:frames(Stacktrace)
+                )
+        end
+    end).
 
 -spec cleared(dynamic()) -> dynamic().
 cleared({ok, Answer, Conn}) -> {ok, Answer, minato_conn:deadline(Conn, infinity)};
 cleared({error, Reason, Conn}) -> {error, Reason, minato_conn:deadline(Conn, infinity)};
 cleared(Answer) -> Answer.
 
--spec reported(dynamic()) -> {dynamic(), minato_telemetry:metadata()}.
-reported({ok, #{command := Command, num_rows := Rows}, _Conn} = Answer) ->
-    {Answer, #{outcome => ok, command => Command, num_rows => Rows}};
-reported({ok, Results, _Conn} = Answer) when is_list(Results) ->
-    {Answer, #{outcome => ok, statements => length(Results)}};
-reported({error, Reason, _Conn} = Answer) ->
-    {Answer, #{outcome => error, reason => Reason}};
-reported({error, Reason} = Answer) ->
-    {Answer, #{outcome => error, reason => Reason}}.
+-spec reported(dynamic(), minato_telemetry:metadata()) ->
+    {dynamic(), minato_telemetry:metadata()}.
+reported({ok, #{command := Command, num_rows := Rows}, _Conn} = Answer, Origin) ->
+    {Answer, Origin#{outcome => ok, command => Command, num_rows => Rows}};
+reported({ok, Results, _Conn} = Answer, Origin) when is_list(Results) ->
+    {Answer, Origin#{outcome => ok, statements => length(Results)}};
+reported({error, Reason, _Conn} = Answer, Origin) ->
+    {Answer, Origin#{outcome => error, reason => minato_telemetry:reason(Reason)}};
+reported({error, Reason} = Answer, Origin) ->
+    {Answer, Origin#{outcome => error, reason => minato_telemetry:reason(Reason)}}.
 
 %%----------------------------------------------------------------------
 %% The extended protocol

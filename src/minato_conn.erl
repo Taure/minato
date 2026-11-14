@@ -122,7 +122,9 @@ the server issued is the whole of the authorisation.
     backend_key/1,
     timeout/1,
     with_timeout/2,
-    deadline/2
+    deadline/2,
+    origin/1,
+    pooled/2
 ]).
 
 -define(DEFAULT_HOST, "localhost").
@@ -168,6 +170,7 @@ the server issued is the whole of the authorisation.
     limit :: non_neg_integer(),
     send_timeout = infinity :: timeout(),
     send_timeout_close = false :: boolean(),
+    origin :: origin(),
     opts :: opts()
 }).
 
@@ -285,6 +288,14 @@ An authentication method the server may ask for.
 -doc "An open connection. Owned by the process that called `connect/1`.".
 -opaque conn() :: #conn{}.
 
+-doc "Where a connection goes: what it was asked to reach, and the pool holding it.".
+-type origin() :: #{
+    host := inet:socket_address() | inet:hostname(),
+    port := inet:port_number(),
+    database := binary(),
+    pool => atom()
+}.
+
 -doc "What `CancelRequest` needs: the process id and secret the server issued.".
 -type key() :: {Pid :: integer(), Secret :: integer()}.
 
@@ -301,7 +312,7 @@ An authentication method the server may ask for.
 -doc "The map carried by an `error({minato_conn, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
 
--export_type([conn/0, opts/0, method/0, key/0, error/0, report/0]).
+-export_type([conn/0, opts/0, method/0, key/0, error/0, report/0, origin/0]).
 
 -type transport() :: plain() | ssl.
 -type plain() :: gen_tcp | minato_socket.
@@ -360,7 +371,7 @@ attempt(Opts) ->
 connected({ok, Conn}) ->
     {{ok, Conn}, #{outcome => ok}};
 connected({error, Reason}) ->
-    {{error, Reason}, #{outcome => error, reason => Reason}}.
+    {{error, Reason}, #{outcome => error, reason => minato_telemetry:reason(Reason)}}.
 
 -spec opening(opts()) -> {ok, conn()} | {error, error()}.
 opening(Opts) ->
@@ -1030,6 +1041,22 @@ age(#conn{opened = Opened}) ->
     erlang:monotonic_time(millisecond) - Opened.
 
 -doc """
+Where a connection goes, for the metadata of an event: `host`, `port` and
+`database` as they were asked for, and `pool` when a pool holds it.
+
+Built once when the connection opens, so a query event that carries it pays for
+one small map and not for reading the options again.
+""".
+-spec origin(conn()) -> origin().
+origin(#conn{origin = Origin}) ->
+    Origin.
+
+-doc false.
+-spec pooled(conn(), atom()) -> conn().
+pooled(#conn{origin = Origin} = Conn, Pool) ->
+    Conn#conn{origin = Origin#{pool => Pool}}.
+
+-doc """
 Give the statement that runs next this long, then cancel it.
 
 A read timeout on its own can only end the wait, not the statement: the server
@@ -1150,6 +1177,11 @@ new(Transport, Socket, Opts) ->
         frame_opts = maps:get(frame_opts, Opts, #{}),
         send_timeout = send_timeout(Opts),
         send_timeout_close = option(send_timeout_close, Opts) =:= true,
+        origin = #{
+            host => maps:get(host, Opts, ?DEFAULT_HOST),
+            port => maps:get(port, Opts, ?DEFAULT_PORT),
+            database => maps:get(database, Opts, maps:get(user, Opts))
+        },
         opts = maps:remove(password, Opts)
     }.
 

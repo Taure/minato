@@ -18,9 +18,9 @@ Spans are `telemetry:span/3` shaped - `start`, then `stop` or `exception` - and
 | `[minato, connect, start]` | `system_time`, `monotonic_time` | `host`, `port`, `database`, `user`, `ssl` |
 | `[minato, connect, stop]` | `duration`, `monotonic_time` | the above, plus `outcome`, and `reason` when it failed |
 | `[minato, connect, exception]` | `duration` | the above, plus `kind`, `reason`, `stacktrace` |
-| `[minato, query, start]` | `system_time`, `monotonic_time` | `path` (`simple`, `unnamed` or `cached`), `sql` when enabled |
-| `[minato, query, stop]` | `duration`, `monotonic_time` | `outcome`, and `command` and `num_rows` when it worked, `reason` when it did not |
-| `[minato, query, exception]` | `duration` | `kind`, `reason`, `stacktrace` |
+| `[minato, query, start]` | `system_time`, `monotonic_time` | `host`, `port`, `database`, `pool` when a pool holds the connection, `path` (`simple`, `unnamed`, `cached` or `prepared`), `sql` when enabled |
+| `[minato, query, stop]` | `duration`, `monotonic_time` | `host`, `port`, `database`, `pool`, `path`, `outcome`, and `command` and `num_rows` when it worked, `reason` when it did not |
+| `[minato, query, exception]` | `duration` | what `start` carried, plus `kind`, `reason`, `stacktrace` |
 | `[minato, checkout, start]` | `system_time`, `monotonic_time` | `pool` |
 | `[minato, checkout, stop]` | `duration`, `monotonic_time` | `pool`, `outcome`, `reason` |
 | `[minato, connection, opened]` | `system_time` | `pool` |
@@ -37,8 +37,26 @@ with completely different fixes that look identical in a query latency graph.
 
 ## What is never emitted
 
-- **Parameters.** Not in an event, not in a log, not in any configuration. They
-  are the values themselves: the email address, the token, the amount.
+- **Parameters.** Not in an event and not in a log. They are the values
+  themselves: the email address, the token, the amount. The one way to see one
+  is `log_values` below, and then only one that came back inside a failure.
+- **Values inside a failure, unless you ask.** A failed statement's `reason`
+  keeps the fields of the server's error that name things - `code`,
+  `severity`, `severity_non_localised`, `constraint`, `schema`, `table`,
+  `column`, `data_type`, `routine` - and drops `message`, `detail`, `hint` and
+  the rest, which quote the row that broke a constraint or the input that would
+  not parse. A parameter that would not encode raises `{minato_codec, #{type :=
+  _, reason := _, value := redacted}}`, in the event and to the caller alike,
+  because an uncaught raise ends up in a crash report. Frames in an event's
+  `stacktrace` carry an arity, never arguments. The caller is still returned
+  the whole `{error, {pgsql_error, Fields}}`. To have all of it in events and
+  raises, on a development node or during an incident:
+
+  ```erlang
+  {minato, [{log_values, true}]}
+  ```
+
+  Read per call, like `log_statements`.
 - **Passwords.** They are used during authentication and never stored on the
   connection, so there is nothing to leak later. A password given as a
   `fun(() -> binary())` is called once per attempt and the result is not kept.
@@ -108,16 +126,40 @@ counted separately because one is a problem and the other is the pool working.
 
 ## Traces
 
-The spans above are already the shape OpenTelemetry wants, so a bridge is a few
-lines rather than a package:
+The spans above are already the shape OpenTelemetry wants, so a bridge is one
+small module rather than a package. `opentelemetry_telemetry` keeps the span
+that a `start` opened under the `telemetry_span_context` every event of the
+span carries, and hands it back at `stop` or `exception`:
 
 ```erlang
-%% needs opentelemetry_telemetry
-Spans = [[minato, connect], [minato, query], [minato, checkout]],
-_ = [
-    otel_telemetry:handle_span(Span, #{tracer_id => minato})
- || Span <- Spans
-].
+-module(my_app_minato_traces).
+-export([attach/0, handle/4]).
+
+%% needs opentelemetry_api and opentelemetry_telemetry
+attach() ->
+    telemetry:attach_many(
+        ~"my-app-minato-traces",
+        [
+            [minato, Span, Stage]
+         || Span <- [connect, query, checkout], Stage <- [start, stop, exception]
+        ],
+        fun ?MODULE:handle/4,
+        undefined
+    ).
+
+handle([minato, Span, start], _Measurements, Metadata, _Config) ->
+    Attributes = maps:with([database, port, pool, path], Metadata),
+    _ = otel_telemetry:start_telemetry_span(minato, name(Span), Metadata, #{
+        kind => client, attributes => Attributes
+    }),
+    ok;
+handle([minato, _Span, _Ended], _Measurements, Metadata, _Config) ->
+    _ = otel_telemetry:set_current_telemetry_span(minato, Metadata),
+    otel_telemetry:end_telemetry_span(minato, Metadata).
+
+name(connect) -> ~"minato.connect";
+name(query) -> ~"minato.query";
+name(checkout) -> ~"minato.checkout".
 ```
 
 A `[minato, query]` span nested inside an application span is the picture worth

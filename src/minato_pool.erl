@@ -702,8 +702,9 @@ answered_gave_up({From, _Pid, Monitor, _Deadline}) ->
     gen_server:reply(From, {error, checkout_timeout}).
 
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
-handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
+handle_info({connected, Opened}, #state{connecting = Connecting} = State) ->
     ok = minato_telemetry:event([minato, connection, opened], #{pool => State#state.name}),
+    Conn = minato_conn:pooled(Opened, State#state.name),
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },

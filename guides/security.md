@@ -95,9 +95,19 @@ module that has been reloaded twice raises `badfun`.
 
 ## What reaches a log
 
-**Parameters never do.** Not in a log, not in a telemetry event, not in any
-configuration. They are the values themselves - the email address, the token,
-the amount.
+**Parameters never do.** Not in a log and not in a telemetry event, unless
+`log_values` below was turned on and one came back inside a failure. They are
+the values themselves - the email address, the token, the amount.
+
+**Values inside a failure only if you ask.** A server error quotes what it
+refused: `detail` holds the row that broke a constraint and `message` the input
+that would not parse. In a query event the error keeps the fields that name
+things, `code`, `constraint`, `table` and the like, and loses those two and the
+rest. A parameter that would not encode is raised with `redacted` where the
+value was, because an uncaught raise is printed by whatever supervises the
+caller. `{minato, [{log_values, true}]}` turns both off, for a development node
+or an incident, and is read per call. The `{error, {pgsql_error, Fields}}` a
+caller is returned is always whole.
 
 **Statements only if you ask.** `{minato, [{log_statements, true}]}` puts the SQL
 in query events. It is off by default because a statement is not a secret but

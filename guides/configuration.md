@@ -160,12 +160,16 @@ queries whose column names you chose.
 {minato, [
     {pools, #{main => #{size => 10, connection => #{user => ~"minato"}}}},
     {listeners, #{events => #{connection => #{user => ~"minato"}}}},
-    {log_statements, false}
+    {log_statements, false},
+    {log_values, false}
 ]}.
 ```
 
 `pools` and `listeners` are started by minato's supervisor, so they come up with
 the application rather than after it. `log_statements` puts the SQL in events
 and logs; it is read per call, so it can be turned on while something is
-happening and off again afterwards. See [Security](security.md) for why it is
-off by default.
+happening and off again afterwards. `log_values` leaves the values a failure
+quotes in query events and in the error a parameter that would not encode
+raises; without it an event keeps the server error's code and the names it
+gives, and the raise says `redacted`. It is read per call too. See
+[Security](security.md) for why both are off by default.
