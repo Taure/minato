@@ -78,6 +78,9 @@ anyway and the first query waits.
 A pool that does not start returns the pool's own reason, such as
 `{error, {invalid_size, 0.5}}`, not the supervisor's `{Reason, ChildSpec}`: the
 child spec holds the connection options.
+
+`minato_overdue` and `minato_sup` are minato's own processes and not names for
+a pool or a listener: `{error, {reserved_name, Name}}`.
 """.
 -spec start_pool(pool(), minato_pool:opts()) -> supervisor:startchild_ret().
 start_pool(Name, Opts) ->

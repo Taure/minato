@@ -276,9 +276,10 @@ long as it liked. The bound is on a whole write, not on each part of it, so a
 value of hundreds of megabytes over a slow link wants `{send_timeout, _}` set
 to what that takes, or to `infinity`. A TLS session on the socket transport is
 written by `m:ssl`, which takes no deadline of its own; there the socket under
-the session is shut down when the time runs out, by `m:minato_overdue`, and the
-connection is closed whatever `send_timeout_close` says, since a session cut
-off in the middle of a record cannot be written to again.
+the session is shut down when the time runs out, by `m:minato_overdue`, whether
+or not the `minato` application is running, and the connection is closed
+whatever `send_timeout_close` says, since a session cut off in the middle of a
+record cannot be written to again.
 
 The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
 them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`
@@ -659,7 +660,7 @@ written(#conn{transport = Transport, socket = Socket}, Bytes) ->
 %% `ssl:send/2` has no deadline and no driver under it here to have one, so the
 %% write is timed from outside: see `m:minato_overdue`. A write that came back
 %% in time costs a timer started and cancelled, with no message sent.
--spec watched(conn(), reference(), ok | {error, error()}) -> ok | {error, error()}.
+-spec watched(conn(), minato_overdue:watch(), ok | {error, error()}) -> ok | {error, error()}.
 watched(_Conn, Timer, ok) ->
     minato_overdue:finished(Timer);
 watched(Conn, Timer, {error, Reason}) ->

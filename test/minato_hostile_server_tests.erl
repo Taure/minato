@@ -170,13 +170,15 @@ a_write_to_a_server_that_stopped_reading_gives_up_test_() ->
 
 %% The same peer behind TLS. `ssl:send/2` takes no deadline, and over the
 %% socket transport there is no driver under it with one either, so that write
-%% is ended from outside by `m:minato_overdue`. The read timeout is a minute:
+%% is ended from outside by `m:minato_overdue`, or by what stands in for it
+%% where the application is not running. The read timeout is a minute:
 %% whatever ends the write inside the assertion is the bound on the write.
 a_tls_write_to_a_server_that_stopped_reading_gives_up_test_() ->
     [
         {timeout, 120,
             {Label, fun() ->
                 {ok, _Started} = application:ensure_all_started(minato),
+                _ = Application =:= stopped andalso application:stop(minato),
                 Server = minato_backend_server:start([?READY], #{tls => true, after_script => stall}),
                 {ok, Conn} = minato_conn:connect(
                     tls_opts(Server, maps:merge(#{timeout => 60000}, Given))
@@ -187,16 +189,19 @@ a_tls_write_to_a_server_that_stopped_reading_gives_up_test_() ->
                 Again = minato_conn:send(Conn, sync),
                 ok = minato_conn:close(Conn),
                 minato_backend_server:stop(Server),
+                {ok, _Restarted} = application:ensure_all_started(minato),
                 ?assertEqual({error, {socket, timeout}}, Result),
                 ?assert(Elapsed < 20000, Elapsed),
                 ?assertMatch({error, {socket, _Closed}}, Again)
             end}}
-     || {Label, Given} <- [
-            {"on the socket transport", #{socket_options => [{send_timeout, 500}]}},
-            {"on the socket transport, left open by the caller", #{
-                socket_options => [{send_timeout, 500}, {send_timeout_close, false}]
-            }},
-            {"on the driver", #{transport => inet, socket_options => [{send_timeout, 500}]}}
+     || {Label, Given, Application} <- [
+            {"on the socket transport", #{socket_options => [{send_timeout, 500}]}, running},
+            {"on the socket transport, left open by the caller",
+                #{socket_options => [{send_timeout, 500}, {send_timeout_close, false}]}, running},
+            {"on the socket transport, with the application stopped",
+                #{socket_options => [{send_timeout, 500}]}, stopped},
+            {"on the driver", #{transport => inet, socket_options => [{send_timeout, 500}]},
+                running}
         ]
     ].
 
