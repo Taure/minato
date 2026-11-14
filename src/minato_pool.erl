@@ -101,6 +101,7 @@ default, so set it when a server may stop reading.
     stats/1
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
+-export([limit/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -111,6 +112,7 @@ default, so set it when a server may stop reading.
 -define(DEFAULT_DISCONNECTED, fail).
 -define(IS_TIMEOUT(T), (T =:= infinity orelse (is_integer(T) andalso T >= 0))).
 -define(CROWDED_SHARE, 4).
+-define(LONGEST_LIMIT, 10).
 -define(SWEEP_INTERVAL, 5000).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
 -define(MINIMUM_BACKOFF, 100).
@@ -277,6 +279,7 @@ separate because one of them is a problem and the other is the pool working.
 
 -type info() ::
     {connected, minato_conn:conn()}
+    | {server_limit, non_neg_integer()}
     | {connect_failed, term()}
     | retry
     | sweep
@@ -708,7 +711,12 @@ handle_info({connected, Opened}, #state{connecting = Connecting} = State) ->
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },
-    {noreply, hand_out(measured(Ready, Conn), Conn)};
+    {noreply, hand_out(Ready, Conn)};
+handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) ->
+    ok = crowded(Name, Size, Limit),
+    {noreply, State#state{measured = true}};
+handle_info({server_limit, _Limit}, State) ->
+    {noreply, State};
 handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
     State = State0#state{failures = State0#state.failures + 1},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
@@ -783,31 +791,19 @@ lending(State, Conn, Expected, Pid) ->
     end.
 
 -doc """
-Check the connection budget once, on the first connection this pool opens.
+Say something, once, if one pool alone wants a quarter of what the server allows.
 
 `size` connections per pool, times the pools on this node, times the nodes, is
 the number PostgreSQL compares with `max_connections`, and it is the number
-nobody works out until the server starts refusing. The pool asks the server what
-its limit is while it holds a connection nobody is using yet, and says something
-if one pool alone wants a quarter of it.
+nobody works out until the server starts refusing. A connector asks the server
+for its limit before it hands its connection over, see `limit/1`, and the pool
+compares.
 
 Once, not per connection: the answer does not change, and a warning that repeats
 is a warning people filter.
 """.
--spec measured(#state{}, minato_conn:conn()) -> #state{}.
-measured(#state{measured = true} = State, _Conn) ->
-    State;
-measured(#state{size = Size, name = Name} = State, Conn) ->
-    case minato_query:simple(Conn, ~"SHOW max_connections") of
-        {ok, [#{rows := [{Limit}]}], _Read} -> crowded(Name, Size, Limit);
-        _Unknown -> ok
-    end,
-    State#state{measured = true}.
-
--spec crowded(name(), pos_integer(), term()) -> ok.
-crowded(Name, Size, Limit) when is_binary(Limit) ->
-    crowded(Name, Size, binary_to_integer(Limit));
-crowded(Name, Size, Limit) when is_integer(Limit), Size * ?CROWDED_SHARE > Limit ->
+-spec crowded(name(), pos_integer(), non_neg_integer()) -> ok.
+crowded(Name, Size, Limit) when Size * ?CROWDED_SHARE > Limit ->
     _ = ?LOG_WARNING(
         #{
             event => connection_budget,
@@ -1072,15 +1068,57 @@ connects(State, Count) ->
 -spec connect(#state{}) -> #state{}.
 connect(#state{opts = Opts, connectors = Connectors, connecting = Connecting} = State) ->
     Pool = self(),
-    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts) end),
+    Measured = State#state.measured,
+    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts, Measured) end),
     State#state{connectors = Connectors#{Ref => Pid}, connecting = Connecting + 1}.
 
--spec connected(pid(), minato_conn:opts()) -> ok.
-connected(Pool, Opts) ->
+-spec connected(pid(), minato_conn:opts(), boolean()) -> ok.
+connected(Pool, Opts, Measured) ->
     case minato_conn:attempt(Opts) of
-        {ok, Conn} -> handed(Pool, Conn);
+        {ok, Conn} when Measured -> handed(Pool, Conn);
+        {ok, Conn} -> asked_its_limit(Pool, Conn);
         {error, Reason} -> refused(Pool, Reason)
     end.
+
+%% The connector asks, not the pool: the answer is the server's to delay or to
+%% get wrong, and the pool is the one process every caller is waiting on. A
+%% server that refuses the question still has a connection worth keeping, and
+%% one that answers out of protocol does not.
+-spec asked_its_limit(pid(), minato_conn:conn()) -> ok.
+asked_its_limit(Pool, Conn) ->
+    try minato_query:simple(Conn, ~"SHOW max_connections") of
+        {ok, Results, Read} ->
+            ok = told(Pool, limit(Results)),
+            handed(Pool, Read);
+        {error, _Refused, Read} ->
+            handed(Pool, Read);
+        {error, Reason} ->
+            ok = minato_conn:close(Conn),
+            refused(Pool, Reason)
+    catch
+        error:{Module, #{reason := Reason}} when is_atom(Module) ->
+            ok = minato_conn:close(Conn),
+            refused(Pool, {Module, Reason})
+    end.
+
+-spec told(pid(), non_neg_integer() | unknown) -> ok.
+told(_Pool, unknown) ->
+    ok;
+told(Pool, Limit) ->
+    Pool ! {server_limit, Limit},
+    ok.
+
+%% Exported for its tests. Anything but a short run of digits is `unknown`: the
+%% text is the server's, and a long one is an integer worth megabytes.
+-doc false.
+-spec limit(dynamic()) -> non_neg_integer() | unknown.
+limit([#{rows := [{Text}]}]) when is_binary(Text), byte_size(Text) =< ?LONGEST_LIMIT ->
+    case string:to_integer(Text) of
+        {Limit, ~""} when is_integer(Limit), Limit >= 0 -> Limit;
+        _Other -> unknown
+    end;
+limit(_Results) ->
+    unknown.
 
 -spec handed(pid(), minato_conn:conn()) -> ok.
 handed(Pool, Conn) ->

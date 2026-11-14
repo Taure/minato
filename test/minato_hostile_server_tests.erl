@@ -10,6 +10,8 @@ client must still have afterwards.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-define(POOL, minato_hostile_server_tests_pool).
+
 -define(READY, [
     authentication_ok,
     {parameter_status, ~"server_version", ~"17.4"},
@@ -108,6 +110,108 @@ the_allowed_methods_are_still_checked_under_a_required_binding_test() ->
     }),
     minato_backend_server:stop(Server),
     ?assertEqual({error, {auth_method_refused, md5}}, Result).
+
+%%----------------------------------------------------------------------
+%% The limit a pool asks its first connection for
+%%----------------------------------------------------------------------
+
+a_limit_is_read_from_a_short_run_of_digits_and_nothing_else_test_() ->
+    [
+        ?_assertEqual(Expected, minato_pool:limit(Results))
+     || {Expected, Results} <- [
+            {100, [#{rows => [{~"100"}]}]},
+            {0, [#{rows => [{~"0"}]}]},
+            {unknown, [#{rows => [{~"plenty"}]}]},
+            {unknown, [#{rows => [{~"100 or so"}]}]},
+            {unknown, [#{rows => [{~"-1"}]}]},
+            {unknown, [#{rows => [{~""}]}]},
+            {unknown, [#{rows => [{binary:copy(~"9", 11)}]}]},
+            {unknown, [#{rows => [{null}]}]},
+            {unknown, [#{rows => [{~"100"}, {~"200"}]}]},
+            {unknown, [#{rows => [{~"100", ~"200"}]}]},
+            {unknown, [#{rows => []}]},
+            {unknown, []}
+        ]
+    ].
+
+a_pool_outlives_whatever_answers_its_question_test_() ->
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                {ok, _Started} = application:ensure_all_started(minato),
+                Server = minato_backend_server:start([?READY, Answer]),
+                Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
+                {ok, Pool} = minato:start_pool(?POOL, #{
+                    size => 1, min_size => 1, connection => Connection
+                }),
+                try
+                    ok = asked_for_the_limit(Server, 50),
+                    timer:sleep(300),
+                    ?assertEqual(Pool, whereis(?POOL)),
+                    ?assertMatch(#{size := 1}, minato:stats(?POOL))
+                after
+                    ok = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Answer} <- [
+            {"a limit that is not a number", shown(~"plenty")},
+            {"a limit of a megabyte of digits", shown(binary:copy(~"9", 1 bsl 20))},
+            {"a row with no columns", [{data_row, <<0:16>>}, {ready_for_query, idle}]},
+            {"a message that is not one", [{unsupported, $D, ~"x"}, {ready_for_query, idle}]},
+            {"a refusal", [
+                {error_response, #{severity => ~"ERROR", code => ~"42501"}},
+                {ready_for_query, idle}
+            ]}
+        ]
+    ].
+
+a_pool_still_answers_while_its_question_goes_unanswered_test_() ->
+    {timeout, 30, fun() ->
+        {ok, _Started} = application:ensure_all_started(minato),
+        Server = minato_backend_server:start([?READY]),
+        Connection = opts(minato_backend_server:port(Server), #{timeout => 5000}),
+        {ok, _Pool} = minato:start_pool(?POOL, #{
+            size => 1, min_size => 1, connection => Connection
+        }),
+        try
+            ok = asked_for_the_limit(Server, 50),
+            {Microseconds, Stats} = timer:tc(fun() -> minato:stats(?POOL) end),
+            ?assertMatch(#{size := 1, idle := 0}, Stats),
+            ?assert(Microseconds < 1000000)
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+shown(Limit) ->
+    [
+        {row_description, [
+            #{
+                name => ~"max_connections",
+                table_oid => 0,
+                column => 0,
+                type_oid => 25,
+                type_size => -1,
+                type_modifier => -1,
+                format => text
+            }
+        ]},
+        {data_row, [Limit]},
+        {command_complete, ~"SHOW"},
+        {ready_for_query, idle}
+    ].
+
+asked_for_the_limit(_Server, 0) ->
+    error(never_asked);
+asked_for_the_limit(Server, Tries) ->
+    case
+        [Sql || {query, ~"SHOW max_connections" = Sql} <- minato_backend_server:received(Server)]
+    of
+        [] -> asked_for_the_limit(Server, Tries - 1);
+        _Asked -> ok
+    end.
 
 %%----------------------------------------------------------------------
 %% Talking to the server
