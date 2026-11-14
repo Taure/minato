@@ -15,6 +15,8 @@ counts the round trips.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([event/4]).
+
 -define(INT4, 23).
 -define(INT8, 20).
 -define(TEXT, 25).
@@ -450,6 +452,101 @@ a_statement_run_unnamed_for_want_of_room_keeps_its_deadline_test() ->
     {Server, Conn} = connected(Script, #{prepared_statements => 0, timeout => 5000}),
     _ = minato_query:cached(Conn, ~"SELECT pg_sleep(9)", [], #{timeout => 100}),
     ?assert(lists:member({cancel_request, 4242, 777}, at_rest(Server))).
+
+%%----------------------------------------------------------------------
+%% What a query reports of itself
+%%----------------------------------------------------------------------
+
+a_result_is_reported_with_its_command_and_its_rows_test() ->
+    {_Server, Conn} = connected(parsed([?INT4], [?INT4]) ++ ran([<<7:32>>])),
+    ?assertMatch(
+        [{start, _Asked}, {stop, #{outcome := ok, command := select, num_rows := 1}}],
+        events(fun() -> minato_query:query(Conn, ?SQL, [7]) end)
+    ).
+
+a_simple_query_is_reported_with_how_many_statements_it_ran_test() ->
+    {_Server, Conn} = connected([selected([~"1"])]),
+    [{start, _Asked}, {stop, Stop}] =
+        events(fun() -> minato_query:simple(Conn, ~"SELECT 1") end),
+    ?assertMatch(#{outcome := ok, statements := 1}, Stop),
+    ?assertNot(is_map_key(reason, Stop)).
+
+a_refusal_is_reported_without_what_the_server_quoted_test() ->
+    {_Server, Conn} = connected([[refused(~"42601")], [], [], ?IDLE]),
+    [{start, _Asked}, {stop, Stop}] =
+        events(fun() -> minato_query:query(Conn, ?SQL, [7]) end),
+    ?assertMatch(#{outcome := error, reason := {pgsql_error, #{code := ~"42601"}}}, Stop),
+    #{reason := {pgsql_error, Fields}} = Stop,
+    ?assertNot(is_map_key(message, Fields)).
+
+a_connection_that_stops_answering_is_reported_as_an_error_test() ->
+    {_Server, Conn} = connected([], #{timeout => 100}),
+    Self = self(),
+    [{start, _Asked}, {stop, Stop}] =
+        events(fun() -> Self ! {answered, minato_query:simple(Conn, ~"SELECT 1")} end),
+    Reason =
+        receive
+            {answered, {error, Lost}} -> Lost
+        after 0 -> error(not_answered)
+        end,
+    ?assertMatch(#{outcome := error, reason := Reason}, Stop).
+
+a_prepared_statement_is_reported_under_its_name_test() ->
+    Script = prepared([?INT4], [?INT4]) ++ ran([<<7:32>>]),
+    {_Server, Conn} = connected(Script),
+    {ok, Statement, Ready} = minato_query:prepare(Conn, ~"mine", ?SQL),
+    ok = application:set_env(minato, log_statements, true),
+    try
+        ?assertMatch(
+            [
+                {start, #{path := prepared, sql := ~"mine"}},
+                {stop, #{path := prepared, outcome := ok, num_rows := 1}}
+            ],
+            events(fun() -> minato_query:execute(Ready, Statement, [7]) end)
+        )
+    after
+        ok = application:unset_env(minato, log_statements)
+    end.
+
+a_prepare_that_is_described_and_then_left_unanswered_is_an_error_test() ->
+    Script = [[parse_complete], described([?INT4], [?INT4]), []],
+    {_Server, Conn} = connected(Script, #{timeout => 100}),
+    ?assertMatch({error, _Reason}, minato_query:prepare(Conn, ~"mine", ?SQL)).
+
+%% Only a raise that is about the call leaves the connection fit to be told to
+%% forget the statement. After any other, nothing more is written on it.
+a_first_use_answered_out_of_turn_closes_nothing_test() ->
+    Script = parsed([?INT4], [?INT4]) ++ [[parse_complete]],
+    {Server, Conn} = connected(Script, #{timeout => 100}),
+    ?assertError(
+        {minato_query, #{reason := unexpected_message}}, minato_query:cached(Conn, ?SQL, [7])
+    ),
+    ?assertEqual([parse, describe, flush, bind, execute, sync], kinds(at_rest(Server))).
+
+%% Every event of a query is sent from the process that asked, so all of them
+%% are here by the time the call has come back.
+events(Fun) ->
+    Handler = {?MODULE, self()},
+    {ok, _Started} = application:ensure_all_started(telemetry),
+    ok = telemetry:attach_many(
+        Handler, [[minato, query, start], [minato, query, stop]], fun ?MODULE:event/4, self()
+    ),
+    try
+        _ = Fun(),
+        seen()
+    after
+        ok = telemetry:detach(Handler)
+    end.
+
+event([minato, query, Phase], _Measurements, Metadata, Test) ->
+    Test ! {query_event, Phase, Metadata},
+    ok.
+
+seen() ->
+    receive
+        {query_event, Phase, Metadata} -> [{Phase, Metadata} | seen()]
+    after 0 -> []
+    end.
 
 %%----------------------------------------------------------------------
 %% Scripts

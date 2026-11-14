@@ -311,7 +311,9 @@ a_payload_that_does_not_fit_its_columns_is_refused_test_() ->
             {"a column after the count ran out", <<0:16, 1:32, "x">>, column_count_mismatch,
                 {3, 0}},
             {"a long column after the count ran out", <<0:16, 9:32, "abc">>, column_count_mismatch,
-                {3, 0}}
+                {3, 0}},
+            {"a length below minus one after the count ran out", <<0:16, -2:32/signed>>,
+                column_count_mismatch, {3, 0}}
         ]
     ].
 
@@ -380,5 +382,9 @@ a_payload_splits_into_its_columns_test_() ->
         ?_assertError(
             {minato_protocol, #{reason := {negative_column_length, -2}, data := -2}},
             minato_protocol:columns(<<1:16, -2:32/signed>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<-2:32/signed>>}},
+            minato_protocol:columns(<<0:16, -2:32/signed>>)
         )
     ].
