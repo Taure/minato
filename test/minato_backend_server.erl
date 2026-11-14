@@ -13,7 +13,9 @@ started it.
 
 The script is a list of answers, one per frontend message read. `{raw, Bytes}`
 writes bytes as they are, which is how the single byte answer to `SSLRequest`
-is given; anything else is a list of `m:minato_backend_writer` messages. When
+is given; `{then, First, Milliseconds, Second}` writes one answer, waits, and
+writes another, which is a server saying something nobody asked for; anything
+else is a list of `m:minato_backend_writer` messages. When
 the script runs out the server keeps reading and answers nothing, which is what
 a client waiting on a message it will never get has to cope with.
 A `Terminate` is never answered, as no server would, and ends the conversation,
@@ -35,7 +37,10 @@ to observe.
 -define(CHATTER_INTERVAL, 50).
 
 -doc "What to answer one frontend message with.".
--type answer() :: [minato_backend_writer:message()] | {raw, iodata()}.
+-type answer() ::
+    [minato_backend_writer:message()]
+    | {raw, iodata()}
+    | {then, answer(), Milliseconds :: non_neg_integer(), answer()}.
 
 -doc """
 How the server behaves beyond the script.
@@ -263,12 +268,20 @@ gone(Peer) ->
 
 -spec answer(peer(), binary(), boolean(), [answer()]) -> peer().
 answer(#{transport := Transport, socket := Socket} = Peer, Rest, StartedUp, [Answer | Script]) ->
-    ok = Transport:send(Socket, bytes(Answer)),
+    ok = sent(Transport, Socket, Answer),
     serve(Peer, Rest, StartedUp, Script);
 answer(Peer, Rest, StartedUp, []) ->
     serve(Peer, Rest, StartedUp, []).
 
--spec bytes(answer()) -> iodata().
+-spec sent(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), answer()) -> ok.
+sent(Transport, Socket, {then, First, Milliseconds, Second}) ->
+    ok = sent(Transport, Socket, First),
+    ok = timer:sleep(Milliseconds),
+    sent(Transport, Socket, Second);
+sent(Transport, Socket, Answer) ->
+    Transport:send(Socket, bytes(Answer)).
+
+-spec bytes([minato_backend_writer:message()] | {raw, iodata()}) -> iodata().
 bytes({raw, Bytes}) -> Bytes;
 bytes(Messages) -> minato_backend_writer:write_all(Messages).
 

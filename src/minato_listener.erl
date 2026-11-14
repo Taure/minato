@@ -34,6 +34,13 @@ replay. This process reconnects with backoff, `LISTEN`s again for every channel
 that still has a subscriber, and then tells each subscriber
 `{minato_listener, Name, resubscribed}`.
 
+A connection is dropped by more than the socket closing. A `LISTEN` or
+`UNLISTEN` that gets no answer, and bytes from the server that are not a
+message, end it the same way: closed, reconnected, resubscribed and announced.
+`listen/2` on a connection lost that way answers `{error, Reason}` and the
+caller subscribes again once it is back, as it would after `{error,
+not_connected}`.
+
 That message is the point. A consumer that treats notifications as the only way
 it learns anything will silently stall; one that is told it was disconnected can
 go and look. `NOTIFY` is a hint that something changed, and a poll it makes
@@ -56,7 +63,8 @@ faster - never the only path.
     opts :: minato_conn:opts(),
     conn :: minato_conn:conn() | undefined,
     channels = #{} :: #{binary() => #{pid() => reference()}},
-    backoff = ?MINIMUM_BACKOFF :: pos_integer()
+    backoff = ?MINIMUM_BACKOFF :: pos_integer(),
+    retrying = false :: boolean()
 }).
 
 -doc "How the listener is registered and asked for.".
@@ -177,17 +185,24 @@ handle_cast(_Message, State) ->
     | {tcp_error | ssl_error, term(), term()}.
 
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
+handle_info(reconnect, #state{conn = undefined} = State) ->
+    {noreply, connect(State#state{retrying = false})};
 handle_info(reconnect, State) ->
-    {noreply, connect(State)};
+    {noreply, State#state{retrying = false}};
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, reactivated(gone(State, Pid))};
 handle_info(_Message, #state{conn = undefined} = State) ->
     {noreply, State};
+%% Bytes that are not a message leave nothing after them that can be read, so
+%% they are a connection that dropped, not a reason to stop: a listener that
+%% stopped would take every subscription with it and tell nobody.
 handle_info(Message, #state{conn = Conn} = State) ->
-    case minato_conn:handle_message(Conn, Message) of
+    try minato_conn:handle_message(Conn, Message) of
         {messages, Messages, Read} -> {noreply, delivered(State#state{conn = Read}, Messages)};
         {closed, _Reason} -> {noreply, dropped(State)};
         ignore -> {noreply, State}
+    catch
+        error:{minato_protocol, #{reason := _Reason}} -> {noreply, dropped(State)}
     end.
 
 -spec terminate(term(), #state{}) -> ok.
@@ -353,11 +368,20 @@ listening(State, [Channel | Rest]) ->
 -spec statement(#state{}, binary()) -> {ok, #state{}} | {error, term(), #state{}}.
 statement(#state{conn = undefined} = State, _Sql) ->
     {error, not_connected, State};
+%% A statement that comes back without a connection has lost it, to the socket
+%% or to an answer that was not one. Either way the connection is closed and
+%% another is on its way, so the channels still subscribed are listened to
+%% again and their subscribers are told.
 statement(#state{conn = Conn} = State, Sql) ->
-    case reading(Conn, Sql) of
+    try reading(Conn, Sql) of
         {ok, _Results, Ran} -> {ok, State#state{conn = Ran}};
         {error, Reason, Ran} -> {error, Reason, State#state{conn = Ran}};
-        {error, Reason} -> {error, Reason, State#state{conn = undefined}}
+        {error, Reason} -> {error, Reason, dropped(State)}
+    catch
+        error:{Module, #{reason := Reason}} when
+            Module =:= minato_protocol; Module =:= minato_query
+        ->
+            {error, {Module, Reason}, dropped(State)}
     end.
 
 -spec reading(minato_conn:conn(), binary()) ->
@@ -391,9 +415,11 @@ disconnected(#state{conn = Conn} = State) ->
     State#state{conn = undefined}.
 
 -spec retry(#state{}) -> #state{}.
+retry(#state{retrying = true} = State) ->
+    State;
 retry(#state{backoff = Delay} = State) ->
     _ = erlang:send_after(Delay, self(), reconnect),
-    State#state{backoff = longer(Delay)}.
+    State#state{backoff = longer(Delay), retrying = true}.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

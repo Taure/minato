@@ -11,6 +11,7 @@ client must still have afterwards.
 -include_lib("eunit/include/eunit.hrl").
 
 -define(POOL, minato_hostile_server_tests_pool).
+-define(LISTENER, minato_hostile_server_tests_listener).
 
 -define(READY, [
     authentication_ok,
@@ -212,6 +213,66 @@ asked_for_the_limit(Server, Tries) ->
         [] -> asked_for_the_limit(Server, Tries - 1);
         _Asked -> ok
     end.
+
+%%----------------------------------------------------------------------
+%% A listener
+%%----------------------------------------------------------------------
+
+a_listener_reconnects_after_a_statement_that_lost_its_connection_test_() ->
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                {ok, _Started} = application:ensure_all_started(minato),
+                Server = minato_backend_server:start([?READY | Answers]),
+                Connection = opts(minato_backend_server:port(Server), #{timeout => 300}),
+                {ok, Listener} = minato:start_listener(?LISTENER, #{connection => Connection}),
+                try
+                    ?assertEqual({error, Expected}, minato:listen(?LISTENER, ~"events")),
+                    ?assertEqual(2, startups(Server, 2, 50)),
+                    ?assertEqual(Listener, whereis(?LISTENER)),
+                    ?assertEqual(#{}, minato_listener:channels(?LISTENER))
+                after
+                    ok = minato:stop_listener(?LISTENER),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Expected, Answers} <- [
+            {"a statement nobody answers", {socket, timeout}, []},
+            {"an answer that is not a message", {minato_protocol, malformed}, [
+                [{unsupported, $Z, ~"not a status"}]
+            ]}
+        ]
+    ].
+
+a_listener_outlives_bytes_that_are_not_a_message_test_() ->
+    {timeout, 30, fun() ->
+        {ok, _Started} = application:ensure_all_started(minato),
+        Listening = [{command_complete, ~"LISTEN"}, {ready_for_query, idle}],
+        Unasked = [{unsupported, $Z, ~"not a status"}],
+        Server = minato_backend_server:start([?READY, {then, Listening, 300, Unasked}, Listening]),
+        Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
+        {ok, Listener} = minato:start_listener(?LISTENER, #{connection => Connection}),
+        try
+            ?assertEqual(ok, minato:listen(?LISTENER, ~"events")),
+            receive
+                {minato_listener, ?LISTENER, resubscribed} -> ok
+            after 5000 -> error(never_resubscribed)
+            end,
+            ?assertEqual(Listener, whereis(?LISTENER)),
+            ?assertEqual(#{~"events" => 1}, minato_listener:channels(?LISTENER))
+        after
+            ok = minato:stop_listener(?LISTENER),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+startups(_Server, Wanted, _Tries) when Wanted =< 0 ->
+    0;
+startups(_Server, _Wanted, 0) ->
+    0;
+startups(Server, Wanted, Tries) ->
+    Seen = length([Startup || {startup, _} = Startup <- minato_backend_server:received(Server)]),
+    Seen + startups(Server, Wanted - Seen, Tries - 1).
 
 %%----------------------------------------------------------------------
 %% Talking to the server
