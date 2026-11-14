@@ -138,6 +138,46 @@ per module; use `min_size => 1` and a small `size`, since tests are rarely
 concurrent enough to need more; and stop the pool when the suite ends -
 `minato:stop_pool/1` closes every connection it holds.
 
+## PgBouncer and connection poolers
+
+A pooler in transaction mode lends a client a server connection for one
+transaction and takes it back when that ends, so two statements from one
+minato connection can be answered by two backends. minato runs behind one,
+and the suite runs against PgBouncer 1.26 in transaction mode with both
+settings below, but what a session holds does not follow the client.
+
+| | through the pooler |
+| --- | --- |
+| `minato:simple/2`, `minato_query:query/3` | work: one statement is one exchange and stays on one backend |
+| `minato:transaction/2`, `minato_txn` | work: the backend is kept from `BEGIN` to the end |
+| a statement deadline and its cancel | work: the pooler passes the cancel on |
+| `minato:query/3`, `minato_query:cached/3` | need the pooler to follow named statements, or `prepared_statements => 0` |
+| `minato_query:prepare/3` | the same |
+| `minato:start_listener/2` | does not work: connect a listener to the server itself |
+
+`minato:query/3` keeps statements parsed by name, and a name parsed on one
+backend means nothing to the next. PgBouncer follows them from 1.21 when its
+`max_prepared_statements` is above zero, and then nothing needs changing. With
+it at zero, or behind a pooler that does not do this, set
+`prepared_statements => 0` in the connection: every statement is then parsed
+unnamed inside the exchange that runs it. Left at the default, a statement
+fails with `26000`, `prepared statement does not exist`, whenever the pooler
+moves the client between parsing and running it, which is some of the time and
+more of it under load.
+
+A notification is sent to the backend that ran `LISTEN`, and the pooler has by
+then taken that backend back, so it has nobody to hand the notification to and
+drops it. Nothing fails: the listener subscribes, and hears nothing.
+
+Three smaller things. `channel_binding` and the SCRAM exchange are with the
+pooler, which authenticates to the server on its own. The limit a pool reads
+for its `connection_budget` warning is the server's `max_connections`, not
+what the pooler will accept. And anything set on the session outside a
+transaction, with `SET` or an advisory lock, lands on a backend the next client
+inherits; the reset a minato pool sends between borrowers runs on whichever
+backend it is given, so it is not the defence here that it is on a direct
+connection.
+
 ## A listener
 
 ```erlang

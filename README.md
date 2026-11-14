@@ -107,7 +107,7 @@ docker compose -f test/docker-compose.yml down -v
 ```
 
 - **differential** - every type against `pg_types` as a black box oracle *and*
-  against PostgreSQL 17 as the judge, in both wire formats
+  against PostgreSQL as the judge, in both wire formats
 - **round trip** - the same corpus through minato's own connection and pool, as
   a bound parameter and as a column of a real table
 - **properties** - result sets of any size, any number of parameters, nulls in
@@ -121,8 +121,29 @@ docker compose -f test/docker-compose.yml down -v
   whether the session is really encrypted
 - **soak** - concurrent workers checking their own answers, with backends killed
   underneath them, and the pool measured at rest afterwards
+- **PgBouncer** - the same paths through a pooler in transaction mode, with
+  and without it following named statements, and which backend answered
 
-CI runs all of it on OTP 28 and 29.
+CI runs all of it on OTP 28 and 29, and the Common Test suites again on each
+supported PostgreSQL.
+
+## Supported versions
+
+| | tested | |
+| --- | --- | --- |
+| PostgreSQL | 14, 15, 16, 17, 18 | every Common Test suite passes on each; 17 is what the compose file starts by default |
+| Erlang/OTP | 28, 29 | |
+| PgBouncer | 1.26, transaction mode | see [the configuration guide](guides/configuration.md#pgbouncer-and-connection-poolers) for what does not cross a pooler |
+
+`MINATO_PG_TAG` picks the server the compose file starts, and a server will not
+open the data directory of another major, hence the `down -v`:
+
+```
+docker compose -f test/docker-compose.yml down -v
+MINATO_PG_TAG=14 docker compose -f test/docker-compose.yml up -d
+```
+
+PostgreSQL 13 and older are past their end of life and are not tested.
 
 ## Requirements
 
