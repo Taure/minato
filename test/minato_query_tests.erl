@@ -27,7 +27,6 @@ counts the round trips.
 ]).
 -define(IDLE, [{ready_for_query, idle}]).
 -define(FAILED, [{ready_for_query, failed}]).
--define(OPEN, [{ready_for_query, transaction}]).
 -define(SQL, ~"SELECT a FROM t WHERE a = $1").
 
 %%----------------------------------------------------------------------

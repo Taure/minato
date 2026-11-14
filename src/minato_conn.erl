@@ -492,22 +492,16 @@ shorter(Timeout, Cap) -> min(Timeout, Cap).
 %% either. So nothing is written, and what is held is dropped with the socket
 %% instead of being waited on.
 -spec hurried(conn(), non_neg_integer()) -> clear | behind.
-hurried(#conn{transport = gen_tcp, socket = Socket}, Bound) ->
-    case inet:getstat(Socket, [send_pend]) of
+hurried(#conn{transport = Transport, under = undefined, socket = Socket}, Bound) when
+    Transport =:= gen_tcp; Transport =:= ssl
+->
+    Module = options_module(Transport),
+    case Module:getstat(Socket, [send_pend]) of
         {ok, [{send_pend, 0}]} ->
-            _ = inet:setopts(Socket, [{send_timeout, Bound}]),
+            _ = Module:setopts(Socket, [{send_timeout, Bound}]),
             clear;
         _Held ->
-            _ = inet:setopts(Socket, [{linger, {true, 0}}]),
-            behind
-    end;
-hurried(#conn{transport = ssl, under = undefined, socket = Socket}, Bound) ->
-    case ssl:getstat(Socket, [send_pend]) of
-        {ok, [{send_pend, 0}]} ->
-            _ = ssl:setopts(Socket, [{send_timeout, Bound}]),
-            clear;
-        _Held ->
-            _ = ssl:setopts(Socket, [{linger, {true, 0}}]),
+            _ = Module:setopts(Socket, [{linger, {true, 0}}]),
             behind
     end;
 hurried(_Conn, _Bound) ->
