@@ -31,6 +31,9 @@ The workloads are chosen to separate those costs:
   execute, sync, every time. `pgo` caches statements itself and cannot be asked
   not to, so it has no number here either. This row is what a client costs when
   the caller avoids its cache.
+- `first_use` is `minato_query:cached/4` on a statement the connection has not
+  seen, a different one every time: what keeping a statement costs before it
+  pays. minato only.
 - `cached` is the same statement kept per connection, which is what all three
   do by default: `minato_query:cached/4`, pgo's own cache, and `prepared_query`
   in epgsql. This is the comparison that matters, and every row below it is run
@@ -95,7 +98,7 @@ started(Client) ->
     parsed(Client, Setup).
 
 workloads() ->
-    [simple, unnamed, cached, rows_1000, rows_5000, wide_row, insert, concurrent].
+    [simple, unnamed, first_use, cached, rows_1000, rows_5000, wide_row, insert, concurrent].
 
 %%----------------------------------------------------------------------
 %% Measuring
@@ -145,6 +148,16 @@ runner(minato, simple, _Setup) ->
     stateful(fun(C) -> minato_query:simple(C, ~"SELECT 1") end);
 runner(minato, unnamed, _Setup) ->
     stateful(fun(C) -> minato_query:query(C, ~"SELECT $1::int4", [42]) end);
+runner(minato, first_use, _Setup) ->
+    fun() ->
+        {Turn, Conn} = first_use(),
+        Sql = <<"SELECT $1::int4 /* ", (integer_to_binary(Turn))/binary, " */">>,
+        {ok, _Result, Next} = minato_query:cached(Conn, Sql, [42]),
+        put({?MODULE, first_use}, {Turn + 1, Next}),
+        ok
+    end;
+runner(_Other, first_use, _Setup) ->
+    unsupported;
 runner(minato, cached, _Setup) ->
     stateful(fun(C) -> minato_query:cached(C, ~"SELECT $1::int4", [42]) end);
 runner(minato, rows_1000, _Setup) ->
@@ -205,6 +218,17 @@ stateful(Fun) ->
             Other ->
                 error({minato_bench, Other})
         end
+    end.
+
+%% A connection of its own, with room to keep every statement of the run, so
+%% that each call is the first use of a statement and never the unnamed path.
+first_use() ->
+    case get({?MODULE, first_use}) of
+        undefined ->
+            {ok, Conn} = minato_conn:connect((connection())#{prepared_statements => 1000000}),
+            {0, Conn};
+        Held ->
+            Held
     end.
 
 held() ->
@@ -308,6 +332,7 @@ parsed(_Client, Setup) ->
 
 teardown(minato, _Setup) ->
     ok = minato_conn:close(held()),
+    ok = minato_conn:close(element(2, first_use())),
     _ = minato:stop_pool(bench_pool),
     ok;
 teardown(pgo, _Setup) ->
