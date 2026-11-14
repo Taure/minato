@@ -44,6 +44,101 @@ invented_tags(Count) ->
     ] ++ [{ready_for_query, idle}].
 
 %%----------------------------------------------------------------------
+%% An opening exchange that does not end
+%%----------------------------------------------------------------------
+
+a_server_that_keeps_talking_without_finishing_is_given_up_on_test_() ->
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                Started = erlang:monotonic_time(millisecond),
+                {Server, Result} = connects([dripping(Before, Message, 100)], #{timeout => 300}),
+                Elapsed = erlang:monotonic_time(millisecond) - Started,
+                minato_backend_server:stop(Server),
+                ?assertEqual({error, {socket, timeout}}, Result),
+                ?assert(Elapsed < 2000)
+            end}}
+     || {Label, Before, Message} <- [
+            {"notices before it has authenticated", [], notice()},
+            {"notices after", [authentication_ok], notice()},
+            {"parameters after", [authentication_ok], {parameter_status, ~"TimeZone", ~"UTC"}}
+        ]
+    ].
+
+%% One message every 50 milliseconds, which is inside any read timeout, for
+%% five seconds, which is outside the one the test gives the exchange.
+dripping(Before, _Message, 0) ->
+    Before;
+dripping(Before, Message, Count) ->
+    {then, Before, 50, dripping([Message], Message, Count - 1)}.
+
+notice() ->
+    {notice_response, #{severity => ~"NOTICE", code => ~"00000", message => ~"still here"}}.
+
+an_opening_exchange_with_no_timeout_is_not_given_up_on_test() ->
+    Slow = {then, [authentication_ok], 300, tl(?READY)},
+    {Server, Result} = connects([Slow], #{timeout => infinity}),
+    ?assertMatch({ok, _Conn}, Result),
+    {ok, Conn} = Result,
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server).
+
+the_parameters_a_server_reports_are_kept_up_to_a_bound_test() ->
+    Flood = [
+        {parameter_status, <<"invented_", (integer_to_binary(N))/binary>>, ~"on"}
+     || N <- lists:seq(1, 500)
+    ],
+    Long = {parameter_status, ~"search_path", binary:copy(~"x", 5000)},
+    Script = [
+        [authentication_ok, {parameter_status, ~"server_version", ~"17.4"}, Long] ++ Flood ++
+            [{parameter_status, ~"server_version", ~"17.5"}, {ready_for_query, idle}]
+    ],
+    {Server, {ok, Conn}} = connects(Script, #{}),
+    Parameters = minato_conn:parameters(Conn),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server),
+    ?assertEqual(64, map_size(Parameters)),
+    ?assertEqual(~"17.5", maps:get(~"server_version", Parameters)),
+    ?assertNot(is_map_key(~"search_path", Parameters)),
+    ?assert(is_map_key(~"invented_1", Parameters)),
+    ?assertNot(is_map_key(~"invented_500", Parameters)).
+
+a_parameter_does_not_keep_the_read_it_arrived_in_test() ->
+    Padding = {notice_response, #{message => binary:copy(~"x", 100000)}},
+    {Server, {ok, Conn}} = connects([[Padding | ?READY]], #{}),
+    #{~"server_version" := Version} = minato_conn:parameters(Conn),
+    ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server),
+    ?assertEqual(byte_size(Version), binary:referenced_byte_size(Version)).
+
+a_connect_timeout_covers_the_tls_request_and_the_handshake_together_test_() ->
+    {timeout, 30, fun() ->
+        {ok, _Started} = application:ensure_all_started(ssl),
+        {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}]),
+        {ok, Port} = inet:port(Listen),
+        Stalling = spawn_link(fun() ->
+            {ok, Socket} = gen_tcp:accept(Listen, 5000),
+            {ok, _Request} = gen_tcp:recv(Socket, 8, 5000),
+            ok = timer:sleep(600),
+            ok = gen_tcp:send(Socket, ~"S"),
+            receive
+                stop -> gen_tcp:close(Socket)
+            end
+        end),
+        Started = erlang:monotonic_time(millisecond),
+        Result = minato_conn:connect(
+            opts(Port, #{
+                ssl => true, ssl_options => [{verify, verify_none}], connect_timeout => 1000
+            })
+        ),
+        Elapsed = erlang:monotonic_time(millisecond) - Started,
+        Stalling ! stop,
+        ok = gen_tcp:close(Listen),
+        ?assertEqual({error, {tls, timeout}}, Result),
+        ?assert(Elapsed < 1400)
+    end}.
+
+%%----------------------------------------------------------------------
 %% Channel binding that was required
 %%----------------------------------------------------------------------
 

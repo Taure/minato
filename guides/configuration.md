@@ -19,8 +19,8 @@ directly.
 | `ssl_options` | verify against the OS trust store | each option replaces one default |
 | `channel_binding` | `prefer` under TLS, `disable` without | `require` accepts `SCRAM-SHA-256-PLUS` and refuses every other method, including a server that asks for no password |
 | `auth` | every method | the methods a server may ask for, as libpq's `require_auth`; `[scram_sha_256]` to accept nothing else |
-| `connect_timeout` | `5000` | covers the TCP connect and the TLS handshake |
-| `timeout` | `15000` | the per read timeout, and the default statement deadline |
+| `connect_timeout` | `5000` | covers the TCP connect, the answer to the TLS request and the TLS handshake together; `infinity` to wait |
+| `timeout` | `15000` | the per read timeout, the default statement deadline, and how long the opening exchange may take from the startup message to `ReadyForQuery`; `infinity` to wait |
 | `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second |
 | `prepared_statements` | `64` | how many statements a connection keeps parsed; `0` disables |
 | `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}` | each replaces one default |

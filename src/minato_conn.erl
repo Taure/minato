@@ -130,6 +130,8 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
 -define(DEFAULT_CONNECT_TIMEOUT, 5000).
+-define(MOST_PARAMETERS, 64).
+-define(LONGEST_PARAMETER, 4096).
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
@@ -159,6 +161,7 @@ the server issued is the whole of the authorisation.
     key :: key() | undefined,
     timeout :: timeout(),
     deadline = infinity :: integer() | infinity,
+    opening = infinity :: integer() | infinity,
     cancelled = false :: boolean(),
     grace :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
@@ -252,7 +255,14 @@ the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
 off. See `m:minato_query` for what fills it.
 
 `timeout` is the per read timeout and applies for the life of the connection.
-`connect_timeout` covers the TCP connect and the TLS handshake. `cancel_timeout`
+It is also how long the opening exchange may take as a whole, from the startup
+message to `ReadyForQuery`, so that a server answering each read in time but
+never finishing is given up on: `{error, {socket, timeout}}`.
+`connect_timeout` covers the TCP connect, the answer to the TLS request and the
+TLS handshake together, not each of them. Either can be `infinity`.
+
+The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
+them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`
 is how long a cancelled statement is given to come back before the connection is
 given up on; see `deadline/2`. On Windows it also bounds how long closing a TLS
 connection waits for the server to close first, to at most a second; see
@@ -379,11 +389,22 @@ opening(Opts) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
+    Deadline = within(Timeout),
     Transport = transport(Opts),
     case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> secure(Transport, Socket, Host, Timeout, Opts);
+        {ok, Socket} -> secure(Transport, Socket, Host, Deadline, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
+
+%% A timeout given to each step is a timeout a server can spend once per step.
+%% These turn one into a point in time that every step is measured against.
+-spec within(timeout()) -> integer() | infinity.
+within(infinity) -> infinity;
+within(Timeout) -> erlang:monotonic_time(millisecond) + Timeout.
+
+-spec left(integer() | infinity) -> timeout().
+left(infinity) -> infinity;
+left(Deadline) -> max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 -spec transport(opts()) -> plain().
 transport(#{transport := inet}) -> gen_tcp;
@@ -1105,33 +1126,39 @@ with_timeout(Conn, Timeout) ->
 %% Opening
 %%----------------------------------------------------------------------
 
--spec secure(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secure(
+    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, conn()} | {error, error()}.
-secure(Transport, Socket, Host, Timeout, Opts) ->
+secure(Transport, Socket, Host, Deadline, Opts) ->
     case maps:get(ssl, Opts, false) of
         false ->
             start(new(Transport, Socket, Opts), Opts);
         true ->
-            case upgrade(Transport, Socket, Host, Timeout, Opts) of
+            case upgrade(Transport, Socket, Host, Deadline, Opts) of
                 {ok, Upgraded} -> start(new(ssl, Upgraded, Opts), Opts);
                 {error, Reason} -> {error, Reason}
             end
     end.
 
--spec upgrade(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec upgrade(
+    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-upgrade(Transport, Socket, Host, Timeout, Opts) ->
+upgrade(Transport, Socket, Host, Deadline, Opts) ->
     case Transport:send(Socket, minato_protocol:encode(ssl_request)) of
-        ok -> negotiate(Transport, Socket, Host, Timeout, Opts);
+        ok -> negotiate(Transport, Socket, Host, Deadline, Opts);
         {error, Reason} -> closing(Transport, Socket, {socket, Reason})
     end.
 
--spec negotiate(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec negotiate(
+    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-negotiate(Transport, Socket, Host, Timeout, Opts) ->
-    case Transport:recv(Socket, 1, Timeout) of
+negotiate(Transport, Socket, Host, Deadline, Opts) ->
+    case Transport:recv(Socket, 1, left(Deadline)) of
         {ok, Answer} when is_binary(Answer) ->
-            answered(minato_protocol:ssl_response(Answer), Transport, Socket, Host, Timeout, Opts);
+            answered(minato_protocol:ssl_response(Answer), Transport, Socket, Host, Deadline, Opts);
         {error, Reason} ->
             closing(Transport, Socket, {socket, Reason})
     end.
@@ -1141,17 +1168,17 @@ negotiate(Transport, Socket, Host, Timeout, Opts) ->
     plain(),
     socket(),
     inet:socket_address() | inet:hostname(),
-    timeout(),
+    integer() | infinity,
     opts()
 ) -> {ok, ssl:sslsocket()} | {error, error()}.
-answered({ok, accepted, _Rest}, Transport, Socket, Host, Timeout, Opts) ->
-    case upgraded(Socket, tls_options(Host, Opts), Timeout) of
+answered({ok, accepted, _Rest}, Transport, Socket, Host, Deadline, Opts) ->
+    case upgraded(Socket, tls_options(Host, Opts), left(Deadline)) of
         {ok, Upgraded} -> {ok, Upgraded};
         {error, Reason} -> closing(Transport, Socket, {tls, Reason})
     end;
-answered({ok, _Refused, _Rest}, Transport, Socket, _Host, _Timeout, _Opts) ->
+answered({ok, _Refused, _Rest}, Transport, Socket, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, tls_refused);
-answered(incomplete, Transport, Socket, _Host, _Timeout, _Opts) ->
+answered(incomplete, Transport, Socket, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, {socket, closed}).
 
 -spec handle(conn()) -> minato_socket:socket().
@@ -1206,12 +1233,25 @@ found(Name, [_Other | Rest]) -> found(Name, Rest);
 found(_Name, []) -> undefined.
 
 -spec start(conn(), opts()) -> {ok, conn()} | {error, error()}.
-start(Conn, Opts) ->
+start(#conn{timeout = Timeout} = Unbounded, Opts) ->
+    Conn = Unbounded#conn{opening = within(Timeout)},
     User = maps:get(user, Opts),
     Startup = {startup, startup_parameters(User, Opts)},
     case send(Conn, Startup) of
         ok -> guarded(Conn, credentials(Conn, User, Opts));
         {error, Reason} -> closing(Conn, Reason)
+    end.
+
+%% The opening exchange as a whole gets what one read gets afterwards. A read
+%% timeout alone bounds a server that says nothing, and not one that says
+%% something small and unhelpful just often enough.
+-spec awaited(conn()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
+awaited(#conn{opening = infinity} = Conn) ->
+    next(Conn);
+awaited(#conn{opening = Deadline, timeout = Timeout} = Conn) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> {error, {socket, timeout}};
+        Left -> next(Conn, remaining(Left, Timeout))
     end.
 
 -spec startup_parameters(binary(), opts()) -> #{binary() => binary()}.
@@ -1315,7 +1355,7 @@ reraise(Class, Reason, Stacktrace) ->
 
 -spec authenticate(conn(), minato_auth:state(), boolean()) -> {ok, conn()} | {error, error()}.
 authenticate(Conn, State, Asked) ->
-    case next(Conn) of
+    case awaited(Conn) of
         {ok, {error_response, Fields}, Read} ->
             closing(Read, {pgsql_error, Fields});
         {ok, {notice_response, _Fields}, Read} ->
@@ -1342,7 +1382,7 @@ answer(Conn, {send, Reply, State}) ->
 
 -spec settle(conn()) -> {ok, conn()} | {error, error()}.
 settle(Conn) ->
-    case next(Conn) of
+    case awaited(Conn) of
         {ok, {parameter_status, Name, Value}, Read} ->
             settle(store(Read, Name, Value));
         {ok, {backend_key_data, Pid, Secret}, Read} ->
@@ -1350,7 +1390,7 @@ settle(Conn) ->
         {ok, {notice_response, _Fields}, Read} ->
             settle(Read);
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, Read};
+            {ok, Read#conn{opening = infinity}};
         {ok, {error_response, Fields}, Read} ->
             closing(Read, {pgsql_error, Fields});
         {ok, Message, Read} ->
@@ -1360,9 +1400,18 @@ settle(Conn) ->
             closing(Conn, Reason)
     end.
 
+%% PostgreSQL reports about fifteen parameters, each a line of text. What is
+%% kept is bounded well above that and copied out of the read it arrived in, so
+%% a connection holds neither as many as a server cares to send nor the buffers
+%% they came in. One that does not fit is not kept, and is not an error.
 -spec store(conn(), binary(), binary()) -> conn().
-store(#conn{parameters = Parameters} = Conn, Name, Value) ->
-    Conn#conn{parameters = Parameters#{Name => Value}}.
+store(#conn{parameters = Parameters} = Conn, Name, Value) when
+    byte_size(Name) + byte_size(Value) =< ?LONGEST_PARAMETER,
+    is_map_key(Name, Parameters) orelse map_size(Parameters) < ?MOST_PARAMETERS
+->
+    Conn#conn{parameters = Parameters#{binary:copy(Name) => binary:copy(Value)}};
+store(Conn, _Name, _Value) ->
+    Conn.
 
 %%----------------------------------------------------------------------
 %% What the server is allowed to ask for
@@ -1438,7 +1487,7 @@ requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
 secured(Transport, Socket, _Host, _Timeout, #{ssl := false}) ->
     {ok, Transport, Socket};
 secured(Transport, Socket, Host, Timeout, #{ssl := true} = Opts) ->
-    case upgrade(Transport, Socket, Host, Timeout, Opts) of
+    case upgrade(Transport, Socket, Host, within(Timeout), Opts) of
         {ok, Upgraded} -> {ok, ssl, Upgraded};
         {error, Reason} -> {error, Reason}
     end;
