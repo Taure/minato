@@ -91,6 +91,32 @@ jobs:
           path: _build/test/logs
           retention-days: 5
 
+  # Mutation testing runs `<module>_tests` against a module, or the tests
+  # rebar.config names for it, and passes over a module that has neither
+  # without a word. So a module without them is an error here.
+  scored:
+    name: Every module has tests mutation can run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Look for a module mutation testing would skip
+        run: |
+          unscored=0
+          for source in src/*.erl; do
+            module=$(basename "$source" .erl)
+            if [ ! -f "test/${module}_tests.erl" ] &&
+               ! grep -Eq "^[[:space:]]+${module} => \[" rebar.config; then
+              echo "::error file=${source}::${module} has no ${module}_tests and no eunit_tests entry in rebar.config, so mutation testing skips it"
+              unscored=1
+            fi
+          done
+          exit "$unscored"
+
   release:
     needs: [ci, postgres]
     if: ${{ github.event_name == 'push' }}
