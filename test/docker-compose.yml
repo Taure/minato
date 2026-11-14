@@ -56,3 +56,27 @@ services:
       interval: 2s
       timeout: 5s
       retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624
+    container_name: minato-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer:/etc/minato:ro
+    entrypoint: ["/usr/bin/pgbouncer", "/etc/minato/prepared.ini"]
+    ports:
+      - "56432:6432"
+
+  pgbouncer-unprepared:
+    image: edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624
+    container_name: minato-pgbouncer-unprepared
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer:/etc/minato:ro
+    entrypoint: ["/usr/bin/pgbouncer", "/etc/minato/unprepared.ini"]
+    ports:
+      - "56433:6432"
