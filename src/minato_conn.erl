@@ -151,14 +151,16 @@ the server issued is the whole of the authorisation.
 %% eqWAlizer cannot see that the transport field decides what the socket field
 %% holds, and `ssl:connect/3` is specified for the sockets that existed before
 %% it learned to take a handle from `m:socket`. Both are true at run time and
-%% neither is expressible, so the two crossings live here rather than spread
+%% neither is expressible, so the crossings live here rather than spread
 %% through the module.
 -eqwalizer({nowarn_function, handle/1}).
 -eqwalizer({nowarn_function, upgraded/3}).
+-eqwalizer({nowarn_function, over/3}).
 
 -record(conn, {
     transport :: transport(),
     socket :: socket(),
+    under :: minato_socket:socket() | undefined,
     binding :: binary() | undefined,
     buffer = ~"" :: binary(),
     pending = [] :: [minato_protocol:backend()],
@@ -272,9 +274,11 @@ is `timeout` and `send_timeout_close` is `true`, so a server that stops reading
 costs one timeout and the connection, where it used to hold the caller for as
 long as it liked. The bound is on a whole write, not on each part of it, so a
 value of hundreds of megabytes over a slow link wants `{send_timeout, _}` set
-to what that takes, or to `infinity`. On the socket transport a TLS session is
-written by `m:ssl`, which is not given a deadline, so this bound holds for plain
-connections on both transports and for TLS on `inet` only.
+to what that takes, or to `infinity`. A TLS session on the socket transport is
+written by `m:ssl`, which takes no deadline of its own; there the socket under
+the session is shut down when the time runs out, by `m:minato_overdue`, and the
+connection is closed whatever `send_timeout_close` says, since a session cut
+off in the middle of a record cannot be written to again.
 
 The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
 them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`
@@ -523,11 +527,9 @@ drained(Socket, Deadline) ->
         {error, _Closed_or_timeout} -> ok
     end.
 
--spec terminated(conn()) -> ok | {error, term()}.
-terminated(#conn{transport = minato_socket, send_timeout = Timeout} = Conn) ->
-    minato_socket:send(handle(Conn), minato_protocol:encode(terminate), Timeout);
-terminated(#conn{transport = Transport, socket = Socket}) ->
-    Transport:send(Socket, minato_protocol:encode(terminate)).
+-spec terminated(conn()) -> ok | {error, error()}.
+terminated(Conn) ->
+    written(Conn, minato_protocol:encode(terminate)).
 
 -doc """
 Ask the server to cancel whatever this connection is running.
@@ -586,8 +588,36 @@ send(#conn{} = Conn, Message) ->
 -spec written(conn(), iodata()) -> ok | {error, error()}.
 written(#conn{transport = minato_socket, send_timeout = Timeout} = Conn, Bytes) ->
     timed(Conn, minato_socket:send(handle(Conn), Bytes, Timeout));
+written(#conn{transport = ssl, under = Under, send_timeout = Timeout} = Conn, Bytes) when
+    Under =/= undefined, is_integer(Timeout)
+->
+    Timer = minato_overdue:watch(Under, Timeout),
+    watched(Conn, Timer, session_write(Conn#conn.socket, Bytes));
 written(#conn{transport = Transport, socket = Socket}, Bytes) ->
     write(Transport, Socket, Bytes).
+
+%% `ssl:send/2` has no deadline and no driver under it here to have one, so the
+%% write is timed from outside: see `m:minato_overdue`. A write that came back
+%% in time costs a timer started and cancelled, with no message sent.
+-spec watched(conn(), reference(), ok | {error, error()}) -> ok | {error, error()}.
+watched(_Conn, Timer, ok) ->
+    minato_overdue:finished(Timer);
+watched(Conn, Timer, {error, Reason}) ->
+    case minato_overdue:ran_out(Timer) of
+        true -> timed(Conn#conn{send_timeout_close = true}, {error, timeout});
+        false -> {error, Reason}
+    end.
+
+%% A session whose socket is shut down under a write can end the write by
+%% exiting the process the caller is waiting on, which `m:ssl` passes on for
+%% the reasons it does not expect.
+-spec session_write(socket(), iodata()) -> ok | {error, error()}.
+session_write(Socket, Bytes) ->
+    try
+        write(ssl, Socket, Bytes)
+    catch
+        exit:_Ended -> {error, {socket, closed}}
+    end.
 
 -spec timed(conn(), ok | {error, term()}) -> ok | {error, error()}.
 timed(_Conn, ok) ->
@@ -1174,10 +1204,14 @@ secure(Transport, Socket, Host, Deadline, Opts) ->
             start(new(Transport, Socket, Opts), Opts);
         true ->
             case upgrade(Transport, Socket, Host, Deadline, Opts) of
-                {ok, Upgraded} -> start(new(ssl, Upgraded, Opts), Opts);
+                {ok, Upgraded} -> start(over(new(ssl, Upgraded, Opts), Transport, Socket), Opts);
                 {error, Reason} -> {error, Reason}
             end
     end.
+
+-spec over(conn(), plain(), socket()) -> conn().
+over(Conn, minato_socket, Socket) -> Conn#conn{under = Socket};
+over(Conn, gen_tcp, _Port) -> Conn.
 
 -spec upgrade(
     plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()

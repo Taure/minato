@@ -61,8 +61,10 @@ to `true`: a server that stops reading costs one timeout and the connection,
 `{error, {socket, timeout}}`, and a statement deadline, which is spent on reads,
 is no longer the only bound. It bounds a whole write, so a single value of
 hundreds of megabytes over a slow link needs it raised, or `infinity`. A TLS
-session on the socket transport is written by `ssl`, which takes no deadline;
-there the bound is the statement deadline alone.
+session on the socket transport is written by `ssl`, which takes no deadline of
+its own, so there the socket under the session is shut down when the time runs
+out and the connection is closed whatever `send_timeout_close` says. That one
+needs the `minato` application running, which is where the timer is addressed.
 
 Anything else is refused at connect rather than silently dropped. If you hit
 that with an option the driver takes, it is a gap in the list rather than a

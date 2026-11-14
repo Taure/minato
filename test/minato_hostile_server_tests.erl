@@ -168,6 +168,50 @@ a_write_to_a_server_that_stopped_reading_gives_up_test_() ->
         ]
     ].
 
+%% The same peer behind TLS. `ssl:send/2` takes no deadline, and over the
+%% socket transport there is no driver under it with one either, so that write
+%% is ended from outside by `m:minato_overdue`. The read timeout is a minute:
+%% whatever ends the write inside the assertion is the bound on the write.
+a_tls_write_to_a_server_that_stopped_reading_gives_up_test_() ->
+    [
+        {timeout, 120,
+            {Label, fun() ->
+                {ok, _Started} = application:ensure_all_started(minato),
+                Server = minato_backend_server:start([?READY], #{tls => true, after_script => stall}),
+                {ok, Conn} = minato_conn:connect(
+                    tls_opts(Server, maps:merge(#{timeout => 60000}, Given))
+                ),
+                Started = erlang:monotonic_time(millisecond),
+                Result = filled(Conn, binary:copy(~"x", 1 bsl 20), 256),
+                Elapsed = erlang:monotonic_time(millisecond) - Started,
+                Again = minato_conn:send(Conn, sync),
+                ok = minato_conn:close(Conn),
+                minato_backend_server:stop(Server),
+                ?assertEqual({error, {socket, timeout}}, Result),
+                ?assert(Elapsed < 20000, Elapsed),
+                ?assertMatch({error, {socket, _Closed}}, Again)
+            end}}
+     || {Label, Given} <- [
+            {"on the socket transport", #{socket_options => [{send_timeout, 500}]}},
+            {"on the socket transport, left open by the caller", #{
+                socket_options => [{send_timeout, 500}, {send_timeout_close, false}]
+            }},
+            {"on the driver", #{transport => inet, socket_options => [{send_timeout, 500}]}}
+        ]
+    ].
+
+a_tls_write_that_is_in_time_is_left_alone_test() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    Answer = [{command_complete, ~"SELECT 0"}, {ready_for_query, idle}],
+    {Server, {ok, Conn}} = tls_connects([?READY, Answer, Answer], #{
+        socket_options => [{send_timeout, 100}]
+    }),
+    {ok, [_First], Read} = minato_query:simple(Conn, ~"first"),
+    ok = timer:sleep(300),
+    {ok, [_Second], Again} = minato_query:simple(Read, ~"second"),
+    ok = minato_conn:close(Again),
+    minato_backend_server:stop(Server).
+
 %% Answers the startup and then reads nothing more, with a small receive
 %% buffer so that it takes megabytes rather than gigabytes to fill.
 deaf_server() ->

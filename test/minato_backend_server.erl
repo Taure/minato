@@ -50,9 +50,16 @@ made for the server, which `client_tls/1` hands the client the trust for.
 `after_terminate` is what happens once `Terminate` or `CancelRequest` is read:
 `close` is what PostgreSQL does, `hold` keeps the session open and silent
 until the client closes it, and `chatter` keeps writing to it, so a client waiting for the close
-never waits on a quiet socket.
+never waits on a quiet socket. `after_script` is what happens once the script
+has run out: `read` goes on reading and answering nothing, and `stall` stops
+reading, with a small receive buffer, so that a client which goes on writing
+fills it.
 """.
--type opts() :: #{tls => boolean(), after_terminate => close | hold | chatter}.
+-type opts() :: #{
+    tls => boolean(),
+    after_terminate => close | hold | chatter,
+    after_script => read | stall
+}.
 
 -doc "A running server.".
 -opaque server() :: #{pid := pid(), port := inet:port_number(), tls := [ssl:tls_client_option()]}.
@@ -70,7 +77,8 @@ never waits on a quiet socket.
     owner := pid(),
     acceptor := pid(),
     tls := identity() | undefined,
-    after_terminate := close | hold | chatter
+    after_terminate := close | hold | chatter,
+    after_script := read | stall
 }.
 
 -doc "`start/2` with nothing beyond the script.".
@@ -81,14 +89,19 @@ start(Script) ->
 -doc "Listen on an ephemeral port and answer the script.".
 -spec start([answer()], opts()) -> server().
 start(Script, Opts) ->
-    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    Ended = maps:get(after_script, Opts, read),
+    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true} | buffer(Ended)]),
     {ok, Port} = inet:port(Listen),
     {Server, Client} = credentials(maps:get(tls, Opts, false)),
     Owner = self(),
     After = maps:get(after_terminate, Opts, close),
-    Pid = spawn_link(fun() -> accept(Listen, Owner, Script, {Server, After}) end),
+    Pid = spawn_link(fun() -> accept(Listen, Owner, Script, {Server, After, Ended}) end),
     ok = gen_tcp:controlling_process(Listen, Pid),
     #{pid => Pid, port => Port, tls => Client}.
+
+-spec buffer(read | stall) -> [gen_tcp:listen_option()].
+buffer(read) -> [];
+buffer(stall) -> [{recbuf, 4096}].
 
 -doc "Where it is listening.".
 -spec port(server()) -> inet:port_number().
@@ -165,9 +178,9 @@ private_key([_Other | Rest]) ->
     gen_tcp:socket(),
     pid(),
     [answer()],
-    {identity() | undefined, close | hold | chatter}
+    {identity() | undefined, close | hold | chatter, read | stall}
 ) -> no_return().
-accept(Listen, Owner, Script, {Tls, After} = Opts) ->
+accept(Listen, Owner, Script, {Tls, After, Ended} = Opts) ->
     case gen_tcp:accept(Listen, ?ACCEPT_TIMEOUT) of
         {ok, Socket} ->
             Peer = #{
@@ -177,7 +190,8 @@ accept(Listen, Owner, Script, {Tls, After} = Opts) ->
                 owner => Owner,
                 acceptor => self(),
                 tls => Tls,
-                after_terminate => After
+                after_terminate => After,
+                after_script => Ended
             },
             Served = spawn_link(fun() -> served(Peer, Script) end),
             ok = gen_tcp:controlling_process(Socket, Served),
@@ -202,6 +216,10 @@ closed(#{transport := Transport, socket := Socket}) ->
     ok.
 
 -spec serve(peer(), binary(), boolean(), [answer()]) -> peer().
+serve(#{after_script := stall} = Peer, _Buffer, true, []) ->
+    receive
+        {?MODULE, read_on} -> Peer
+    end;
 serve(#{tls := Tls, transport := gen_tcp} = Peer, Buffer, StartedUp, Script) when
     Tls =/= undefined
 ->

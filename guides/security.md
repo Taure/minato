@@ -112,8 +112,8 @@ that was chosen. For each of these there is a test with a server that tries.
   message to `ReadyForQuery`, not each read of it. What the server reports
   about itself on the way is kept up to 64 parameters.
 - **Keep a write waiting.** A write gets the connection's `timeout` and the
-  connection is closed when it runs out. A TLS session on the socket transport
-  is the exception; see [Configuration](configuration.md).
+  connection is closed when it runs out, on both transports, with TLS and
+  without.
 - **Take a pool or a listener down.** An answer that is not a message ends the
   connection it arrived on, which is reconnected with backoff. The process
   holding it stays up, a listener's subscribers are told they were

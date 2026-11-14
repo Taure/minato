@@ -65,8 +65,18 @@ deleted({error, _Reason}) -> {error, not_found}.
 init([]) ->
     Pools = [child(minato_pool, Name, Opts) || Name := Opts <- declared(pools)],
     Listeners = [child(minato_listener, Name, Opts) || Name := Opts <- declared(listeners)],
-    Children = Pools ++ Listeners,
+    Children = [overdue() | Pools ++ Listeners],
     {ok, {#{strategy => one_for_one, intensity => 10, period => 60}, Children}}.
+
+-spec overdue() -> supervisor:child_spec().
+overdue() ->
+    #{
+        id => minato_overdue,
+        start => {minato_overdue, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
+    }.
 
 -spec declared(pools | listeners) -> #{dynamic() => dynamic()}.
 declared(Key) ->
