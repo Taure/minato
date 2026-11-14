@@ -20,9 +20,16 @@ tagged error, and what it answers is no larger than the type allows.
 -eqwalizer({nowarn_function, gen_numeric_wire/0}).
 -eqwalizer({nowarn_function, gen_valid_numeric/0}).
 -eqwalizer({nowarn_function, gen_decimal/0}).
+-eqwalizer({nowarn_function, prop_array_header_is_total/0}).
+-eqwalizer({nowarn_function, prop_array_text_is_total/0}).
+-eqwalizer({nowarn_function, gen_array_wire/0}).
+-eqwalizer({nowarn_function, gen_array_text/0}).
 
 -define(NUMTESTS, 500).
 -define(NUMERIC, 1700).
+-define(INT4_ARRAY, 1007).
+-define(TEXT_ARRAY, 1009).
+-define(MAX_DIMENSIONS, 6).
 -define(LARGEST_NUMERIC_TEXT, 1 + 131072 + 1 + 16383).
 -define(LARGEST_NUMERIC_WIRE, 8 + 2 * ((131072 + 16383 + 3) div 4 + 1)).
 
@@ -36,6 +43,16 @@ numeric_property_test_() ->
         end},
         {"any decimal encodes within the type or is refused", fun() ->
             check(prop_numeric_encode_is_bounded())
+        end}
+    ]}.
+
+array_property_test_() ->
+    {timeout, 300, [
+        {"any array header decodes or is refused", fun() ->
+            check(prop_array_header_is_total())
+        end},
+        {"any array text decodes or is refused", fun() ->
+            check(prop_array_text_is_total())
         end}
     ]}.
 
@@ -84,6 +101,68 @@ prop_numeric_encode_is_bounded() ->
         catch
             error:{minato_codec, #{type := numeric, reason := out_of_range}} -> true
         end
+    ).
+
+%%----------------------------------------------------------------------
+%% arrays
+%%----------------------------------------------------------------------
+
+prop_array_header_is_total() ->
+    ?FORALL(
+        Wire,
+        gen_array_wire(),
+        case decoded(?INT4_ARRAY, Wire) of
+            {ok, List} -> is_list(List) andalso depth(List) =< ?MAX_DIMENSIONS;
+            refused -> true
+        end
+    ).
+
+prop_array_text_is_total() ->
+    ?FORALL(
+        Text,
+        gen_array_text(),
+        try minato_codec:decode(?TEXT_ARRAY, Text, text) of
+            List -> is_list(List) andalso depth(List) =< ?MAX_DIMENSIONS
+        catch
+            error:{minato_codec, #{reason := _}} -> true
+        end
+    ).
+
+depth([First | _Rest]) when is_list(First) -> 1 + depth(First);
+depth(_Flat) -> 1.
+
+gen_array_wire() ->
+    ?LET(
+        {NDim, Sizes, Elements, Trailing},
+        {
+            oneof([range(-2, 9), range(-2147483648, 2147483647)]),
+            list(oneof([range(-1, 3), range(-2147483648, 2147483647)])),
+            list(oneof([null, range(-2147483648, 2147483647), binary()])),
+            oneof([~"", binary()])
+        },
+        <<
+            NDim:32/signed,
+            0:32,
+            23:32,
+            <<<<Size:32/signed, 1:32/signed>> || Size <- Sizes>>/binary,
+            <<<<(element(Element))/binary>> || Element <- Elements>>/binary,
+            Trailing/binary
+        >>
+    ).
+
+element(null) -> <<-1:32/signed>>;
+element(Value) when is_integer(Value) -> <<4:32/signed, Value:32/signed>>;
+element(Bytes) -> <<(byte_size(Bytes)):32/signed, Bytes/binary>>.
+
+gen_array_text() ->
+    ?LET(
+        Characters,
+        list(
+            frequency([
+                {6, ${}, {4, $}}, {3, $,}, {1, $"}, {1, $\\}, {2, $a}, {1, $N}, {1, $\s}
+            ])
+        ),
+        list_to_binary(Characters)
     ).
 
 decoded(Oid, Wire) ->

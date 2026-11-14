@@ -220,5 +220,70 @@ binary_rejects_test_() ->
         )
     ].
 
+%%----------------------------------------------------------------------
+%% Bounds
+%%----------------------------------------------------------------------
+
+six_dimensions_is_the_most_there_is_test_() ->
+    Six = header(6, [1, 1, 1, 1, 1, 1], <<4:32/signed, 7:32/signed>>),
+    Seven = header(7, [1, 1, 1, 1, 1, 1, 1], <<4:32/signed, 7:32/signed>>),
+    [
+        ?_assertEqual([[[[[[7]]]]]], minato_codec:decode(?INT4_ARRAY, Six, binary)),
+        ?_assertEqual([[[[[[7]]]]]], minato_codec:decode(?INT4_ARRAY, ~"{{{{{{7}}}}}}", text)),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := 7}},
+            minato_codec:decode(?INT4_ARRAY, Seven, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range}},
+            minato_codec:decode(?INT4_ARRAY, ~"{{{{{{{7}}}}}}}", text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := 16#7FFFFFFF}},
+            minato_codec:decode(?INT4_ARRAY, <<16#7FFFFFFF:32/signed, 0:32, 23:32>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := -1}},
+            minato_codec:decode(?INT4_ARRAY, <<-1:32/signed, 0:32, 23:32>>, binary)
+        )
+    ].
+
+deep_text_nesting_is_refused_at_the_seventh_brace_test() ->
+    Deep = binary:copy(~"{", 1000000),
+    ?assertError(
+        {minato_codec, #{reason := dimensions_out_of_range}},
+        minato_codec:decode(?INT4_ARRAY, Deep, text)
+    ).
+
+a_dimension_cannot_be_negative_test() ->
+    ?assertError(
+        {minato_codec, #{reason := negative_dimension, value := -2}},
+        minato_codec:decode(?INT4_ARRAY, header(1, [-2], ~""), binary)
+    ).
+
+more_elements_than_the_bytes_could_hold_are_not_read_test_() ->
+    Wide = header(2, [16#7FFFFFFF, 16#7FFFFFFF], <<4:32/signed, 1:32/signed>>),
+    [
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements}},
+            minato_codec:decode(?INT4_ARRAY, Wide, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [2], <<-1:32/signed>>), binary)
+        ),
+        ?_assertEqual(
+            [null, null],
+            minato_codec:decode(
+                ?INT4_ARRAY, header(1, [2], <<-1:32/signed, -1:32/signed>>), binary
+            )
+        ),
+        ?_assertEqual([], minato_codec:decode(?INT4_ARRAY, header(1, [0], ~""), binary))
+    ].
+
+header(NDim, Sizes, Elements) ->
+    <<NDim:32/signed, 0:32, 23:32, <<<<Size:32/signed, 1:32/signed>> || Size <- Sizes>>/binary,
+        Elements/binary>>.
+
 wire(null) -> null;
 wire(IoData) -> iolist_to_binary(IoData).
