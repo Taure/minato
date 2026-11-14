@@ -30,7 +30,7 @@ sitting in a backlog nobody reads, which is exactly the case a cancel test needs
 to observe.
 """.
 
--export([start/1, start/2, port/1, client_tls/1, received/1, stop/1]).
+-export([start/1, start/2, port/1, client_tls/1, received/1, received/2, stop/1]).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -93,7 +93,9 @@ start(Script) ->
 -spec start([answer()], opts()) -> server().
 start(Script, Opts) ->
     Ended = maps:get(after_script, Opts, read),
-    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true} | buffer(Ended)]),
+    {ok, Listen} = gen_tcp:listen(0, [
+        binary, {active, false}, {reuseaddr, true}, {nodelay, true} | buffer(Ended)
+    ]),
     {ok, Port} = inet:port(Listen),
     {Server, Client} = credentials(maps:get(tls, Opts, false)),
     Owner = self(),
@@ -102,6 +104,8 @@ start(Script, Opts) ->
     ok = gen_tcp:controlling_process(Listen, Pid),
     #{pid => Pid, port => Port, tls => Client}.
 
+%% An answer is written a message at a time, and without `nodelay` every write
+%% after the first waits for the client to acknowledge the one before it.
 -spec buffer(read | stall) -> [gen_tcp:listen_option()].
 buffer(read) -> [];
 buffer(stall) -> [{recbuf, 4096}].
@@ -124,14 +128,27 @@ called `start/1`. Under `hold` and `chatter`, `closed` follows `terminate` once
 the client has closed.
 """.
 -spec received(server()) -> [minato_protocol:frontend() | {password_message, binary()} | closed].
-received(#{pid := Pid}) ->
-    drain(Pid).
+received(Server) ->
+    received(Server, ?DRAIN_TIMEOUT).
 
--spec drain(pid()) -> [minato_protocol:frontend() | {password_message, binary()} | closed].
-drain(Pid) ->
+-doc """
+`received/1`, giving up once nothing has arrived for `Quiet` milliseconds.
+
+A message is handed over before it is answered. So a caller that has read the
+answer to the last message it sent can ask with a short wait, and one waiting
+on a message that is never answered, such as `Terminate`, wants `received/1`.
+""".
+-spec received(server(), non_neg_integer()) ->
+    [minato_protocol:frontend() | {password_message, binary()} | closed].
+received(#{pid := Pid}, Quiet) ->
+    drain(Pid, Quiet).
+
+-spec drain(pid(), non_neg_integer()) ->
+    [minato_protocol:frontend() | {password_message, binary()} | closed].
+drain(Pid, Quiet) ->
     receive
-        {?MODULE, Pid, Message} -> [Message | drain(Pid)]
-    after ?DRAIN_TIMEOUT -> []
+        {?MODULE, Pid, Message} -> [Message | drain(Pid, Quiet)]
+    after Quiet -> []
     end.
 
 -doc "Stop listening.".

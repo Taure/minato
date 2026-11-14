@@ -397,14 +397,30 @@ released(Holder) ->
     after 5000 -> error(not_released)
     end.
 
+%% Asked once the call has its answer, and the server hands a message over
+%% before it answers it.
 asked(Server) ->
-    [Message || Message <- minato_backend_server:received(Server), kind(Message) =/= startup].
+    [
+        Message
+     || Message <- minato_backend_server:received(Server, 20), kind(Message) =/= startup
+    ].
 
 opened(Server) ->
-    length([Message || Message <- minato_backend_server:received(Server), kind(Message) =:= startup]).
+    length([
+        Message
+     || Message <- minato_backend_server:received(Server, 20), kind(Message) =:= startup
+    ]).
 
+%% `Terminate` is never answered, so it is waited for, and not for longer than
+%% it takes to come.
 closed(Server) ->
-    lists:member(terminate, minato_backend_server:received(Server)).
+    closed(Server, 10).
+
+closed(_Server, 0) ->
+    false;
+closed(Server, Tries) ->
+    lists:member(terminate, minato_backend_server:received(Server, 20)) orelse
+        closed(Server, Tries - 1).
 
 kind(Message) when is_atom(Message) -> Message;
 kind(Message) -> element(1, Message).

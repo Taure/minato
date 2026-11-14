@@ -245,8 +245,10 @@ connection(Port) ->
         timeout => 1000
     }.
 
+%% The listener answers its caller once the server has answered it, and what
+%% it sends on its own is waited for before this is asked.
 statements(Server) ->
-    [Sql || {query, Sql} <- minato_backend_server:received(Server)].
+    [Sql || {query, Sql} <- minato_backend_server:received(Server, 20)].
 
 %% Another process subscribed to a channel, which reports what it is sent.
 subscriber(Channel) ->

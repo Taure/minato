@@ -345,7 +345,7 @@ a_value_that_does_not_fit_in_a_failed_transaction_asks_nothing_test() ->
     {error, _Divided, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
     _ = asked(Server),
     ?assertError({minato_codec, _Report}, minato_query:cached(Aborted, ?SQL, [~"seven"])),
-    ?assertEqual([], asked(Server)).
+    ?assertEqual([], at_rest(Server)).
 
 a_statement_that_no_longer_parses_is_returned_as_the_server_put_it_test() ->
     Script = kept() ++ [[refused(~"42P01")], [], ?IDLE],
@@ -364,7 +364,7 @@ the_wrong_number_of_values_for_a_kept_statement_asks_nothing_test() ->
         {minato_query, #{reason := parameter_count_mismatch, data := {1, 0}}},
         minato_query:cached(Kept, ?SQL, [])
     ),
-    ?assertEqual([], asked(Server)),
+    ?assertEqual([], at_rest(Server)),
     ?assertMatch({ok, #{rows := [{8}]}, _Read}, minato_query:cached(Kept, ?SQL, [8])).
 
 %% The server refuses the statement it kept, over the types it was parsed
@@ -449,7 +449,7 @@ a_statement_run_unnamed_for_want_of_room_keeps_its_deadline_test() ->
     Script = parsed([], [?INT4]) ++ [[bind_complete], [], Slow],
     {Server, Conn} = connected(Script, #{prepared_statements => 0, timeout => 5000}),
     _ = minato_query:cached(Conn, ~"SELECT pg_sleep(9)", [], #{timeout => 100}),
-    ?assert(lists:member({cancel_request, 4242, 777}, asked(Server))).
+    ?assert(lists:member({cancel_request, 4242, 777}, at_rest(Server))).
 
 %%----------------------------------------------------------------------
 %% Scripts
@@ -518,12 +518,24 @@ connected(Script, Opts) ->
     Server = minato_backend_server:start([?READY | Script]),
     Port = minato_backend_server:port(Server),
     {ok, Conn} = minato_conn:connect(
-        maps:merge(#{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 1000}, Opts)
+        maps:merge(#{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 500}, Opts)
     ),
     {Server, Conn}.
 
+%% Every exchange here has been answered by the time it is asked about, and
+%% the server hands a message over before it answers it.
 asked(Server) ->
-    [Message || Message <- minato_backend_server:received(Server), kind(Message) =/= startup].
+    asked(Server, 20).
+
+%% For what is expected not to have been sent, and for what is never answered.
+at_rest(Server) ->
+    asked(Server, 200).
+
+asked(Server, Quiet) ->
+    [
+        Message
+     || Message <- minato_backend_server:received(Server, Quiet), kind(Message) =/= startup
+    ].
 
 kinds(Messages) ->
     [kind(Message) || Message <- Messages].
