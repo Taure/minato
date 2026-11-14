@@ -199,6 +199,8 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(codec)* The last date and timestamp the wire holds, and whole hours
 - *(overdue)* What starts it, what it leaves behind, and what the supervisor allows
 - *(query)* What a query reports of itself, and answers that come out of turn
+- *(pool)* Clear a pool a run that was cut short left under the supervisor
+- *(pool)* What a pool makes of the limit it asks for, where mutation testing can run it
 
 ## [1.1.6] - 2026-11-06
 
