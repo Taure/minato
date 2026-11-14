@@ -29,7 +29,11 @@ Skips when no server answers.
     a_pooled_transaction_that_raises_keeps_nothing/1,
     the_status_follows_the_transaction/1,
     a_savepoint_recovers_a_failed_statement/1,
-    a_released_savepoint_keeps_its_work/1
+    a_released_savepoint_keeps_its_work/1,
+    an_exception_with_an_answer_unread_rolls_back_and_keeps_the_connection/1,
+    an_exception_with_a_rollback_unread_is_not_mistaken_for_its_own/1,
+    an_exception_with_an_exchange_left_open_rolls_back/1,
+    an_exception_in_the_middle_of_an_answer_never_answers_out_of_step/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -48,7 +52,11 @@ all() ->
         a_pooled_transaction_that_raises_keeps_nothing,
         the_status_follows_the_transaction,
         a_savepoint_recovers_a_failed_statement,
-        a_released_savepoint_keeps_its_work
+        a_released_savepoint_keeps_its_work,
+        an_exception_with_an_answer_unread_rolls_back_and_keeps_the_connection,
+        an_exception_with_a_rollback_unread_is_not_mistaken_for_its_own,
+        an_exception_with_an_exchange_left_open_rolls_back,
+        an_exception_in_the_middle_of_an_answer_never_answers_out_of_step
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -214,6 +222,92 @@ a_released_savepoint_keeps_its_work(Config) ->
     {ok, Released} = minato_txn:release(Written, ~"here"),
     {ok, _Committed} = minato_txn:commit(Released),
     ?assertEqual([~"a"], committed()).
+
+%%----------------------------------------------------------------------
+%% An exception with answers still on their way
+%%----------------------------------------------------------------------
+
+%% The function wrote a statement and raised before reading what came back.
+%% The rollback is sent on the connection the function was given, so the
+%% answer it reads first is the function's, not its own, and a caller that
+%% went on with the connection would read every answer one statement late.
+-spec an_exception_with_an_answer_unread_rolls_back_and_keeps_the_connection([{atom(), term()}]) ->
+    ok.
+an_exception_with_an_answer_unread_rolls_back_and_keeps_the_connection(Config) ->
+    Conn = conn(Config),
+    Unread = ~"INSERT INTO minato_txn (name) VALUES ('a'); SELECT generate_series(1, 50000)",
+    ?assertError(
+        boom,
+        minato_txn:transaction(Conn, fun(Open) ->
+            ok = minato_conn:send(Open, {query, Unread}),
+            error(boom)
+        end)
+    ),
+    ?assertEqual([], committed()),
+    ?assertEqual({ok, [{1}], idle}, asked(Conn, ~"SELECT 1")),
+    ?assertEqual({ok, [{2}], idle}, asked(Conn, ~"SELECT 2")).
+
+-spec an_exception_with_a_rollback_unread_is_not_mistaken_for_its_own([{atom(), term()}]) -> ok.
+an_exception_with_a_rollback_unread_is_not_mistaken_for_its_own(Config) ->
+    Conn = conn(Config),
+    ?assertThrow(
+        gone,
+        minato_txn:transaction(Conn, fun(Open) ->
+            {ok, _Result, Written} = insert(Open, ~"a"),
+            ok = minato_conn:send(Written, {query, ~"ROLLBACK"}),
+            throw(gone)
+        end)
+    ),
+    ?assertEqual([], committed()),
+    ?assertEqual({ok, [{1}], idle}, asked(Conn, ~"SELECT 1")).
+
+%% A `Parse` the server refused and no `Sync` after it: everything but a `Sync`
+%% is ignored from there on, a `ROLLBACK` included.
+-spec an_exception_with_an_exchange_left_open_rolls_back([{atom(), term()}]) -> ok.
+an_exception_with_an_exchange_left_open_rolls_back(Config) ->
+    Conn = conn(Config),
+    ?assertExit(
+        stopped,
+        minato_txn:transaction(Conn, fun(Open) ->
+            {ok, _Result, Written} = insert(Open, ~"a"),
+            ok = minato_conn:send(Written, [{parse, ~"", ~"NOT SQL AT ALL", []}, flush]),
+            exit(stopped)
+        end)
+    ),
+    ?assertEqual([], committed()),
+    ?assertEqual({ok, [{1}], idle}, asked(Conn, ~"SELECT 1")).
+
+%% The function stopped part way through reading, and what it had read went
+%% with it. The connection it was given may now start in the middle of a
+%% message. Either it is read through to the rollback or it is closed; what it
+%% must never do is hand the next statement somebody else's answer.
+-spec an_exception_in_the_middle_of_an_answer_never_answers_out_of_step([{atom(), term()}]) ->
+    ok.
+an_exception_in_the_middle_of_an_answer_never_answers_out_of_step(_Config) ->
+    {ok, Conn} = minato_conn:connect((opts())#{timeout => 1000}),
+    Unread = ~"INSERT INTO minato_txn (name) VALUES ('a'); SELECT generate_series(1, 50000)",
+    ?assertError(
+        boom,
+        minato_txn:transaction(Conn, fun(Open) ->
+            ok = minato_conn:send(Open, {query, Unread}),
+            {ok, _First, Read} = minato_conn:next(Open),
+            {ok, _Second, _More} = minato_conn:next(Read),
+            error(boom)
+        end)
+    ),
+    ?assertEqual([], committed()),
+    case asked(Conn, ~"SELECT 1") of
+        {ok, Rows, Status} -> ?assertEqual({[{1}], idle}, {Rows, Status});
+        {error, Reason} -> ?assertMatch({socket, _Closed}, Reason)
+    end,
+    ok = minato_conn:close(Conn).
+
+asked(Conn, Sql) ->
+    case minato_query:query(Conn, Sql, []) of
+        {ok, #{rows := Rows}, Read} -> {ok, Rows, minato_txn:status(Read)};
+        {error, Reason, _Read} -> {error, Reason};
+        {error, Reason} -> {error, Reason}
+    end.
 
 %%----------------------------------------------------------------------
 %% Asking the server what survived

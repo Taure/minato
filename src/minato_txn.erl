@@ -77,6 +77,13 @@ Run a function inside a transaction.
 re-raised, so a `throw` out of the middle of a transaction cannot leave the
 connection holding an open one.
 
+The rollback after an exception is sent on the connection the function was
+given, since the one it had reached went with the exception. Answers the
+function sent for and never read are read past, so the connection that was
+passed in is idle and usable afterwards. When they cannot be, because the
+function stopped in the middle of reading one, the connection is closed, which
+rolls the transaction back too, and its next use says `{error, {socket, _}}`.
+
 Answers `{error, transaction_rolled_back, Conn}` when the server turned the
 `COMMIT` into a `ROLLBACK`, which is the case a caller must not read as success.
 
@@ -157,8 +164,42 @@ guarded(Conn, Fun) ->
         {error, Reason} -> {error, Reason}
     catch
         Class:Reason:Stacktrace ->
-            _ = rollback(Conn),
+            ok = abandoned(Conn),
             reraise(Class, Reason, Stacktrace)
+    end.
+
+%% The function raised somewhere this module cannot see, and all that is left
+%% is the connection it was given, not the one it had got to. Answers it never
+%% read may still be on their way, so the first `ROLLBACK` tag to arrive is not
+%% necessarily this one's. The rollback is therefore sent behind a `Sync`, which
+%% ends an extended exchange that was left open, and ahead of a value only this
+%% call knows; everything before that value is somebody else's answer. A
+%% connection that does not get there is closed, which rolls back as well.
+-spec abandoned(conn()) -> ok.
+abandoned(Conn) ->
+    Mark = binary:encode_hex(crypto:strong_rand_bytes(8)),
+    Plain = minato_conn:decoding_opts(Conn, undefined),
+    try rolled_back_to(Plain, Mark) of
+        true -> ok;
+        false -> minato_conn:close(Conn)
+    catch
+        error:{minato_protocol, _Unframed} -> minato_conn:close(Conn)
+    end.
+
+-spec rolled_back_to(conn(), binary()) -> boolean().
+rolled_back_to(Conn, Mark) ->
+    case minato_conn:send(Conn, [sync, {query, [~"ROLLBACK; SELECT '", Mark, ~"'"]}]) of
+        ok -> marked(Conn, <<1:16, (byte_size(Mark)):32, Mark/binary>>, false);
+        {error, _Reason} -> false
+    end.
+
+-spec marked(conn(), binary(), boolean()) -> boolean().
+marked(Conn, Row, Seen) ->
+    case minato_conn:next(Conn) of
+        {ok, {data_row, Row}, Read} -> marked(Read, Row, true);
+        {ok, {ready_for_query, Status}, _Ready} when Seen -> Status =:= idle;
+        {ok, _Unread, Read} -> marked(Read, Row, Seen);
+        {error, _Reason} -> false
     end.
 
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
