@@ -285,8 +285,12 @@ The second element is a row count for the tags that carry one, and an atom
 otherwise: `undefined` where there is nothing to count, as in `{'begin',
 undefined}`, and the object acted on for a tag that names one, as in `{create,
 table}`.
+
+Every atom comes from a table of PostgreSQL's own tag words. A word that is not
+in it is left as the binary the server sent, so a server with tags of its own
+answers `{~"FROBNICATE", 3}` rather than making an atom.
 """.
--type tag() :: {atom(), non_neg_integer() | atom()}.
+-type tag() :: {atom() | binary(), non_neg_integer() | atom() | binary()}.
 
 -doc "A row returned under `return_rows_as_maps`, keyed by column name.".
 -type row_map() :: #{atom() | binary() => minato_codec:value()}.
@@ -297,11 +301,16 @@ table}`.
 -doc "One decoded row, a tuple by default and a `t:row_map/0` under `return_rows_as_maps`.".
 -type row() :: tuple() | row_map().
 
--doc "Everything a completed query produced.".
+-doc """
+Everything a completed query produced.
+
+`command` and `num_rows` are the two halves of `t:tag/0`, so `command` is an
+atom for every tag PostgreSQL has and a binary for one it does not.
+""".
 -type result() :: #{
-    command := atom(),
+    command := atom() | binary(),
     rows := [row()],
-    num_rows := non_neg_integer() | atom()
+    num_rows := non_neg_integer() | atom() | binary()
 }.
 
 -doc "Decode-time options. See the module documentation.".

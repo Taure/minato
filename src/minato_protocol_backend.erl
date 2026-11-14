@@ -16,25 +16,22 @@ The process ID and secret key a server sends at startup are the whole of what
 query cancellation impossible for the life of the connection, so they are
 decoded and handed on.
 
-## Command tags become atoms
+## Command tags are read against a closed vocabulary
 
 `CommandComplete` carries a tag such as `SELECT 5` or `CREATE TABLE`, and it is
-turned into `{select, 5}` and `{create, table}`. The atoms are safe to create
-from server bytes because the tag vocabulary is compiled into the server: a
-tag is chosen from a fixed list by the command that ran, and no query can put a
-new word in it.
+turned into `{select, 5}` and `{create, table}`. The atoms come from a table
+compiled into this module, holding the words PostgreSQL's own tag list is made
+of. No atom is ever created from bytes that arrived on the socket, so nothing on
+the far end of it can grow the atom table, whatever it claims to have run.
 
-That argument covers a server behaving as documented and nothing else, so it
-does not decide what happens to bytes that are not a tag. A word of more than
-255 bytes, or one that is not valid UTF-8, is refused as a malformed message.
-Left to `binary_to_atom/2` the first would raise `system_limit` and the second
-`badarg`, which would let whatever is on the far end of the socket choose an
-exception outside minato's own shape.
+A word that is not in the table is kept as the binary it arrived as:
+`FROBNICATE 3` from a server that is not quite PostgreSQL is
+`{~"FROBNICATE", 3}`, with the count still a count. Such a word has to be valid
+UTF-8 and no longer than 255 bytes, or the tag is refused as a malformed
+message; PostgreSQL's own tags fit in 64.
 
-The four tags every workload actually ends on are matched whole, because the
-general path splits the tag into a list, lowercases a copy of each word and
-looks each one up in the atom table, and that is a surprising amount of work to
-find out that a `SELECT` selected.
+The four tags every workload actually ends on are matched whole, ahead of the
+table.
 
 ## Unrecognised messages
 
@@ -48,6 +45,7 @@ what the protocol documentation asks of a client.
 -export([decode/2]).
 
 -define(LONGEST_TAG_WORD, 255).
+-define(LONGEST_COUNT, 20).
 
 -doc "Decode one backend message from its type byte and its complete payload.".
 -spec decode(byte(), binary()) -> minato_protocol:backend().
@@ -221,61 +219,180 @@ malformed_tag(Payload) ->
 
 -spec tag(binary()) -> minato_protocol:tag().
 tag(<<"SELECT ", Rows/binary>>) ->
-    {select, count_or_word(Rows)};
+    {select, count_or_object(Rows)};
 tag(<<"INSERT 0 ", Rows/binary>>) ->
-    {insert, count_or_word(Rows)};
+    {insert, count_or_object(Rows)};
 tag(<<"UPDATE ", Rows/binary>>) ->
-    {update, count_or_word(Rows)};
+    {update, count_or_object(Rows)};
 tag(<<"DELETE ", Rows/binary>>) ->
-    {delete, count_or_word(Rows)};
+    {delete, count_or_object(Rows)};
 tag(Tag) ->
-    case binary:split(Tag, ~" ", [global]) of
-        [Command] -> {word(Command), undefined};
-        [~"INSERT", _Oid, Rows] -> {insert, count_or_word(Rows)};
-        [Command, Second] -> {word(Command), count_or_word(Second)};
-        [Command | Object] -> {word(Command), word(join(Object))}
+    case binary:split(Tag, ~" ") of
+        [Command] -> {command(Command), undefined};
+        [~"INSERT", Rest] -> {insert, count_or_object(after_oid(Rest))};
+        [Command, Rest] -> {command(Command), count_or_object(Rest)}
     end.
 
--spec count_or_word(binary()) -> non_neg_integer() | atom().
-count_or_word(Bin) ->
+-spec after_oid(binary()) -> binary().
+after_oid(Rest) ->
+    case binary:split(Rest, ~" ") of
+        [_Oid, Rows] -> Rows;
+        [Rows] -> Rows
+    end.
+
+-spec count_or_object(binary()) -> non_neg_integer() | atom() | binary().
+count_or_object(Bin) ->
     case count(Bin) of
         {ok, Count} -> Count;
-        error -> word(Bin)
+        error -> object(Bin)
     end.
 
+%% Reading a decimal string costs more than linear time in its length, and a
+%% count that fits in 64 bits has at most 20 digits, so a longer one is not
+%% read at all.
 -spec count(binary()) -> {ok, non_neg_integer()} | error.
-count(Bin) ->
+count(Bin) when byte_size(Bin) =< ?LONGEST_COUNT ->
     try binary_to_integer(Bin) of
         Count when Count >= 0 -> {ok, Count};
         _Negative -> error
     catch
         error:badarg -> error
-    end.
-
--spec word(binary()) -> atom().
-word(Bin) when byte_size(Bin) =< ?LONGEST_TAG_WORD ->
-    try
-        % elp:ignore W0023 - the tag vocabulary is compiled into the server
-        binary_to_atom(lowercase(Bin), utf8)
-    catch
-        error:badarg -> minato_protocol:bad(command_complete, tag_word_not_utf8, Bin)
     end;
-word(Bin) ->
+count(_Bin) ->
+    error.
+
+-spec command(binary()) -> atom() | binary().
+command(~"ALTER") -> alter;
+command(~"ANALYZE") -> analyze;
+command(~"BEGIN") -> 'begin';
+command(~"CALL") -> call;
+command(~"CHECKPOINT") -> checkpoint;
+command(~"CLOSE") -> close;
+command(~"CLUSTER") -> cluster;
+command(~"COMMENT") -> comment;
+command(~"COMMIT") -> commit;
+command(~"COPY") -> copy;
+command(~"CREATE") -> create;
+command(~"DEALLOCATE") -> deallocate;
+command(~"DECLARE") -> declare;
+command(~"DELETE") -> delete;
+command(~"DISCARD") -> discard;
+command(~"DO") -> do;
+command(~"DROP") -> drop;
+command(~"EXECUTE") -> execute;
+command(~"EXPLAIN") -> explain;
+command(~"FETCH") -> fetch;
+command(~"GRANT") -> grant;
+command(~"IMPORT") -> import;
+command(~"INSERT") -> insert;
+command(~"LISTEN") -> listen;
+command(~"LOAD") -> load;
+command(~"LOCK") -> lock;
+command(~"MERGE") -> merge;
+command(~"MOVE") -> move;
+command(~"NOTIFY") -> notify;
+command(~"PREPARE") -> prepare;
+command(~"REASSIGN") -> reassign;
+command(~"REFRESH") -> refresh;
+command(~"REINDEX") -> reindex;
+command(~"RELEASE") -> release;
+command(~"RESET") -> reset;
+command(~"REVOKE") -> revoke;
+command(~"ROLLBACK") -> rollback;
+command(~"SAVEPOINT") -> savepoint;
+command(~"SECURITY") -> security;
+command(~"SELECT") -> select;
+command(~"SET") -> set;
+command(~"SHOW") -> show;
+command(~"START") -> start;
+command(~"TRUNCATE") -> truncate;
+command(~"UNLISTEN") -> unlisten;
+command(~"UPDATE") -> update;
+command(~"VACUUM") -> vacuum;
+command(Word) -> unlisted(Word).
+
+-spec object(binary()) -> atom() | binary().
+object(~"ACCESS METHOD") -> access_method;
+object(~"AGGREGATE") -> aggregate;
+object(~"ALL") -> all;
+object(~"CAST") -> cast;
+object(~"COLLATION") -> collation;
+object(~"CONSTRAINT") -> constraint;
+object(~"CONSTRAINTS") -> constraints;
+object(~"CONVERSION") -> conversion;
+object(~"CURSOR") -> cursor;
+object(~"CURSOR ALL") -> cursor_all;
+object(~"DATABASE") -> database;
+object(~"DEFAULT PRIVILEGES") -> default_privileges;
+object(~"DOMAIN") -> domain;
+object(~"EVENT TRIGGER") -> event_trigger;
+object(~"EXTENSION") -> extension;
+object(~"FOR KEY SHARE") -> for_key_share;
+object(~"FOR NO KEY UPDATE") -> for_no_key_update;
+object(~"FOR SHARE") -> for_share;
+object(~"FOR UPDATE") -> for_update;
+object(~"FOREIGN DATA WRAPPER") -> foreign_data_wrapper;
+object(~"FOREIGN SCHEMA") -> foreign_schema;
+object(~"FOREIGN TABLE") -> foreign_table;
+object(~"FROM") -> from;
+object(~"FUNCTION") -> function;
+object(~"INDEX") -> index;
+object(~"INTO") -> into;
+object(~"LABEL") -> label;
+object(~"LANGUAGE") -> language;
+object(~"LARGE OBJECT") -> large_object;
+object(~"MATERIALIZED VIEW") -> materialized_view;
+object(~"OPERATOR") -> operator;
+object(~"OPERATOR CLASS") -> operator_class;
+object(~"OPERATOR FAMILY") -> operator_family;
+object(~"OWNED") -> owned;
+object(~"PLANS") -> plans;
+object(~"POLICY") -> policy;
+object(~"PREPARED") -> prepared;
+object(~"PROCEDURE") -> procedure;
+object(~"PUBLICATION") -> publication;
+object(~"REPLICATION SLOT") -> replication_slot;
+object(~"ROLE") -> role;
+object(~"ROUTINE") -> routine;
+object(~"RULE") -> rule;
+object(~"SCHEMA") -> schema;
+object(~"SEQUENCE") -> sequence;
+object(~"SEQUENCES") -> sequences;
+object(~"SERVER") -> server;
+object(~"STATISTICS") -> statistics;
+object(~"SUBSCRIPTION") -> subscription;
+object(~"SYSTEM") -> system;
+object(~"TABLE") -> table;
+object(~"TABLE AS") -> table_as;
+object(~"TABLESPACE") -> tablespace;
+object(~"TEMP") -> temp;
+object(~"TEXT SEARCH CONFIGURATION") -> text_search_configuration;
+object(~"TEXT SEARCH DICTIONARY") -> text_search_dictionary;
+object(~"TEXT SEARCH PARSER") -> text_search_parser;
+object(~"TEXT SEARCH TEMPLATE") -> text_search_template;
+object(~"TRANSACTION") -> transaction;
+object(~"TRANSFORM") -> transform;
+object(~"TRIGGER") -> trigger;
+object(~"TYPE") -> type;
+object(~"USER MAPPING") -> user_mapping;
+object(~"VIEW") -> view;
+object(Words) -> unlisted(Words).
+
+%% Copied, because it is kept in a result for as long as the caller keeps the
+%% result, and uncopied it would hold the buffer it arrived in for as long.
+-spec unlisted(binary()) -> binary().
+unlisted(Bin) when byte_size(Bin) =< ?LONGEST_TAG_WORD ->
+    case utf8(Bin) of
+        true -> binary:copy(Bin);
+        false -> minato_protocol:bad(command_complete, tag_word_not_utf8, Bin)
+    end;
+unlisted(Bin) ->
     minato_protocol:bad(command_complete, tag_word_too_long, byte_size(Bin)).
 
--spec join([binary()]) -> binary().
-join([Word]) ->
-    Word;
-join([Word | Rest]) ->
-    <<Word/binary, $_, (join(Rest))/binary>>.
-
--spec lowercase(binary()) -> binary().
-lowercase(Bin) ->
-    <<<<(lowercase_byte(Byte))>> || <<Byte>> <= Bin>>.
-
--spec lowercase_byte(byte()) -> byte().
-lowercase_byte(Byte) when Byte >= $A, Byte =< $Z -> Byte + 32;
-lowercase_byte(Byte) -> Byte.
+-spec utf8(binary()) -> boolean().
+utf8(<<_/utf8, Rest/binary>>) -> utf8(Rest);
+utf8(~"") -> true;
+utf8(_Invalid) -> false.
 
 %%----------------------------------------------------------------------
 %% Error and notice fields

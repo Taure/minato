@@ -331,6 +331,103 @@ command_complete_test_() ->
      || {Tag, Expected} <- Cases
     ].
 
+every_tag_postgresql_has_is_read_as_atoms_test_() ->
+    Cases = [
+        {~"ALTER DEFAULT PRIVILEGES", {alter, default_privileges}},
+        {~"ALTER TEXT SEARCH CONFIGURATION", {alter, text_search_configuration}},
+        {~"ALTER SYSTEM", {alter, system}},
+        {~"ANALYZE", {analyze, undefined}},
+        {~"CALL", {call, undefined}},
+        {~"CHECKPOINT", {checkpoint, undefined}},
+        {~"CLOSE CURSOR", {close, cursor}},
+        {~"CLOSE CURSOR ALL", {close, cursor_all}},
+        {~"COMMIT PREPARED", {commit, prepared}},
+        {~"CREATE FOREIGN DATA WRAPPER", {create, foreign_data_wrapper}},
+        {~"CREATE MATERIALIZED VIEW", {create, materialized_view}},
+        {~"CREATE OPERATOR CLASS", {create, operator_class}},
+        {~"CREATE USER MAPPING", {create, user_mapping}},
+        {~"DEALLOCATE", {deallocate, undefined}},
+        {~"DEALLOCATE ALL", {deallocate, all}},
+        {~"DISCARD ALL", {discard, all}},
+        {~"DISCARD PLANS", {discard, plans}},
+        {~"DISCARD SEQUENCES", {discard, sequences}},
+        {~"DISCARD TEMP", {discard, temp}},
+        {~"DO", {do, undefined}},
+        {~"DROP OWNED", {drop, owned}},
+        {~"EXPLAIN", {explain, undefined}},
+        {~"GRANT", {grant, undefined}},
+        {~"GRANT ROLE", {grant, role}},
+        {~"IMPORT FOREIGN SCHEMA", {import, foreign_schema}},
+        {~"LOCK TABLE", {lock, table}},
+        {~"NOTIFY", {notify, undefined}},
+        {~"PREPARE", {prepare, undefined}},
+        {~"PREPARE TRANSACTION", {prepare, transaction}},
+        {~"REASSIGN OWNED", {reassign, owned}},
+        {~"REFRESH MATERIALIZED VIEW", {refresh, materialized_view}},
+        {~"REINDEX", {reindex, undefined}},
+        {~"RELEASE", {release, undefined}},
+        {~"RESET", {reset, undefined}},
+        {~"REVOKE ROLE", {revoke, role}},
+        {~"ROLLBACK PREPARED", {rollback, prepared}},
+        {~"SAVEPOINT", {savepoint, undefined}},
+        {~"SECURITY LABEL", {security, label}},
+        {~"SELECT INTO", {select, into}},
+        {~"SET CONSTRAINTS", {set, constraints}},
+        {~"START TRANSACTION", {start, transaction}},
+        {~"UNLISTEN", {unlisten, undefined}},
+        {~"VACUUM", {vacuum, undefined}}
+    ],
+    [
+        {
+            binary_to_list(Tag),
+            ?_assertEqual({command_complete, Expected}, dec($C, <<Tag/binary, 0>>))
+        }
+     || {Tag, Expected} <- Cases
+    ].
+
+a_word_outside_the_vocabulary_stays_a_binary_test_() ->
+    [
+        ?_assertEqual({command_complete, {~"FROBNICATE", 3}}, dec($C, <<"FROBNICATE 3", 0>>)),
+        ?_assertEqual(
+            {command_complete, {~"FROBNICATE", undefined}}, dec($C, <<"FROBNICATE", 0>>)
+        ),
+        ?_assertEqual(
+            {command_complete, {create, ~"WIDGET FACTORY"}},
+            dec($C, <<"CREATE WIDGET FACTORY", 0>>)
+        ),
+        ?_assertEqual({command_complete, {~"select", ~"x y"}}, dec($C, <<"select x y", 0>>)),
+        ?_assertEqual({command_complete, {select, ~"many"}}, dec($C, <<"SELECT many", 0>>)),
+        ?_assertEqual({command_complete, {insert, ~"some"}}, dec($C, <<"INSERT 0 some", 0>>)),
+        ?_assertEqual({command_complete, {~"", undefined}}, dec($C, <<0>>))
+    ].
+
+no_atom_is_made_from_a_tag_test() ->
+    Tag = fun(N) ->
+        Suffix = integer_to_binary(N),
+        <<"VERB", Suffix/binary, " NOUN", Suffix/binary, " OTHER", Suffix/binary, 0>>
+    end,
+    _ = dec($C, Tag(0)),
+    Before = erlang:system_info(atom_count),
+    _ = [dec($C, Tag(N)) || N <- lists:seq(1, 2000)],
+    ?assertEqual(Before, erlang:system_info(atom_count)).
+
+a_count_too_long_to_be_one_is_not_read_as_a_number_test_() ->
+    Digits = fun(Size) -> binary:copy(~"9", Size) end,
+    [
+        ?_assertEqual(
+            {command_complete, {select, 99999999999999999999}},
+            dec($C, <<"SELECT ", (Digits(20))/binary, 0>>)
+        ),
+        ?_assertEqual(
+            {command_complete, {select, Digits(21)}},
+            dec($C, <<"SELECT ", (Digits(21))/binary, 0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{message := command_complete, reason := tag_word_too_long}},
+            dec($C, <<"SELECT ", (Digits(1000000))/binary, 0>>)
+        )
+    ].
+
 command_complete_rejects_trailing_bytes_test() ->
     ?assertError(
         {minato_protocol, #{message := command_complete, reason := trailing_bytes}},
