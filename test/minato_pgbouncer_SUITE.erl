@@ -36,7 +36,7 @@ A group skips when its pooler does not answer.
     a_pool_is_served_and_reset_through_the_pooler/1,
     a_notification_does_not_reach_a_listener_behind_the_pooler/1,
     a_kept_statement_follows_the_client_to_another_backend/1,
-    a_kept_statement_first_used_on_another_backend_is_refused/1,
+    a_kept_statement_is_parsed_and_first_run_on_one_backend/1,
     a_kept_statement_lost_to_another_backend_is_parsed_again/1,
     a_connection_that_keeps_no_statements_is_answered_by_any_backend/1
 ]).
@@ -57,7 +57,7 @@ groups() ->
         {unprepared, [],
             either() ++
                 [
-                    a_kept_statement_first_used_on_another_backend_is_refused,
+                    a_kept_statement_is_parsed_and_first_run_on_one_backend,
                     a_kept_statement_lost_to_another_backend_is_parsed_again,
                     a_connection_that_keeps_no_statements_is_answered_by_any_backend
                 ]}
@@ -246,13 +246,16 @@ a_kept_statement_follows_the_client_to_another_backend(Config) ->
 %% max_prepared_statements at zero
 %%----------------------------------------------------------------------
 
--spec a_kept_statement_first_used_on_another_backend_is_refused([{atom(), term()}]) -> ok.
-a_kept_statement_first_used_on_another_backend_is_refused(Config) ->
+%% `Parse` and `Bind` travel in one exchange, which the pooler keeps on one
+%% backend, so the first use is answered wherever it lands. It was refused
+%% with 26000 while a `Sync` stood between the two.
+-spec a_kept_statement_is_parsed_and_first_run_on_one_backend([{atom(), term()}]) -> ok.
+a_kept_statement_is_parsed_and_first_run_on_one_backend(Config) ->
     ok = both_backends_idle(Config),
-    Answer = minato_query:cached(connected(Config), ~"SELECT $1::int4", [1]),
-    ?assertMatch({error, {pgsql_error, #{code := ~"26000"}}, _Conn}, Answer),
-    {error, _Reason, Refused} = Answer,
-    ok = minato_conn:close(Refused).
+    {ok, Result, Kept} = minato_query:cached(connected(Config), ~"SELECT $1::int4", [1]),
+    ?assertMatch(#{rows := [{1}]}, Result),
+    ?assertEqual({1, 64}, minato_conn:statements(Kept)),
+    ok = minato_conn:close(Kept).
 
 -spec a_kept_statement_lost_to_another_backend_is_parsed_again([{atom(), term()}]) -> ok.
 a_kept_statement_lost_to_another_backend_is_parsed_again(Config) ->

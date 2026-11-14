@@ -205,12 +205,15 @@ That is the price of not guessing them, and `prepare/3` pays it once.
 query(Conn, Sql, Parameters, Opts) ->
     Bounded = bounded(Conn, Opts),
     Decoding = decoding(Opts),
-    observed(Bounded, unnamed, Sql, fun() ->
-        case describe(Bounded, ?UNNAMED, Sql) of
-            {ok, Statement, Described} -> run(Described, Statement, Parameters, Decoding);
-            Failed -> Failed
-        end
-    end).
+    observed(Bounded, unnamed, Sql, fun() -> unnamed(Bounded, Sql, Parameters, Decoding) end).
+
+-spec unnamed(conn(), iodata(), [term()], minato_protocol:opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+unnamed(Conn, Sql, Parameters, Opts) ->
+    case describe(Conn, ?UNNAMED, Sql) of
+        {ok, Statement, Described} -> run(Described, Statement, Parameters, Opts);
+        Failed -> Failed
+    end.
 
 -doc "`cached/4` with the default decoding options.".
 -spec cached(conn(), iodata(), [term()]) ->
@@ -262,20 +265,25 @@ cached(Conn, Sql, Parameters, Opts) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 parsed(Conn, Sql, Parameters, Opts) ->
     case minato_conn:claim(Conn) of
-        {undefined, Full} -> query(Full, Sql, Parameters, Opts);
-        {Name, Claimed} -> prepared(Claimed, Name, Sql, Parameters, Opts)
+        {undefined, Full} -> unnamed(Full, Sql, Parameters, Opts);
+        {Name, Claimed} -> kept(Claimed, Name, Sql, Parameters, Opts)
     end.
 
--spec prepared(conn(), binary(), binary(), [term()], minato_protocol:opts()) ->
+%% `Parse` and `Describe` go out behind a `Flush` and `Bind` and `Execute`
+%% behind the `Sync`, so the statement is parsed, kept and run in one exchange:
+%% two round trips, and one backend even behind a pooler that would hand the
+%% next exchange to another. The server keeps a statement it has parsed
+%% whatever becomes of the rest of the exchange.
+-spec kept(conn(), binary(), binary(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-prepared(Conn, Name, Sql, Parameters, Opts) ->
-    case prepare(Conn, Name, Sql) of
-        {ok, Statement, Ready} ->
+kept(Conn, Name, Sql, Parameters, Opts) ->
+    case describe(Conn, Name, Sql) of
+        {ok, Statement, Described} ->
             try
-                run(minato_conn:remember(Ready, Sql, Statement), Statement, Parameters, Opts)
+                run(minato_conn:remember(Described, Sql, Statement), Statement, Parameters, Opts)
             catch
                 error:Reason:Stacktrace ->
-                    _ = left_ready(Reason) andalso close(Ready, Statement),
+                    _ = left_ready(Reason) andalso close(Described, Statement),
                     reraise(error, Reason, Stacktrace)
             end;
         Failed ->
@@ -335,7 +343,8 @@ replanned(Conn, Sql, Statement, Parameters, Opts) ->
 Parse a statement under a name and keep it for the life of the connection.
 
 The describe round trip happens here rather than on every `execute/3`, which is
-the point: a statement run in a loop costs one round trip a time.
+the point: a statement run in a loop costs one round trip a time. Preparing is
+one round trip itself: `Parse`, `Describe` and `Sync` in one write.
 
 The name is the caller's. A name already in use is refused with `42P05`, so
 `close/2` it first to parse something else under it.
@@ -343,10 +352,7 @@ The name is the caller's. A name already in use is refused with `42P05`, so
 -spec prepare(conn(), binary(), iodata()) ->
     {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
 prepare(Conn, Name, Sql) ->
-    case describe(Conn, Name, Sql) of
-        {ok, Statement, Described} -> ready(Described, Statement);
-        Failed -> Failed
-    end.
+    asked(Conn, Name, Sql, sync).
 
 -doc "`execute/4` with the default decoding options.".
 -spec execute(conn(), statement(), [term()]) ->
@@ -456,37 +462,54 @@ reported({error, Reason} = Answer, Origin) ->
 %% The extended protocol
 %%----------------------------------------------------------------------
 
+%% Behind a `Flush` the exchange stays open for the `Bind` that follows, and
+%% a refusal has to be ended with a `Sync` here. Behind a `Sync` it is over
+%% either way, and what is left is to read to `ReadyForQuery`.
 -spec describe(conn(), binary(), iodata()) ->
     {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
 describe(Conn, Name, Sql) ->
-    Messages = [{parse, Name, Sql, []}, {describe, statement, Name}, flush],
-    case minato_conn:send(Conn, Messages) of
-        ok -> described(Conn, Name, undefined, undefined);
+    asked(Conn, Name, Sql, flush).
+
+-spec asked(conn(), binary(), iodata(), flush | sync) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+asked(Conn, Name, Sql, End) ->
+    case minato_conn:send(Conn, [{parse, Name, Sql, []}, {describe, statement, Name}, End]) of
+        ok -> described(Conn, Name, undefined, End);
         {error, Reason} -> {error, Reason}
     end.
 
--spec described(
-    conn(), binary(), [minato_oid:oid()] | undefined, [minato_protocol:field()] | undefined
-) ->
+-spec described(conn(), binary(), [minato_oid:oid()] | undefined, flush | sync) ->
     {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
-described(Conn, Name, Parameters, Fields) ->
+described(Conn, Name, Parameters, End) ->
     case minato_conn:next(Conn) of
         {ok, parse_complete, Read} ->
-            described(Read, Name, Parameters, Fields);
+            described(Read, Name, Parameters, End);
         {ok, {parameter_description, Oids}, Read} ->
-            described(Read, Name, Oids, Fields);
+            described(Read, Name, Oids, End);
         {ok, {row_description, Described}, Read} ->
-            {ok, statement(Name, Parameters, Described), Read};
+            ended(Read, statement(Name, Parameters, Described), End);
         {ok, no_data, Read} ->
-            {ok, statement(Name, Parameters, []), Read};
+            ended(Read, statement(Name, Parameters, []), End);
         {ok, {notice_response, _Fields}, Read} ->
-            described(Read, Name, Parameters, Fields);
-        {ok, {error_response, Reported}, Read} ->
+            described(Read, Name, Parameters, End);
+        {ok, {error_response, Reported}, Read} when End =:= flush ->
             abort(Read, {pgsql_error, Reported});
+        {ok, {error_response, Reported}, Read} ->
+            failed(Read, {pgsql_error, Reported});
         {ok, Message, _Read} ->
             unexpected(Message, describe);
         {error, Reason} ->
             {error, Reason}
+    end.
+
+-spec ended(conn(), statement(), flush | sync) ->
+    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
+ended(Conn, Statement, flush) ->
+    {ok, Statement, Conn};
+ended(Conn, Statement, sync) ->
+    case drain(Conn) of
+        {ok, Drained} -> {ok, Statement, Drained};
+        {error, Reason} -> {error, Reason}
     end.
 
 -spec statement(binary(), [minato_oid:oid()] | undefined, [minato_protocol:field()]) ->
@@ -511,37 +534,24 @@ format(#{type_oid := Oid}) ->
 parameters(undefined) -> [];
 parameters(Oids) -> Oids.
 
--spec ready(conn(), statement()) ->
-    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
-ready(Conn, Statement) ->
-    case minato_conn:send(Conn, sync) of
-        ok -> prepared(Conn, Statement);
-        {error, Reason} -> {error, Reason}
-    end.
-
--spec prepared(conn(), statement()) ->
-    {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
-prepared(Conn, Statement) ->
-    case drain(Conn) of
-        {ok, Drained} -> {ok, Statement, Drained};
-        {error, Reason} -> {error, Reason}
-    end.
-
 -spec closed(conn()) -> {ok, conn()} | {error, error(), conn()} | {error, error()}.
 closed(Conn) ->
     drain(Conn).
 
 -spec run(conn(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
-run(Conn, #statement{} = Statement, Parameters, Opts) ->
+run(Conn, Statement, Parameters, Opts) ->
+    bound(Conn, Statement, encode(Conn, Statement, Parameters, Opts), Opts).
+
+-spec bound(conn(), statement(), [iodata() | null], minato_protocol:opts()) ->
+    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+bound(Conn, #statement{} = Statement, Encoded, Opts) ->
     #statement{
         name = Name,
-        parameters = Oids,
         parameter_formats = ParameterFormats,
         formats = Formats,
         fields = Fields
     } = Statement,
-    Encoded = encode(Conn, Oids, ParameterFormats, Parameters, Opts),
     Bind = {bind, ?UNNAMED, Name, ParameterFormats, Encoded, Formats},
     Decoder = decoder(Statement, Opts),
     case minato_conn:send(Conn, [Bind, {execute, ?UNNAMED, 0}, sync]) of
@@ -561,19 +571,22 @@ decoder(#statement{decoder = Decoder}, #{
 decoder(#statement{fields = Fields}, Opts) ->
     minato_protocol:decoder(Fields, Opts).
 
--spec encode(
-    conn(), [minato_oid:oid()], [minato_codec:format()], [term()], minato_protocol:opts()
-) -> [iodata() | null].
-encode(Conn, Oids, Formats, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
+-spec encode(conn(), statement(), [term()], minato_protocol:opts()) -> [iodata() | null].
+encode(Conn, Statement, Parameters, Opts) ->
     try
-        encoded(Oids, Formats, Parameters, codec_opts(Opts))
+        encoded(Statement, Parameters, Opts)
     catch
         Class:Reason:Stacktrace ->
             ok = resync(Conn),
             reraise(Class, Reason, Stacktrace)
-    end;
-encode(Conn, Oids, _Formats, Parameters, _Opts) ->
-    ok = resync(Conn),
+    end.
+
+-spec encoded(statement(), [term()], minato_protocol:opts()) -> [iodata() | null].
+encoded(#statement{parameters = Oids, parameter_formats = Formats}, Parameters, Opts) when
+    length(Oids) =:= length(Parameters)
+->
+    encoded(Oids, Formats, Parameters, codec_opts(Opts));
+encoded(#statement{parameters = Oids}, Parameters, _Opts) ->
     bad(bind, parameter_count_mismatch, {length(Oids), length(Parameters)}).
 
 -spec encoded([minato_oid:oid()], [minato_codec:format()], [term()], minato_codec:opts()) ->

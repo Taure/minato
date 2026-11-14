@@ -29,6 +29,9 @@ Skips when no server answers.
     a_cached_statement_answers_like_an_uncached_one/1,
     a_schema_change_under_a_cached_plan_is_recovered/1,
     a_deallocated_statement_is_parsed_again/1,
+    a_statement_is_kept_when_its_first_run_fails/1,
+    a_statement_that_does_not_parse_leaves_the_connection_in_step/1,
+    a_statement_that_does_not_parse_fails_its_transaction_and_no_more/1,
     a_statement_deallocated_in_a_transaction_fails_it/1,
     a_full_cache_falls_back_to_unnamed/1,
     caching_can_be_turned_off/1,
@@ -47,6 +50,9 @@ all() ->
         a_cached_statement_answers_like_an_uncached_one,
         a_schema_change_under_a_cached_plan_is_recovered,
         a_deallocated_statement_is_parsed_again,
+        a_statement_is_kept_when_its_first_run_fails,
+        a_statement_that_does_not_parse_leaves_the_connection_in_step,
+        a_statement_that_does_not_parse_fails_its_transaction_and_no_more,
         a_statement_deallocated_in_a_transaction_fails_it,
         a_full_cache_falls_back_to_unnamed,
         caching_can_be_turned_off,
@@ -177,6 +183,50 @@ a_statement_deallocated_in_a_transaction_fails_it(_Config) ->
     ok = minato_conn:close(Again),
     ?assertMatch({error, {pgsql_error, #{code := ~"26000"}}, _}, Failed),
     ?assertEqual([{3}], Rows).
+
+%% A statement the server has parsed stays parsed whatever becomes of the
+%% exchange it was parsed in, so one that failed to run is still worth keeping.
+-spec a_statement_is_kept_when_its_first_run_fails([{atom(), term()}]) -> ok.
+a_statement_is_kept_when_its_first_run_fails(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT 10 / $1::int4",
+    {error, {pgsql_error, #{code := Code}}, Kept} = minato_query:cached(Conn, Sql, [0]),
+    ?assertEqual(~"22012", Code),
+    ?assertEqual({1, 64}, minato_conn:statements(Kept)),
+    ?assertEqual([~"0"], counters(Kept)),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(Kept, Sql, [5]),
+    ?assertEqual([{2}], Rows),
+    ?assertEqual([~"0"], counters(Again)),
+    ok = minato_conn:close(Again).
+
+-spec a_statement_that_does_not_parse_leaves_the_connection_in_step([{atom(), term()}]) -> ok.
+a_statement_that_does_not_parse_leaves_the_connection_in_step(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    {error, {pgsql_error, #{code := Code}}, Refused} =
+        minato_query:cached(Conn, ~"SELECT FROM WHERE", []),
+    ?assertEqual(~"42601", Code),
+    ?assertEqual(idle, minato_conn:transaction_status(Refused)),
+    ?assertEqual({0, 64}, minato_conn:statements(Refused)),
+    {ok, #{rows := Rows}, Next} = minato_query:cached(Refused, ~"SELECT $1::int4", [7]),
+    ?assertEqual([{7}], Rows),
+    ok = minato_conn:close(Next).
+
+-spec a_statement_that_does_not_parse_fails_its_transaction_and_no_more([{atom(), term()}]) ->
+    ok.
+a_statement_that_does_not_parse_fails_its_transaction_and_no_more(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    {ok, Open} = minato_txn:open(Conn),
+    {error, {pgsql_error, #{code := Code}}, Refused} =
+        minato_query:cached(Open, ~"SELECT FROM WHERE", []),
+    ?assertEqual(~"42601", Code),
+    ?assertEqual(failed, minato_conn:transaction_status(Refused)),
+    {error, {pgsql_error, #{code := Aborted}}, Still} =
+        minato_query:cached(Refused, ~"SELECT 1", []),
+    ?assertEqual(~"25P02", Aborted),
+    {ok, RolledBack} = minato_txn:rollback(Still),
+    {ok, #{rows := Rows}, Next} = minato_query:cached(RolledBack, ~"SELECT 1", []),
+    ?assertEqual([{1}], Rows),
+    ok = minato_conn:close(Next).
 
 -spec a_full_cache_falls_back_to_unnamed([{atom(), term()}]) -> ok.
 a_full_cache_falls_back_to_unnamed(_Config) ->
