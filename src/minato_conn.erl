@@ -267,6 +267,15 @@ never finishing is given up on: `{error, {socket, timeout}}`.
 `connect_timeout` covers the TCP connect, the answer to the TLS request and the
 TLS handshake together, not each of them. Either can be `infinity`.
 
+A write is bounded too. Unless `socket_options` says otherwise, `send_timeout`
+is `timeout` and `send_timeout_close` is `true`, so a server that stops reading
+costs one timeout and the connection, where it used to hold the caller for as
+long as it liked. The bound is on a whole write, not on each part of it, so a
+value of hundreds of megabytes over a slow link wants `{send_timeout, _}` set
+to what that takes, or to `infinity`. On the socket transport a TLS session is
+written by `m:ssl`, which is not given a deadline, so this bound holds for plain
+connections on both transports and for TLS on `inet` only.
+
 The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
 them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`
 is how long a cancelled statement is given to come back before the connection is
@@ -572,7 +581,8 @@ send(#conn{} = Conn, Message) ->
 %% passed to the send instead. A write that times out has left the server half a
 %% message, so `send_timeout_close` is honoured here as well: the connection is
 %% not usable again either way, and a caller that asked for it to be closed
-%% should not have to notice that for itself.
+%% should not have to notice that for itself. It is closed without a
+%% `Terminate`, which would be one more write to a peer that is not reading.
 -spec written(conn(), iodata()) -> ok | {error, error()}.
 written(#conn{transport = minato_socket, send_timeout = Timeout} = Conn, Bytes) ->
     timed(Conn, minato_socket:send(handle(Conn), Bytes, Timeout));
@@ -583,7 +593,8 @@ written(#conn{transport = Transport, socket = Socket}, Bytes) ->
 timed(_Conn, ok) ->
     ok;
 timed(#conn{send_timeout_close = true} = Conn, {error, timeout}) ->
-    ok = close(Conn),
+    #conn{transport = Transport, socket = Socket, grace = Grace} = Conn,
+    ok = shut(Transport, Socket, Grace, os:type()),
     {error, {socket, timeout}};
 timed(_Conn, {error, Reason}) ->
     {error, {socket, Reason}}.
@@ -1209,7 +1220,7 @@ new(Transport, Socket, Opts) ->
         prefix = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         send_timeout = send_timeout(Opts),
-        send_timeout_close = option(send_timeout_close, Opts) =:= true,
+        send_timeout_close = found(send_timeout_close, socket_options(Opts)) =:= true,
         origin = #{
             host => maps:get(host, Opts, ?DEFAULT_HOST),
             port => maps:get(port, Opts, ?DEFAULT_PORT),
@@ -1224,14 +1235,10 @@ new(Transport, Socket, Opts) ->
 %% this transport exists to avoid.
 -spec send_timeout(opts()) -> timeout().
 send_timeout(Opts) ->
-    case option(send_timeout, Opts) of
+    case found(send_timeout, socket_options(Opts)) of
         Milliseconds when is_integer(Milliseconds), Milliseconds >= 0 -> Milliseconds;
-        _Absent -> infinity
+        _Unbounded -> infinity
     end.
-
--spec option(atom(), opts()) -> term().
-option(Name, Opts) ->
-    found(Name, maps:get(socket_options, Opts, [])).
 
 -spec found(atom(), [term()]) -> term().
 found(Name, [{Name, Value} | _Rest]) -> Value;
@@ -1507,12 +1514,20 @@ secured(Transport, Socket, _Host, _Timeout, _Opts) ->
 -spec socket_options(opts()) -> [gen_tcp:connect_option()].
 socket_options(Opts) ->
     Given = maps:get(socket_options, Opts, []),
-    Given ++
-        [
-            Option
-         || Option <- [binary, {active, false}, {packet, raw}, {nodelay, true}],
-            not given(Option, Given)
-        ].
+    Defaults = [binary, {active, false}, {packet, raw}, {nodelay, true} | bounded_sends(Opts)],
+    Given ++ [Option || Option <- Defaults, not given(Option, Given)].
+
+%% A write waits on the peer as a read does, and a peer that stops reading is a
+%% write that never returns: the statement deadline is spent on reads, so it
+%% would not end it. Unless told otherwise a write gets what a read gets, and a
+%% connection whose write ran out is closed, because the server holds half a
+%% message and nothing after it can be believed.
+-spec bounded_sends(opts()) -> [gen_tcp:connect_option()].
+bounded_sends(Opts) ->
+    case maps:get(timeout, Opts, ?DEFAULT_TIMEOUT) of
+        Timeout when is_integer(Timeout) -> [{send_timeout, Timeout}, {send_timeout_close, true}];
+        infinity -> [{send_timeout_close, true}]
+    end.
 
 -spec given(term(), [term()]) -> boolean().
 given(Option, Given) ->

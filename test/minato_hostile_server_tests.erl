@@ -139,6 +139,59 @@ a_connect_timeout_covers_the_tls_request_and_the_handshake_together_test_() ->
     end}.
 
 %%----------------------------------------------------------------------
+%% A server that stops reading
+%%----------------------------------------------------------------------
+
+a_write_to_a_server_that_stopped_reading_gives_up_test_() ->
+    [
+        {timeout, 60,
+            {Label, fun() ->
+                {Listen, Port, Deaf} = deaf_server(),
+                {ok, Conn} = minato_conn:connect(
+                    opts(Port, maps:merge(#{timeout => 500}, Given))
+                ),
+                Started = erlang:monotonic_time(millisecond),
+                Result = filled(Conn, binary:copy(~"x", 1 bsl 20), 256),
+                Elapsed = erlang:monotonic_time(millisecond) - Started,
+                Deaf ! stop,
+                ok = gen_tcp:close(Listen),
+                ?assertEqual({error, {socket, timeout}}, Result),
+                ?assert(Elapsed < 10000),
+                ?assertMatch({error, {socket, _Closed}}, minato_conn:send(Conn, sync))
+            end}}
+     || {Label, Given} <- [
+            {"on the socket transport", #{}},
+            {"on the driver", #{transport => inet}},
+            {"with a bound of the caller's own", #{
+                timeout => 60000, socket_options => [{send_timeout, 300}]
+            }}
+        ]
+    ].
+
+%% Answers the startup and then reads nothing more, with a small receive
+%% buffer so that it takes megabytes rather than gigabytes to fill.
+deaf_server() ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {recbuf, 4096}]),
+    {ok, Port} = inet:port(Listen),
+    Deaf = spawn_link(fun() ->
+        {ok, Socket} = gen_tcp:accept(Listen, 5000),
+        {ok, _Startup} = gen_tcp:recv(Socket, 0, 5000),
+        ok = gen_tcp:send(Socket, minato_backend_writer:write_all(?READY)),
+        receive
+            stop -> gen_tcp:close(Socket)
+        end
+    end),
+    {Listen, Port, Deaf}.
+
+filled(_Conn, _Bytes, 0) ->
+    never_filled;
+filled(Conn, Bytes, Left) ->
+    case minato_conn:send(Conn, {query, Bytes}) of
+        ok -> filled(Conn, Bytes, Left - 1);
+        {error, Reason} -> {error, Reason}
+    end.
+
+%%----------------------------------------------------------------------
 %% A certificate for somebody else
 %%----------------------------------------------------------------------
 

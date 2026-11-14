@@ -84,8 +84,8 @@ followed by `Sync` are sent ahead of the reset, so the reset's own `Sync` can
 commit them. Discard a connection given back like that.
 
 The pool writes the reset itself, and `minato_conn:close/1` writes `Terminate`.
-Both wait as long as the connection's `send_timeout` allows, which is forever by
-default, so set it when a server may stop reading.
+Both wait as long as the connection's `send_timeout` allows, which is the
+connection's `timeout` unless `socket_options` says otherwise.
 """.
 
 -behaviour(gen_server).

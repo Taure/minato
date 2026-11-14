@@ -23,7 +23,7 @@ directly.
 | `timeout` | `15000` | the per read timeout, the default statement deadline, and how long the opening exchange may take from the startup message to `ReadyForQuery`; `infinity` to wait |
 | `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second |
 | `prepared_statements` | `64` | how many statements a connection keeps parsed; `0` disables |
-| `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}` | each replaces one default |
+| `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}`, `{send_timeout, Timeout}`, `{send_timeout_close,true}` | each replaces one default; `Timeout` is the connection's `timeout` |
 | `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
 | `frame_opts` | `#{max_message_length => 67108864}` | raise it only for a single value near PostgreSQL's 1 GB limit |
 
@@ -55,6 +55,14 @@ to. `nodelay`, `keepalive`, `recbuf`, `sndbuf`, `priority`, `reuseaddr`, `tos`,
 `{active, false}`, `buffer`, `delay_send`, `high_watermark`, `low_watermark`,
 `exit_on_close` and `show_econnreset` are accepted and ignored, because this
 transport already does them or configures a port's send queue that is not there.
+
+`send_timeout` defaults to the connection's `timeout` and `send_timeout_close`
+to `true`: a server that stops reading costs one timeout and the connection,
+`{error, {socket, timeout}}`, and a statement deadline, which is spent on reads,
+is no longer the only bound. It bounds a whole write, so a single value of
+hundreds of megabytes over a slow link needs it raised, or `infinity`. A TLS
+session on the socket transport is written by `ssl`, which takes no deadline;
+there the bound is the statement deadline alone.
 
 Anything else is refused at connect rather than silently dropped. If you hit
 that with an option the driver takes, it is a gap in the list rather than a
