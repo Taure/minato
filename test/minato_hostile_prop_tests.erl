@@ -15,13 +15,11 @@ is asked of the framer, for a stream of messages no server would write.
 
 %% eqWAlizer: the PropEr macros expand to term(), so the functions that use them
 %% cannot be given a useful type.
--eqwalizer({nowarn_function, prop_numeric_header_is_total/0}).
 -eqwalizer({nowarn_function, prop_numeric_matches_integer_arithmetic/0}).
 -eqwalizer({nowarn_function, prop_numeric_encode_is_bounded/0}).
 -eqwalizer({nowarn_function, gen_numeric_wire/0}).
 -eqwalizer({nowarn_function, gen_valid_numeric/0}).
 -eqwalizer({nowarn_function, gen_decimal/0}).
--eqwalizer({nowarn_function, prop_array_header_is_total/0}).
 -eqwalizer({nowarn_function, prop_array_text_is_total/0}).
 -eqwalizer({nowarn_function, gen_array_wire/0}).
 -eqwalizer({nowarn_function, gen_array_text/0}).
@@ -38,8 +36,8 @@ is asked of the framer, for a stream of messages no server would write.
 -define(TEXT_ARRAY, 1009).
 -define(MAX_DIMENSIONS, 6).
 -define(FRAME_BOUND, 65536).
--define(LARGEST_NUMERIC_TEXT, 1 + 131072 + 1 + 16383).
--define(LARGEST_NUMERIC_WIRE, 8 + 2 * ((131072 + 16383 + 3) div 4 + 1)).
+-define(LARGEST_NUMERIC_TEXT, (1 + 131072 + 1 + 16383)).
+-define(LARGEST_NUMERIC_WIRE, (8 + 2 * ((131072 + 16383 + 3) div 4 + 1))).
 
 numeric_property_test_() ->
     {timeout, 300, [

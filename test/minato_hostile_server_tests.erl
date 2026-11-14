@@ -355,7 +355,9 @@ a_pool_outlives_whatever_answers_its_question_test_() ->
             {"a row with no columns", [{data_row, <<0:16>>}, {ready_for_query, idle}]},
             {"a message that is not one", [{unsupported, $D, ~"x"}, {ready_for_query, idle}]},
             {"a refusal", [
-                {error_response, #{severity => ~"ERROR", code => ~"42501"}},
+                {error_response, #{
+                    severity => ~"ERROR", code => ~"42501", message => ~"permission denied"
+                }},
                 {ready_for_query, idle}
             ]}
         ]

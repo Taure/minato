@@ -280,7 +280,7 @@ a_parameter_that_would_wrap_its_length_is_refused_test_() ->
     ].
 
 a_count_that_would_wrap_is_refused_test_() ->
-    Most = lists:duplicate(65535, null),
+    Most = [null || _ <- lists:seq(1, 65535)],
     [
         ?_assertMatch(
             <<$B, _:32, 0, 0, 0:16, 65535:16, _/binary>>,
@@ -292,10 +292,10 @@ a_count_that_would_wrap_is_refused_test_() ->
         ),
         ?_assertError(
             {minato_protocol, #{reason := too_many_values}},
-            minato_protocol:encode({parse, ~"", ~"SELECT 1", lists:duplicate(65536, 23)})
+            minato_protocol:encode({parse, ~"", ~"SELECT 1", [23 || _ <- lists:seq(1, 65536)]})
         ),
         ?_assertError(
             {minato_protocol, #{reason := too_many_values}},
-            minato_protocol:encode({bind, ~"", ~"", [], [], lists:duplicate(65536, binary)})
+            minato_protocol:encode({bind, ~"", ~"", [], [], [binary || _ <- lists:seq(1, 65536)]})
         )
     ].

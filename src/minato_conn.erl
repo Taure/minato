@@ -419,7 +419,7 @@ within(Timeout) -> erlang:monotonic_time(millisecond) + Timeout.
 
 -spec left(integer() | infinity) -> timeout().
 left(infinity) -> infinity;
-left(Deadline) -> max(0, Deadline - erlang:monotonic_time(millisecond)).
+left(Deadline) -> remaining(Deadline - erlang:monotonic_time(millisecond), infinity).
 
 -spec transport(opts()) -> plain().
 transport(#{transport := inet}) -> gen_tcp;
@@ -1572,10 +1572,10 @@ reference(Name) ->
     end.
 
 -doc false.
--spec verified(dynamic(), dynamic(), State) ->
-    {valid, State} | {unknown, State} | {fail, term()}
-when
-    State :: {{ip, inet:ip_address()} | {dns_id, string()}, [term()]}.
+%% Called by `m:ssl` with the state it was given, which is why the state is
+%% untyped here.
+-spec verified(dynamic(), dynamic(), dynamic()) ->
+    {valid, dynamic()} | {unknown, dynamic()} | {fail, term()}.
 verified(_Certificate, {bad_cert, _Why} = Reason, _State) ->
     {fail, Reason};
 verified(_Certificate, {extension, _Extension}, State) ->

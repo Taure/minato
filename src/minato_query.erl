@@ -394,11 +394,16 @@ observed(Conn, Path, Sql, Fun) ->
             reported(cleared(Fun()), Origin)
         catch
             Class:Reason:Stacktrace ->
-                erlang:raise(
+                reraise(
                     Class, minato_telemetry:reason(Reason), minato_telemetry:frames(Stacktrace)
                 )
         end
     end).
+
+-spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
+reraise(Class, Reason, Stacktrace) ->
+    erlang:raise(Class, Reason, Stacktrace),
+    bad(Class, Reason, Stacktrace).
 
 -spec cleared(dynamic()) -> dynamic().
 cleared({ok, Answer, Conn}) -> {ok, Answer, minato_conn:deadline(Conn, infinity)};

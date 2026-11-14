@@ -236,8 +236,7 @@ a_header_no_server_writes_is_refused_test_() ->
 the_widest_header_decodes_to_a_bounded_value_test() ->
     Wire = <<1:16, 32767:16/signed, 16#4000:16, 16383:16, 9999:16>>,
     Decoded = minato_codec:decode(?NUMERIC, Wire, binary),
-    ?assertEqual(1 + 131072 + 1 + 16383, byte_size(Decoded)),
-    ?assertMatch(<<"-9999", _/binary>>, Decoded).
+    ?assertMatch(<<"-9999", _:(131072 - 4 + 1 + 16383)/binary>>, Decoded).
 
 a_numeric_too_large_for_a_float_is_a_codec_failure_test() ->
     Wire = <<1:16, 100:16/signed, 0:16, 0:16, 1:16>>,

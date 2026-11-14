@@ -308,7 +308,7 @@ what_the_server_sent_beyond_ready_is_readable_test() ->
 a_message_too_long_for_its_length_field_is_refused_unsent_test() ->
     {Server, {ok, Conn}} = connects([?READY], #{}),
     Chunk = binary:copy(~"a", 16#1000000),
-    TooLong = lists:duplicate(257, Chunk),
+    TooLong = [Chunk || _ <- lists:seq(1, 257)],
     ?assertError(
         {minato_protocol, #{reason := message_too_long}},
         minato_conn:send(Conn, [{bind, ~"", ~"", [binary], [TooLong], []}, sync])

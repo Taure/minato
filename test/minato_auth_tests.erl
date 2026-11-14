@@ -111,11 +111,14 @@ only_channel_binding_on_offer_is_refused_test() ->
 %%----------------------------------------------------------------------
 
 a_required_binding_answers_only_the_bound_mechanism_test() ->
-    {send, {sasl_initial_response, Mechanism, Data}, _State} = minato_auth:step(
+    Step = minato_auth:step(
         {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}, required(~"hash")
     ),
-    ?assertEqual(~"SCRAM-SHA-256-PLUS", Mechanism),
-    ?assertMatch(<<"p=tls-server-end-point,,", _/binary>>, iolist_to_binary(Data)).
+    ?assertMatch({send, {sasl_initial_response, ~"SCRAM-SHA-256-PLUS", _Data}, _State}, Step),
+    ?assertMatch(<<"p=tls-server-end-point,,", _/binary>>, client_first(Step)).
+
+client_first({send, {sasl_initial_response, _Mechanism, Data}, _State}) ->
+    iolist_to_binary(Data).
 
 a_required_binding_is_not_talked_down_to_plain_scram_test_() ->
     [
