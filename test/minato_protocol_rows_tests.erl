@@ -233,3 +233,91 @@ described(Name, Oid, Format) ->
         type_modifier => -1,
         format => Format
     }.
+
+%%----------------------------------------------------------------------
+%% A row straight from the bytes of its message
+%%----------------------------------------------------------------------
+
+payload(Columns) ->
+    <<(length(Columns)):16, <<<<(sized(Column))/binary>> || Column <- Columns>>/binary>>.
+
+sized(null) -> <<-1:32/signed>>;
+sized(Bytes) -> <<(byte_size(Bytes)):32/signed, Bytes/binary>>.
+
+tuples() -> minato_protocol:decoder(description(), #{}).
+
+maps() -> minato_protocol:decoder(description(), #{return_rows_as_maps => true}).
+
+a_payload_decodes_to_a_tuple_test_() ->
+    [
+        ?_assertEqual(
+            {42, ~"a@b.c", true}, minato_protocol:decode_row(tuples(), payload(columns()))
+        ),
+        ?_assertEqual(
+            {null, ~"", null},
+            minato_protocol:decode_row(tuples(), payload([null, ~"", null]))
+        ),
+        ?_assertEqual({}, minato_protocol:decode_row(minato_protocol:decoder([], #{}), <<0:16>>))
+    ].
+
+a_payload_decodes_to_a_map_test_() ->
+    Atoms = minato_protocol:decoder(description(), #{
+        return_rows_as_maps => true, column_name_as_atom => true
+    }),
+    [
+        ?_assertEqual(
+            #{~"id" => 42, ~"email" => ~"a@b.c", ~"active" => true},
+            minato_protocol:decode_row(maps(), payload(columns()))
+        ),
+        ?_assertEqual(
+            #{~"id" => null, ~"email" => ~"", ~"active" => null},
+            minato_protocol:decode_row(maps(), payload([null, ~"", null]))
+        ),
+        ?_assertEqual(
+            #{id => 42, email => ~"a@b.c", active => true},
+            minato_protocol:decode_row(Atoms, payload(columns()))
+        )
+    ].
+
+a_payload_that_does_not_fit_its_columns_is_refused_test_() ->
+    Short = payload([<<0, 0, 0, 42>>, ~"a@b.c"]),
+    Long = payload(columns() ++ [~"extra"]),
+    Trailing = <<(payload(columns()))/binary, 0>>,
+    Negative = <<3:16, 4:32, 0, 0, 0, 42, -2:32/signed>>,
+    Overrun = <<3:16, 4:32, 0, 0, 0, 42, 9:32, "abc">>,
+    [
+        {Label, [
+            ?_assertError(
+                {minato_protocol, #{message := data_row, reason := Reason, data := Data}},
+                minato_protocol:decode_row(Decoder, Payload)
+            )
+         || Decoder <- [tuples(), maps()]
+        ]}
+     || {Label, Payload, Reason, Data} <- [
+            {"fewer columns than described", Short, column_count_mismatch, {1, 0}},
+            {"more columns than described", Long, column_count_mismatch, {0, 1}},
+            {"bytes after the last column", Trailing, column_count_mismatch, {0, 0}},
+            {"a length below minus one", Negative, {negative_column_length, -2}, -2},
+            {"a column longer than what is left", Overrun, column_longer_than_the_message, {9, 3}},
+            {"no room for a count", <<0>>, malformed, <<0>>}
+        ]
+    ].
+
+a_payload_splits_into_its_columns_test_() ->
+    [
+        ?_assertEqual(columns(), minato_protocol:columns(payload(columns()))),
+        ?_assertEqual([null, ~"", null], minato_protocol:columns(payload([null, ~"", null]))),
+        ?_assertEqual([], minato_protocol:columns(<<0:16>>)),
+        ?_assertError(
+            {minato_protocol, #{reason := column_longer_than_the_message, data := {9, 3}}},
+            minato_protocol:columns(<<1:16, 9:32, "abc">>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<0>>}},
+            minato_protocol:columns(<<0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed, data := <<0>>}},
+            minato_protocol:columns(<<0:16, 0>>)
+        )
+    ].
