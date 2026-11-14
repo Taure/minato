@@ -10,8 +10,18 @@ for it on a node where the `minato` application is not running.
 %% With the application
 %%----------------------------------------------------------------------
 
+it_is_started_with_the_application_and_only_once_test_() ->
+    {timeout, 30, fun() ->
+        _ = application:stop(minato),
+        ?assertMatch({ok, _Started}, application:ensure_all_started(minato)),
+        Pid = whereis(minato_overdue),
+        ?assert(is_pid(Pid)),
+        ?assertEqual({error, {already_started, Pid}}, minato_overdue:start_link())
+    end}.
+
 a_write_that_ran_out_has_its_socket_shut_down_test_() ->
     running(fun() ->
+        Pid = whereis(minato_overdue),
         {Socket, Peer} = connected(),
         Watch = minato_overdue:watch(Socket, 50),
         ?assert(is_reference(Watch)),
@@ -19,6 +29,7 @@ a_write_that_ran_out_has_its_socket_shut_down_test_() ->
         ok = timer:sleep(200),
         ?assertMatch({error, _Shut}, socket:send(Socket, ~"after")),
         ?assert(minato_overdue:ran_out(Watch)),
+        ?assertEqual(Pid, whereis(minato_overdue)),
         closed(Socket, Peer)
     end).
 
@@ -127,8 +138,46 @@ without_the_application_what_is_not_a_socket_ends_the_watch_quietly_test_() ->
     end).
 
 %%----------------------------------------------------------------------
+%% Either way
+%%----------------------------------------------------------------------
+
+a_write_that_finished_leaves_neither_a_timer_nor_a_message_test_() ->
+    [
+        Within(fun() ->
+            {Socket, Peer} = connected(),
+            Watch = minato_overdue:watch(Socket, 60000),
+            ?assertEqual(ok, minato_overdue:finished(Watch)),
+            ?assertEqual(false, left(timer(Watch), 50)),
+            ?assertEqual(nothing, told_of_the_timer()),
+            closed(Socket, Peer)
+        end)
+     || Within <- [fun running/1, fun stopped/1]
+    ].
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+timer({Timer, _Alone}) -> Timer;
+timer(Timer) -> Timer.
+
+%% The timer is cancelled without waiting for it, so it is asked after a moment.
+left(Timer, Tries) ->
+    case erlang:read_timer(Timer) of
+        false ->
+            false;
+        Left when Tries =:= 0 ->
+            Left;
+        _Left ->
+            timer:sleep(10),
+            left(Timer, Tries - 1)
+    end.
+
+told_of_the_timer() ->
+    receive
+        {cancel_timer, _Timer, _Left} = Told -> Told
+    after 50 -> nothing
+    end.
 
 running(Fun) ->
     {timeout, 30, fun() ->

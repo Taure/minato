@@ -113,11 +113,34 @@ a_pool_that_does_not_start_answers_without_its_options_test_() ->
         ?assertEqual({error, not_found}, minato:stop_pool(?POOL))
     end).
 
+what_is_kept_is_restarted_ten_times_a_minute_and_given_five_seconds_to_stop_test() ->
+    ok = application:unset_env(minato, pools),
+    ok = application:unset_env(minato, listeners),
+    ?assertEqual(
+        {ok,
+            {
+                #{strategy => one_for_one, intensity => 10, period => 60},
+                [
+                    #{
+                        id => minato_overdue,
+                        start => {minato_overdue, start_link, []},
+                        restart => permanent,
+                        shutdown => 5000,
+                        type => worker
+                    }
+                ]
+            }},
+        minato_sup:init([])
+    ).
+
 the_password_is_not_in_a_child_spec_test_() ->
     running(fun() ->
         {ok, _Pid} = minato:start_pool(?POOL, pool()),
         try
             {ok, Spec} = supervisor:get_childspec(minato_sup, ?POOL),
+            ?assertMatch(
+                #{id := ?POOL, restart := permanent, shutdown := 5000, type := worker}, Spec
+            ),
             ?assertEqual(nomatch, string:find(io_lib:format("~p", [Spec]), "s3cret"))
         after
             ok = minato:stop_pool(?POOL)
