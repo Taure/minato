@@ -69,7 +69,7 @@ encode(date, infinity, binary, _Opts) ->
 encode(date, neg_infinity, binary, _Opts) ->
     <<?INT32_MIN:32/signed>>;
 encode(date, Value, binary, _Opts) ->
-    <<(to_pg_days(Value)):32/signed>>;
+    <<(between(date, to_pg_days(Value), ?INT32_MIN, ?INT32_MAX, Value)):32/signed>>;
 encode(date, infinity, text, _Opts) ->
     ~"infinity";
 encode(date, neg_infinity, text, _Opts) ->
@@ -85,7 +85,8 @@ encode(Type, infinity, binary, _Opts) when Type =:= timestamp; Type =:= timestam
 encode(Type, neg_infinity, binary, _Opts) when Type =:= timestamp; Type =:= timestamptz ->
     <<?INT64_MIN:64/signed>>;
 encode(Type, Value, binary, _Opts) when Type =:= timestamp; Type =:= timestamptz ->
-    <<(to_unix_micros(Type, Value) - ?MICROS_UNIX_TO_PG):64/signed>>;
+    Micros = to_unix_micros(Type, Value) - ?MICROS_UNIX_TO_PG,
+    <<(between(Type, Micros, ?INT64_MIN, ?INT64_MAX, Value)):64/signed>>;
 encode(Type, infinity, text, _Opts) when Type =:= timestamp; Type =:= timestamptz ->
     ~"infinity";
 encode(Type, neg_infinity, text, _Opts) when Type =:= timestamp; Type =:= timestamptz ->
@@ -193,13 +194,23 @@ to_pg_days(Value) ->
     minato_codec:bad(date, not_a_date, Value).
 
 -spec valid_date(integer(), integer(), integer()) -> ok.
-valid_date(Y, M, D) when M >= 1, M =< 12, D >= 1 ->
-    case D =< days_in_month(Y, M) of
+valid_date(Y, M, D) when M >= 1, M =< 12 ->
+    case D >= 1 andalso D =< days_in_month(Y, M) of
         true -> ok;
         false -> minato_codec:bad(date, day_out_of_range, {Y, M, D})
     end;
 valid_date(Y, M, D) ->
     minato_codec:bad(date, month_out_of_range, {Y, M, D}).
+
+%% The wire has a fixed width for each of these and keeps its two ends for
+%% infinity. A value at or past them would be written as some other value, so
+%% it is refused here; one inside them that PostgreSQL does not store is the
+%% server's to refuse.
+-spec between(atom(), integer(), integer(), integer(), term()) -> integer().
+between(_Type, Integer, Low, High, _Value) when Integer > Low, Integer < High ->
+    Integer;
+between(Type, _Integer, _Low, _High, Value) ->
+    minato_codec:bad(Type, out_of_range, Value).
 
 -spec days_in_month(integer(), integer()) -> integer().
 days_in_month(Y, 2) ->
@@ -216,8 +227,10 @@ leap_year(Y) ->
     Y rem 4 =:= 0 andalso (Y rem 100 =/= 0 orelse Y rem 400 =:= 0).
 
 -spec to_day_micros(term()) -> integer().
-to_day_micros(Micros) when is_integer(Micros) ->
+to_day_micros(Micros) when is_integer(Micros), Micros >= 0, Micros =< ?DAY_MICROS ->
     Micros;
+to_day_micros(Micros) when is_integer(Micros) ->
+    minato_codec:bad(time, time_out_of_range, Micros);
 to_day_micros({H, Mi, S}) when is_integer(H), is_integer(Mi), is_integer(S) ->
     ok = valid_time(H, Mi, S),
     ((H * 3600 + Mi * 60 + S) * 1000000);

@@ -411,11 +411,86 @@ each_month_ends_where_it_ends_test_() ->
      || Year <- [1900, 2000, 2023, 2024], Month <- lists:seq(1, 12)
     ].
 
-a_date_outside_the_calendar_is_refused_test_() ->
+a_date_outside_the_calendar_is_refused_over_the_field_that_is_wrong_test_() ->
     [
-        ?_assertError({minato_codec, #{reason := month_out_of_range}}, enc(1082, Date, binary))
-     || Date <- [{2024, 0, 1}, {2024, 13, 1}, {2024, 1, 0}]
+        {Label, [
+            ?_assertError(
+                {minato_codec, #{type := date, reason := Reason, value := Date}},
+                enc(1082, Date, Format)
+            ),
+            ?_assertError(
+                {minato_codec, #{reason := Reason}}, enc(1114, {Date, {0, 0, 0}}, Format)
+            ),
+            ?_assertError(
+                {minato_codec, #{reason := Reason}}, enc(1184, {Date, {0, 0, 0}}, Format)
+            )
+        ]}
+     || {Label, Date, Reason} <- [
+            {"month zero", {2024, 0, 1}, month_out_of_range},
+            {"month thirteen", {2024, 13, 1}, month_out_of_range},
+            {"a negative month", {2024, -1, 1}, month_out_of_range},
+            {"day zero", {2024, 1, 0}, day_out_of_range},
+            {"a negative day", {2024, 1, -1}, day_out_of_range},
+            {"day thirty two", {2024, 1, 32}, day_out_of_range},
+            {"neither month nor day", {2024, 0, 0}, month_out_of_range}
+        ],
+        Format <- [binary, text]
     ].
+
+%% A date is four bytes of days and a timestamp eight of microseconds, with
+%% the largest and smallest of each meaning infinity. A value past them was
+%% written with its high bits cut off, which is another date altogether.
+a_value_too_far_away_to_write_is_refused_test_() ->
+    Latest = {5874897, 12, 31},
+    [
+        ?_assertEqual(Latest, roundtrip(1082, Latest)),
+        ?_assertEqual({-4712, 1, 1}, roundtrip(1082, {-4712, 1, 1})),
+        ?_assertMatch(<<_:64>>, enc(1114, {{294276, 12, 31}, {23, 59, 59}}, binary)),
+        ?_assertMatch(<<_:64>>, enc(1114, 9223371331199999999 + 946684800000000, binary))
+    ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{type := date, reason := out_of_range, value := Date}},
+                enc(1082, Date, binary)
+            )
+         || Date <- [
+                {5881611, 1, 1},
+                {6000000, 1, 1},
+                {11759222, 1, 1},
+                {-5877641, 1, 1},
+                {-6000000, 1, 1}
+            ]
+        ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{type := Type, reason := out_of_range, value := Value}},
+                enc(Oid, Value, binary)
+            )
+         || {Oid, Type} <- [{1114, timestamp}, {1184, timestamptz}],
+            Value <- [
+                {{294300, 1, 1}, {0, 0, 0}},
+                {{-292300, 1, 1}, {0, 0, 0}},
+                {{600000, 1, 1}, {0, 0, 0}},
+                (1 bsl 63) + 946684800000000,
+                (1 bsl 63) - 1 + 946684800000000,
+                -(1 bsl 63) + 946684800000000,
+                (1 bsl 64) + 5
+            ]
+        ].
+
+a_time_of_day_as_microseconds_stays_inside_the_day_test_() ->
+    [
+        ?_assertEqual(<<0:64>>, enc(1083, 0, binary)),
+        ?_assertEqual(<<86400000000:64>>, enc(1083, 86400000000, binary)),
+        ?_assertEqual(~"24:00:00", iolist_to_binary(enc(1083, 86400000000, text)))
+    ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{type := time, reason := time_out_of_range, value := Micros}},
+                enc(1083, Micros, Format)
+            )
+         || Micros <- [-1, 86400000001, (1 bsl 64) + 5, -(1 bsl 64)], Format <- [binary, text]
+        ].
 
 the_last_second_of_a_minute_may_be_a_leap_second_test_() ->
     [
