@@ -41,6 +41,17 @@ not returned: `{error, {socket, _}}` has no connection in it, because a socket
 that failed mid-message leaves the stream at an unknown offset, and there is
 nothing to hand back that could be trusted.
 
+## A value that does not fit is the caller's, not the connection's
+
+A parameter that will not encode, the wrong number of parameters, and a value
+from the server that will not decode all raise, `error({minato_codec, _})` or
+`error({minato_query, _})`, because there is no result to return. None of them
+costs the connection. Before the raise the exchange is ended with `Sync`, an
+answer that was being read is read to its `ReadyForQuery`, and a statement
+`cached/4` parsed for the call is closed again, so the connection that was
+passed in is the one to carry on with. It is closed only if it could not be
+put back, and then says so on its next use.
+
 ## What is not here
 
 No transactions and no `LISTEN`. Both are session state rather than statements,
@@ -60,6 +71,7 @@ query, so they belong with the pool that hands connections out.
     execute/4,
     close/2
 ]).
+-export([left_ready/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -259,10 +271,28 @@ parsed(Conn, Sql, Parameters, Opts) ->
 prepared(Conn, Name, Sql, Parameters, Opts) ->
     case prepare(Conn, Name, Sql) of
         {ok, Statement, Ready} ->
-            run(minato_conn:remember(Ready, Sql, Statement), Statement, Parameters, Opts);
+            try
+                run(minato_conn:remember(Ready, Sql, Statement), Statement, Parameters, Opts)
+            catch
+                error:Reason:Stacktrace ->
+                    _ = left_ready(Reason) andalso close(Ready, Statement),
+                    reraise(error, Reason, Stacktrace)
+            end;
         Failed ->
             Failed
     end.
+
+-doc false.
+%% The raises this module makes for a mistake in the call, each of them only
+%% once the connection that was passed in is ready again and holds nothing it
+%% did not hold before: an exchange left open has been ended with `Sync`, an
+%% answer partly read has been read to its end, and a statement parsed for the
+%% call has been closed. The caller never sees the connection the call had got
+%% to, so the one it still has must be good.
+-spec left_ready(term()) -> boolean().
+left_ready({minato_codec, _Report}) -> true;
+left_ready({minato_query, #{reason := parameter_count_mismatch}}) -> true;
+left_ready(_Reason) -> false.
 
 -spec reused(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
@@ -335,7 +365,8 @@ round trip later and with a worse message.
 The connection is put back to ready before the exception is raised, with a
 `Sync` and a read to `ReadyForQuery`. Raising in the middle of an extended query
 cycle would otherwise leave a connection that is only good for closing, which is
-a heavy price for what is usually a typo.
+a heavy price for what is usually a typo. A parameter that will not encode
+raises `error({minato_codec, _})` in the same way.
 """.
 -spec execute(conn(), statement(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
@@ -533,8 +564,14 @@ decoder(#statement{fields = Fields}, Opts) ->
 -spec encode(
     conn(), [minato_oid:oid()], [minato_codec:format()], [term()], minato_protocol:opts()
 ) -> [iodata() | null].
-encode(_Conn, Oids, Formats, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
-    encoded(Oids, Formats, Parameters, codec_opts(Opts));
+encode(Conn, Oids, Formats, Parameters, Opts) when length(Oids) =:= length(Parameters) ->
+    try
+        encoded(Oids, Formats, Parameters, codec_opts(Opts))
+    catch
+        Class:Reason:Stacktrace ->
+            ok = resync(Conn),
+            reraise(Class, Reason, Stacktrace)
+    end;
 encode(Conn, Oids, _Formats, Parameters, _Opts) ->
     ok = resync(Conn),
     bad(bind, parameter_count_mismatch, {length(Oids), length(Parameters)}).
@@ -671,15 +708,21 @@ reversed([Item | Rest], Acc) ->
 %% Getting back to a ready connection
 %%----------------------------------------------------------------------
 
+%% For a raise that is about the call and not the connection. Nothing of the
+%% `Bind` has been written when a parameter turns out not to encode, but the
+%% `Parse` before it may have been, and the server holds that exchange open
+%% until it is told `Sync`. A connection that cannot be put back is closed, so
+%% that the one the caller still holds fails instead of answering out of step.
 -spec resync(conn()) -> ok.
 resync(Conn) ->
     case minato_conn:send(Conn, sync) of
-        ok ->
-            _ = drain(Conn),
-            ok;
-        {error, _Reason} ->
-            ok
+        ok -> ready_or_closed(Conn, drain(Conn));
+        {error, _Reason} -> minato_conn:close(Conn)
     end.
+
+-spec ready_or_closed(conn(), {ok, conn()} | {error, error(), conn()} | {error, error()}) -> ok.
+ready_or_closed(_Conn, {ok, _Ready}) -> ok;
+ready_or_closed(Conn, _Failed) -> minato_conn:close(Conn).
 
 -spec abort(conn(), error()) -> {error, error(), conn()} | {error, error()}.
 abort(Conn, Reason) ->

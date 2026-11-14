@@ -43,7 +43,14 @@ Skips when no server answers.
     a_failed_statement_does_not_leave_a_decoder_behind/1,
     a_simple_query_after_a_row_returning_one_is_decoded_correctly/1,
     each_statement_of_a_simple_query_is_decoded_with_its_own_columns/1,
-    a_simple_query_mixing_shapes_and_nulls_decodes_each_statement/1
+    a_simple_query_mixing_shapes_and_nulls_decodes_each_statement/1,
+    a_parameter_that_will_not_encode_leaves_the_connection_ready/1,
+    a_parameter_that_will_not_encode_leaves_nothing_open_on_the_server/1,
+    a_cached_statement_refused_over_a_parameter_keeps_nothing/1,
+    a_prepared_statement_refused_over_a_parameter_runs_again/1,
+    a_value_that_will_not_decode_is_read_past/1,
+    a_value_that_will_not_decode_in_a_simple_query_is_read_past/1,
+    a_value_that_will_not_decode_keeps_the_transaction/1
 ]).
 
 -define(TIMEOUT, 10000).
@@ -74,7 +81,14 @@ all() ->
         a_failed_statement_does_not_leave_a_decoder_behind,
         a_simple_query_after_a_row_returning_one_is_decoded_correctly,
         each_statement_of_a_simple_query_is_decoded_with_its_own_columns,
-        a_simple_query_mixing_shapes_and_nulls_decodes_each_statement
+        a_simple_query_mixing_shapes_and_nulls_decodes_each_statement,
+        a_parameter_that_will_not_encode_leaves_the_connection_ready,
+        a_parameter_that_will_not_encode_leaves_nothing_open_on_the_server,
+        a_cached_statement_refused_over_a_parameter_keeps_nothing,
+        a_prepared_statement_refused_over_a_parameter_runs_again,
+        a_value_that_will_not_decode_is_read_past,
+        a_value_that_will_not_decode_in_a_simple_query_is_read_past,
+        a_value_that_will_not_decode_keeps_the_transaction
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -292,6 +306,117 @@ a_transaction_survives_a_cancelled_statement(Config) ->
     {ok, Rolled} = minato_txn:rollback(Cancelled),
     ?assertEqual(idle, minato_txn:status(Rolled)),
     ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Rolled, ~"SELECT 1", [])).
+
+%%----------------------------------------------------------------------
+%% A value that does not fit is the caller's mistake, not the connection's
+%%----------------------------------------------------------------------
+
+%% The caller of a function that raised still holds the connection it passed
+%% in, and nothing newer, so every case here carries on with that one.
+-spec a_parameter_that_will_not_encode_leaves_the_connection_ready([{atom(), term()}]) -> ok.
+a_parameter_that_will_not_encode_leaves_the_connection_ready(Config) ->
+    Conn = conn(Config),
+    ?assertError(
+        {minato_codec, #{type := int4}},
+        minato_query:query(Conn, ~"SELECT $1::int4", [~"not a number"])
+    ),
+    ?assertMatch({ok, [#{rows := [{1}]}], _Read}, minato_query:simple(Conn, ~"SELECT 1")),
+    ?assertMatch({ok, #{rows := [{2}]}, _Read}, minato_query:query(Conn, ~"SELECT $1::int4", [2])).
+
+%% The `Parse` was sent before the parameter was looked at, and the server
+%% keeps the exchange, and the transaction it runs in, open until `Sync`. From
+%% a second connection that is a backend that never went back to idle.
+-spec a_parameter_that_will_not_encode_leaves_nothing_open_on_the_server([{atom(), term()}]) ->
+    ok.
+a_parameter_that_will_not_encode_leaves_nothing_open_on_the_server(Config) ->
+    Conn = conn(Config),
+    {ok, #{rows := [{Backend}]}, _Read} = minato_query:query(Conn, ~"SELECT pg_backend_pid()", []),
+    ?assertError(
+        {minato_codec, _Report},
+        minato_query:query(Conn, ~"SELECT $1::int4", [~"not a number"])
+    ),
+    ?assertEqual([{~"idle", null}], activity(Backend)).
+
+%% A statement parsed for the call is named from a counter in the connection,
+%% and the connection that counted went with the raise. Left on the server, the
+%% next statement would be parsed under the same name and refused with 42P05.
+-spec a_cached_statement_refused_over_a_parameter_keeps_nothing([{atom(), term()}]) -> ok.
+a_cached_statement_refused_over_a_parameter_keeps_nothing(Config) ->
+    Conn = conn(Config),
+    ?assertError(
+        {minato_codec, _Report},
+        minato_query:cached(Conn, ~"SELECT $1::int4", [~"not a number"])
+    ),
+    ?assertError(
+        {minato_query, #{reason := parameter_count_mismatch}},
+        minato_query:cached(Conn, ~"SELECT $1::int4, $2::int4", [1])
+    ),
+    {ok, [#{rows := [{Kept}]}], _Read} =
+        minato_query:simple(Conn, ~"SELECT count(*) FROM pg_prepared_statements"),
+    ?assertEqual(0, Kept),
+    {ok, #{rows := [{3}]}, Cached} = minato_query:cached(Conn, ~"SELECT $1::int4 + 1", [2]),
+    ?assertEqual({1, 64}, minato_conn:statements(Cached)).
+
+-spec a_prepared_statement_refused_over_a_parameter_runs_again([{atom(), term()}]) -> ok.
+a_prepared_statement_refused_over_a_parameter_runs_again(Config) ->
+    {ok, Statement, Conn} = minato_query:prepare(conn(Config), ~"by_number", ~"SELECT $1::int4"),
+    ?assertError({minato_codec, _Report}, minato_query:execute(Conn, Statement, [~"no"])),
+    ?assertMatch({ok, #{rows := [{4}]}, _Read}, minato_query:execute(Conn, Statement, [4])).
+
+%% A numeric too large for a float is one the server sends and the options
+%% asked for cannot hold. It arrives in the middle of a result that takes many
+%% reads, so most of the answer is still on its way when the raise happens.
+-spec a_value_that_will_not_decode_is_read_past([{atom(), term()}]) -> ok.
+a_value_that_will_not_decode_is_read_past(Config) ->
+    Conn = conn(Config),
+    Sql =
+        ~"SELECT CASE WHEN i = 7 THEN '1e400'::numeric ELSE i::numeric END FROM generate_series(1, 50000) AS i",
+    ?assertError(
+        {minato_codec, #{type := numeric}},
+        minato_query:query(Conn, Sql, [], #{numeric_format => float})
+    ),
+    ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Conn, ~"SELECT 1", [])),
+    ?assertError(
+        {minato_codec, #{type := numeric}},
+        minato_query:cached(Conn, Sql, [], #{numeric_format => float})
+    ),
+    ?assertMatch({ok, #{rows := [{2}]}, _Read}, minato_query:cached(Conn, ~"SELECT 2", [])).
+
+-spec a_value_that_will_not_decode_in_a_simple_query_is_read_past([{atom(), term()}]) -> ok.
+a_value_that_will_not_decode_in_a_simple_query_is_read_past(Config) ->
+    Conn = conn(Config),
+    Sql = ~"SELECT 1; SELECT '1e400'::numeric FROM generate_series(1, 50000); SELECT 3",
+    ?assertError(
+        {minato_codec, #{type := numeric}},
+        minato_query:simple(Conn, Sql, #{numeric_format => float})
+    ),
+    ?assertMatch({ok, [#{rows := [{4}]}], _Read}, minato_query:simple(Conn, ~"SELECT 4")).
+
+%% The statement ran; it is the answer that could not be read. A transaction
+%% it ran in is therefore still open and still good.
+-spec a_value_that_will_not_decode_keeps_the_transaction([{atom(), term()}]) -> ok.
+a_value_that_will_not_decode_keeps_the_transaction(Config) ->
+    {ok, Open} = minato_txn:open(conn(Config)),
+    {ok, _Result, Written} = minato_query:query(
+        Open, ~"INSERT INTO minato_rows (name, count) VALUES ($1, $2)", [~"kept", 1]
+    ),
+    ?assertError(
+        {minato_codec, _Report},
+        minato_query:query(Written, ~"SELECT '1e400'::numeric", [], #{numeric_format => float})
+    ),
+    {ok, Committed} = minato_txn:commit(Written),
+    ?assertMatch(
+        {ok, #{rows := [{~"kept"}]}, _Read},
+        minato_query:query(Committed, ~"SELECT name FROM minato_rows", [])
+    ).
+
+activity(Backend) ->
+    {ok, Observer} = minato_conn:connect(opts()),
+    {ok, #{rows := Rows}, Read} = minato_query:query(
+        Observer, ~"SELECT state, xact_start::text FROM pg_stat_activity WHERE pid = $1", [Backend]
+    ),
+    ok = minato_conn:close(Read),
+    Rows.
 
 %%----------------------------------------------------------------------
 %% Where the server is

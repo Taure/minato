@@ -82,6 +82,8 @@ the type the server asked for - and those raise where they happen. The raise
 names the type and the reason and says `redacted` where the value was, because
 an uncaught raise is printed by whatever supervises the caller;
 `{minato, [{log_values, true}]}` on a development node puts the value back.
+Neither costs the connection: it is put back to ready before the raise and
+goes back to the pool.
 
 ## A transaction
 

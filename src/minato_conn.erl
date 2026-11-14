@@ -635,12 +635,18 @@ would be hiding the one thing the message exists to announce.
 A pooled connection read this way goes back with `minato_pool:checkin/2` only
 once its last `ReadyForQuery` has been read, and is otherwise discarded with
 `minato_pool:discard/2`.
+
+With a decoder set by `decoding/2` or `decoding_opts/2`, a value that will not
+decode raises `error({minato_codec, _})` from here. The rest of that
+statement's answer is read first, undecoded, up to its `ReadyForQuery`, so the
+connection the caller passed in is ready for the next statement when the raise
+arrives. One that could not be read that far is closed.
 """.
 -spec next(conn(), timeout()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
 next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
     {ok, Message, noted(Message, Conn#conn{pending = Rest})};
 next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
-    case minato_protocol:frame(Buffer, FrameOpts) of
+    try minato_protocol:frame(Buffer, FrameOpts) of
         {[], _Rest} ->
             case fill(Conn, budget(Conn, Timeout)) of
                 {ok, Filled} -> next(Filled, Timeout);
@@ -650,6 +656,21 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
         {[Message | Rest], Remainder} ->
             Read = Conn#conn{buffer = Remainder, pending = Rest},
             {ok, Message, noted(Message, Read)}
+    catch
+        error:{minato_codec, _Report} = Reason:Stacktrace ->
+            ok = skipped(decoding_opts(Conn, undefined), Timeout),
+            reraise(error, Reason, Stacktrace)
+    end.
+
+%% A decoder is only ever set for a statement whose answer ends in
+%% ReadyForQuery, so there is always one to read to. The bytes that would not
+%% decode are still in the buffer, and are framed again here as plain rows.
+-spec skipped(conn(), timeout()) -> ok.
+skipped(Conn, Timeout) ->
+    case next(Conn, Timeout) of
+        {ok, {ready_for_query, _Status}, _Ready} -> ok;
+        {ok, _Message, Read} -> skipped(Read, Timeout);
+        {error, _Reason} -> close(Conn)
     end.
 
 -doc """
