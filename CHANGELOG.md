@@ -25,7 +25,8 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - A row with more columns than its description raises
   `{minato_protocol, #{reason := column_count_mismatch}}`, as one with fewer
   already did, where it raised `column_longer_than_the_message`, or
-  `negative_column_length` when the extra column was NULL.
+  `negative_column_length` when the extra column was NULL. Bytes after the
+  last column make `minato_protocol:columns/1` raise `malformed`.
 - A list inside a list is a row of an array wherever an element cannot itself
   be a list, so `[[1,2],[3,4]]` is a 2 by 2 `_int4` where it raised
   `not_an_integer`, and what a multi-dimensional array decodes to can be sent
@@ -70,7 +71,6 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   running the deadline still holds, at the cost of a process per write.
   `minato_overdue` and `minato_sup` cannot be the name of a pool or a
   listener: `{error, {reserved_name, Name}}`.
-
 - `minato_conn:close/1` does not raise and does not wait on a server that has
   stopped reading: `Terminate` gets the shorter of `send_timeout` and one
   second, and is not written at all behind bytes the server has not taken. TLS
@@ -163,6 +163,7 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - Add a security policy
 - *(codec)* Say what a string in an array of numbers becomes
 - What a kept statement, a close, an array and a date now do for a caller
+- The write deadline without the application, a bounded close and minato's own names
 
 ### Perf
 
@@ -195,6 +196,9 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - What minato and minato_listener do, against a scripted server
 - Stop waiting on a scripted server that has already answered
 - *(codec)* What minato_codec decides for itself, which mutation testing found unwatched
+- *(codec)* The last date and timestamp the wire holds, and whole hours
+- *(overdue)* What starts it, what it leaves behind, and what the supervisor allows
+- *(query)* What a query reports of itself, and answers that come out of turn
 
 ## [1.1.6] - 2026-11-06
 
