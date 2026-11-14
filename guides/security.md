@@ -88,6 +88,45 @@ over TLS the password itself, to anything that asks. `auth` is what libpq calls
 A method outside the list is refused with `{error, {auth_method_refused,
 Method}}` before anything is sent in answer to it.
 
+## What a server cannot make the client do
+
+The server is not trusted either. It may be compromised, or it may be somebody
+between the client and the real one, and everything it sends is read as input
+that was chosen. For each of these there is a test with a server that tries.
+
+- **Run out of memory on one message.** A message longer than
+  `max_message_length`, 64 MiB unless raised, is refused from its header,
+  before its payload is waited for.
+- **Run out of memory on one value.** A `numeric` is held to the range
+  PostgreSQL stores, 131072 digits before the point and 16383 after, whatever
+  its header claims, and decodes in time linear in its length. An array has at
+  most six dimensions and no more elements than the bytes that arrived could
+  hold, so its header cannot ask for a list longer than the message.
+- **Make atoms.** A command tag is read against the words PostgreSQL uses. One
+  it does not use comes back as a binary: `command` and `num_rows` in a result
+  are atoms and integers for every statement there is, and binaries for one a
+  server invented. Column names are binaries unless `column_name_as_atom` asks
+  otherwise.
+- **Keep a connect waiting.** `connect_timeout` covers the TCP connect and the
+  TLS handshake together, and `timeout` the whole exchange from the startup
+  message to `ReadyForQuery`, not each read of it. What the server reports
+  about itself on the way is kept up to 64 parameters.
+- **Keep a write waiting.** A write gets the connection's `timeout` and the
+  connection is closed when it runs out. A TLS session on the socket transport
+  is the exception; see [Configuration](configuration.md).
+- **Take a pool or a listener down.** An answer that is not a message ends the
+  connection it arrived on, which is reconnected with backoff. The process
+  holding it stays up, a listener's subscribers are told they were
+  disconnected, and a pool's borrowers are not kept waiting on a server that
+  has stopped answering the pool's own questions.
+- **Choose a weaker authentication.** See the two sections above: the methods
+  in `auth` are the only ones answered, and `channel_binding => require` is
+  answered with a bound SCRAM exchange or not at all.
+
+A value on its way to the server is held to the same limits: a message that
+does not fit the protocol's length field, more than 65535 parameters, or a
+startup parameter with a null byte in it is refused before anything is sent.
+
 ## Credentials
 
 The password is used during authentication and is not stored on the connection,
