@@ -6,7 +6,8 @@ The round-trip properties in `m:minato_codec_prop_tests` only ever decode what
 minato encoded, so they say nothing about a header no encoder writes. These
 generate the header fields independently of each other and assert the two
 things that have to hold for any of them: the decoder answers or raises its own
-tagged error, and what it answers is no larger than the type allows.
+tagged error, and what it answers is no larger than the type allows. The same
+is asked of the framer, for a stream of messages no server would write.
 """.
 
 -include_lib("proper/include/proper.hrl").
@@ -24,12 +25,19 @@ tagged error, and what it answers is no larger than the type allows.
 -eqwalizer({nowarn_function, prop_array_text_is_total/0}).
 -eqwalizer({nowarn_function, gen_array_wire/0}).
 -eqwalizer({nowarn_function, gen_array_text/0}).
+-eqwalizer({nowarn_function, prop_frame_is_total/0}).
+-eqwalizer({nowarn_function, prop_frame_refuses_a_length_over_its_bound/0}).
+-eqwalizer({nowarn_function, prop_rows_are_total/0}).
+-eqwalizer({nowarn_function, gen_stream/0}).
+-eqwalizer({nowarn_function, gen_message/0}).
+-eqwalizer({nowarn_function, gen_row/0}).
 
 -define(NUMTESTS, 500).
 -define(NUMERIC, 1700).
 -define(INT4_ARRAY, 1007).
 -define(TEXT_ARRAY, 1009).
 -define(MAX_DIMENSIONS, 6).
+-define(FRAME_BOUND, 65536).
 -define(LARGEST_NUMERIC_TEXT, 1 + 131072 + 1 + 16383).
 -define(LARGEST_NUMERIC_WIRE, 8 + 2 * ((131072 + 16383 + 3) div 4 + 1)).
 
@@ -53,6 +61,19 @@ array_property_test_() ->
         end},
         {"any array text decodes or is refused", fun() ->
             check(prop_array_text_is_total())
+        end}
+    ]}.
+
+framing_property_test_() ->
+    {timeout, 300, [
+        {"any bytes frame into messages or are refused", fun() ->
+            check(prop_frame_is_total())
+        end},
+        {"a length over the bound is refused before its payload arrives", fun() ->
+            check(prop_frame_refuses_a_length_over_its_bound())
+        end},
+        {"any row decodes against its columns or is refused", fun() ->
+            check(prop_rows_are_total())
         end}
     ]}.
 
@@ -100,6 +121,93 @@ prop_numeric_encode_is_bounded() ->
             Text -> iolist_size(Text) =< ?LARGEST_NUMERIC_TEXT
         catch
             error:{minato_codec, #{type := numeric, reason := out_of_range}} -> true
+        end
+    ).
+
+%%----------------------------------------------------------------------
+%% framing
+%%----------------------------------------------------------------------
+
+prop_frame_is_total() ->
+    ?FORALL(
+        Stream,
+        gen_stream(),
+        try minato_protocol:frame(Stream, #{max_message_length => ?FRAME_BOUND}) of
+            {Messages, Rest} ->
+                is_list(Messages) andalso is_binary(Rest) andalso
+                    byte_size(Rest) =< byte_size(Stream)
+        catch
+            error:{minato_protocol, #{reason := _}} -> true
+        end
+    ).
+
+prop_frame_refuses_a_length_over_its_bound() ->
+    ?FORALL(
+        {Type, Length, Arrived},
+        {byte(), range(?FRAME_BOUND + 1, 2147483647), binary()},
+        try
+            minato_protocol:frame(<<Type, Length:32, Arrived/binary>>, #{
+                max_message_length => ?FRAME_BOUND
+            })
+        of
+            _Waited_for_it -> false
+        catch
+            error:{minato_protocol, #{reason := message_too_long}} -> true
+        end
+    ).
+
+prop_rows_are_total() ->
+    Decoder = minato_protocol:decoder(
+        [column(~"id", 23), column(~"amount", ?NUMERIC), column(~"tags", ?INT4_ARRAY)], #{}
+    ),
+    ?FORALL(
+        Row,
+        gen_row(),
+        try minato_protocol:frame(Row, #{decoder => Decoder}) of
+            {Messages, Rest} -> is_list(Messages) andalso is_binary(Rest)
+        catch
+            error:{minato_protocol, #{reason := _}} -> true;
+            error:{minato_codec, #{reason := _}} -> true
+        end
+    ).
+
+column(Name, Oid) ->
+    #{
+        name => Name,
+        table_oid => 0,
+        column => 0,
+        type_oid => Oid,
+        type_size => -1,
+        type_modifier => -1,
+        format => binary
+    }.
+
+gen_stream() ->
+    ?LET(Messages, list(gen_message()), iolist_to_binary(Messages)).
+
+%% A type byte the protocol has and one it may not, a length that is right,
+%% nearly right or anything at all, and a payload that is noise.
+gen_message() ->
+    ?LET(
+        {Type, Payload, Lie},
+        {
+            oneof([elements("RKSZTDCIEN123ntsAGHWdcv"), byte()]),
+            oneof([binary(), ~"", <<0>>, <<0, 0, 0, 0>>]),
+            frequency([{6, 0}, {2, range(-6, 6)}, {1, range(-2147483648, 2147483647)}])
+        },
+        <<Type, (byte_size(Payload) + 4 + Lie):32/signed, Payload/binary>>
+    ).
+
+gen_row() ->
+    ?LET(
+        {Count, Values},
+        {
+            oneof([3, range(-1, 5), range(0, 65535)]),
+            list(oneof([null, binary(), range(-2147483648, 2147483647)]))
+        },
+        begin
+            Payload = <<Count:16, <<<<(element(Value))/binary>> || Value <- Values>>/binary>>,
+            <<$D, (byte_size(Payload) + 4):32, Payload/binary>>
         end
     ).
 
