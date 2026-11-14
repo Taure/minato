@@ -478,6 +478,45 @@ a_value_too_far_away_to_write_is_refused_test_() ->
             ]
         ].
 
+%% The last value before each end is still a value, and the end is not.
+the_ends_of_the_wire_are_where_a_value_stops_test_() ->
+    Epoch = 946684800000000,
+    [
+        ?_assertEqual(<<2147483646:32/signed>>, enc(1082, {5881610, 7, 10}, binary)),
+        ?_assertEqual(<<-2147483647:32/signed>>, enc(1082, {-5877611, 6, 23}, binary)),
+        ?_assertError(
+            {minato_codec, #{type := date, reason := out_of_range}},
+            enc(1082, {5881610, 7, 11}, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := date, reason := out_of_range}},
+            enc(1082, {-5877611, 6, 22}, binary)
+        )
+    ] ++
+        [
+            ?_assertEqual(<<Micros:64/signed>>, enc(Oid, Micros + Epoch, binary))
+         || Oid <- [1114, 1184], Micros <- [(1 bsl 63) - 2, -(1 bsl 63) + 1]
+        ] ++
+        [
+            ?_assertError(
+                {minato_codec, #{reason := out_of_range}}, enc(Oid, Micros + Epoch, binary)
+            )
+         || Oid <- [1114, 1184], Micros <- [(1 bsl 63) - 1, -(1 bsl 63)]
+        ].
+
+a_whole_hour_is_read_as_one_test_() ->
+    Times = [{1, 0, 0}, {12, 0, 0}, {23, 0, 0}, {1, 1, 1}],
+    [?_assertEqual(Time, roundtrip(1083, Time)) || Time <- Times] ++
+        [?_assertEqual(Time, roundtrip_text(1083, Time)) || Time <- Times] ++
+        [
+            ?_assertEqual({{2024, 1, 15}, Time}, roundtrip(Oid, {{2024, 1, 15}, Time}))
+         || Oid <- [1114, 1184], Time <- Times
+        ] ++
+        [
+            ?_assertEqual({{2024, 1, 15}, Time}, roundtrip_text(Oid, {{2024, 1, 15}, Time}))
+         || Oid <- [1114, 1184], Time <- Times
+        ].
+
 a_time_of_day_as_microseconds_stays_inside_the_day_test_() ->
     [
         ?_assertEqual(<<0:64>>, enc(1083, 0, binary)),
