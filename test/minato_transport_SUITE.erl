@@ -184,31 +184,39 @@ an_address_family_is_not_quietly_swapped(Config) ->
 %% `send_timeout` for that and the socket transport had nowhere to put it, so
 %% the mitigation existed for one transport and not the default one.
 %%
-%% A listening socket nobody accepts from fills its buffers and then accepts
-%% nothing, which is that peer without needing one.
+%% The peer answers the opening exchange and then reads nothing, so the
+%% connection is open and every wait from there on is a write. The read timeout
+%% is ten seconds and the write's is a fifth of one: a connect that failed, a
+%% write that waited for the read timeout and a write that waited for good each
+%% fail a different line here.
 a_send_to_a_peer_that_stopped_reading_gives_up(Config) ->
-    {ok, Listener} = gen_tcp:listen(0, [binary, {active, false}, {backlog, 1}]),
-    {ok, Port} = inet:port(Listener),
+    ct:timetrap({seconds, 60}),
+    Server = minato_backend_server:start([ready()], #{after_script => stall}),
     Opts = (opts(Config))#{
         host => "127.0.0.1",
-        port => Port,
-        connect_timeout => ?TIMEOUT,
+        port => minato_backend_server:port(Server),
         socket_options => [{send_timeout, 200}]
     },
-    ?assertEqual({error, {socket, timeout}}, filled(Opts)),
-    ok = gen_tcp:close(Listener).
-
-%% The startup exchange is small enough to fit in a buffer, so the connect
-%% itself would not block. Writing until something gives is what reaches the
-%% deadline; a server that answers is a different case and has its own tests.
-filled(Opts) ->
-    case minato_conn:connect(Opts) of
-        {ok, Conn} -> filled(Conn, binary:copy(~"x", 1048576), 64);
-        {error, Reason} -> {error, Reason}
-    end.
-
-filled(Conn, _Bytes, 0) ->
+    {ok, Conn} = minato_conn:connect(Opts),
+    Started = erlang:monotonic_time(millisecond),
+    Result = filled(Conn, binary:copy(~"x", 1048576), 256),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
     ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server),
+    ?assertEqual({error, {socket, timeout}}, Result),
+    ?assert(Elapsed < ?TIMEOUT div 2, Elapsed).
+
+ready() ->
+    [
+        authentication_ok,
+        {parameter_status, ~"server_version", ~"17.4"},
+        {backend_key_data, 4242, 777},
+        {ready_for_query, idle}
+    ].
+
+%% A megabyte at a time until the peer's buffers and this end's are full, which
+%% is when a write first has to wait.
+filled(_Conn, _Bytes, 0) ->
     never_filled;
 filled(Conn, Bytes, Left) ->
     case minato_conn:send(Conn, {query, Bytes}) of
