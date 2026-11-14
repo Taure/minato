@@ -144,6 +144,109 @@ rejects_test_() ->
     ].
 
 %%----------------------------------------------------------------------
+%% Bounds
+%%----------------------------------------------------------------------
+
+an_exponent_outside_the_type_is_refused_before_anything_is_built_test_() ->
+    Huge = <<"1e", (binary:copy(~"9", 100000))/binary>>,
+    [
+        {
+            binary_to_list(Format) ++ " " ++ Label,
+            ?_assertError(
+                {minato_codec, #{type := numeric, reason := out_of_range}},
+                enc(Decimal, binary_to_existing_atom(Format))
+            )
+        }
+     || Format <- [~"binary", ~"text"],
+        {Label, Decimal} <- [
+            {"1e99999999999", ~"1e99999999999"},
+            {"1e-99999999999", ~"1e-99999999999"},
+            {"one digit past the integer limit", ~"1e131072"},
+            {"one digit past the scale limit", ~"1e-16384"},
+            {"an exponent too long to read", Huge}
+        ]
+    ].
+
+the_limits_themselves_encode_test_() ->
+    [
+        ?_assertEqual(<<1:16, 32767:16/signed, 0:16, 0:16, 1000:16>>, enc(~"1e131071", binary)),
+        ?_assertEqual(
+            <<1:16, -4096:16/signed, 0:16, 16383:16, 10:16>>, enc(~"1e-16383", binary)
+        ),
+        ?_assertEqual(131072, byte_size(enc(~"1e131071", text))),
+        ?_assertEqual(~"1000", roundtrip(~"1e0000000003", binary))
+    ].
+
+zero_is_zero_whatever_its_exponent_test_() ->
+    [
+        ?_assertEqual(~"0", roundtrip(~"0e99999999999", binary)),
+        ?_assertEqual(~"0", roundtrip(~"0e99999999999", text)),
+        ?_assertEqual(~"0", roundtrip(~"-0.000e99999999999", binary)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(~"0e-99999999999", binary)
+        )
+    ].
+
+the_largest_numeric_round_trips_test_() ->
+    Largest = <<
+        (binary:copy(~"9", 131072))/binary, $., (binary:copy(~"9", 16383))/binary
+    >>,
+    [
+        ?_assertEqual(Largest, roundtrip(Largest, binary)),
+        ?_assertEqual(<<$-, Largest/binary>>, roundtrip(<<$-, Largest/binary>>, binary)),
+        ?_assertEqual(Largest, roundtrip(Largest, text)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(<<$9, Largest/binary>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(<<Largest/binary, $9>>, binary)
+        )
+    ].
+
+a_header_no_server_writes_is_refused_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := scale_out_of_range}},
+            minato_codec:decode(?NUMERIC, <<0:16, 0:16/signed, 0:16, 16384:16>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range, value := 10000}},
+            minato_codec:decode(?NUMERIC, <<1:16, 0:16/signed, 0:16, 0:16, 10000:16>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<2:16, 1:16/signed, 0:16, 0:16, 1:16, 65535:16>>, binary
+            )
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<2:16, 0:16/signed, 0:16, 4:16, 1:16, 10000:16>>, binary
+            )
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<1:16, -1:16/signed, 0:16, 2:16, 10000:16>>, binary
+            )
+        )
+    ].
+
+the_widest_header_decodes_to_a_bounded_value_test() ->
+    Wire = <<1:16, 32767:16/signed, 16#4000:16, 16383:16, 9999:16>>,
+    Decoded = minato_codec:decode(?NUMERIC, Wire, binary),
+    ?assertEqual(1 + 131072 + 1 + 16383, byte_size(Decoded)),
+    ?assertMatch(<<"-9999", _/binary>>, Decoded).
+
+a_numeric_too_large_for_a_float_is_a_codec_failure_test() ->
+    Wire = <<1:16, 100:16/signed, 0:16, 0:16, 1:16>>,
+    ?assertError(
+        {minato_codec, #{type := numeric, reason := not_a_float}},
+        minato_codec_numeric:decode(numeric, Wire, binary, #{numeric_format => float})
+    ).
+
+%%----------------------------------------------------------------------
 %% Values that need implied zero groups on either side of the point
 %%----------------------------------------------------------------------
 
