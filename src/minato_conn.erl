@@ -435,7 +435,15 @@ Close a connection.
 `Terminate` is sent first so the server tears the backend down rather than
 discovering a closed socket, and a failure to send it is not reported: the
 socket is being closed either way. The send waits no longer than
-`send_timeout`.
+`send_timeout` and never more than a second, whatever `send_timeout` is, so a
+server that has stopped reading does not hold a close up. A close answers `ok`
+and does not raise, whatever state the socket or the TLS session is in.
+
+With `transport => inet` the bound on a write is the driver's, and a driver
+still holding bytes the server has not taken is not written to at all: the
+socket is closed and what it held is dropped. A TLS session on that transport
+then says its own goodbye through `m:ssl`, which gives up on a server that is
+not reading after its own timeouts, about ten seconds.
 
 On Windows a TLS session waits for the server's own close before it is closed,
 for no longer than `cancel_timeout` and never more than a second. `m:ssl` keeps a
@@ -454,8 +462,56 @@ close(Conn) ->
 -doc false.
 -spec close(conn(), os()) -> ok.
 close(#conn{transport = Transport, socket = Socket, grace = Grace} = Conn, Os) ->
-    _ = terminated(Conn),
+    ok = farewell(Conn),
     shut(Transport, Socket, Grace, Os).
+
+%% `Terminate` is a courtesy: the server finds out from a closed socket as
+%% well. It gets one write with the bound of a close on it, and whatever
+%% becomes of that write the close goes on.
+-spec farewell(conn()) -> ok.
+farewell(#conn{send_timeout = Timeout} = Conn) ->
+    Bound = shorter(Timeout, ?CLOSE_DRAIN_CAP),
+    try hurried(Conn, Bound) of
+        clear ->
+            _ = terminated(Conn#conn{send_timeout = Bound, send_timeout_close = false}),
+            ok;
+        behind ->
+            ok
+    catch
+        _Class:_Reason -> ok
+    end.
+
+-spec shorter(timeout(), non_neg_integer()) -> non_neg_integer().
+shorter(infinity, Cap) -> Cap;
+shorter(Timeout, Cap) -> min(Timeout, Cap).
+
+%% Where a driver holds the bound on a write, the driver is told the new one.
+%% A driver still holding bytes it could not send has a peer that is not
+%% reading: a write would wait behind them for as long as the peer cared to,
+%% and `Terminate` after half a message is not `Terminate` to the server
+%% either. So nothing is written, and what is held is dropped with the socket
+%% instead of being waited on.
+-spec hurried(conn(), non_neg_integer()) -> clear | behind.
+hurried(#conn{transport = gen_tcp, socket = Socket}, Bound) ->
+    case inet:getstat(Socket, [send_pend]) of
+        {ok, [{send_pend, 0}]} ->
+            _ = inet:setopts(Socket, [{send_timeout, Bound}]),
+            clear;
+        _Held ->
+            _ = inet:setopts(Socket, [{linger, {true, 0}}]),
+            behind
+    end;
+hurried(#conn{transport = ssl, under = undefined, socket = Socket}, Bound) ->
+    case ssl:getstat(Socket, [send_pend]) of
+        {ok, [{send_pend, 0}]} ->
+            _ = ssl:setopts(Socket, [{send_timeout, Bound}]),
+            clear;
+        _Held ->
+            _ = ssl:setopts(Socket, [{linger, {true, 0}}]),
+            behind
+    end;
+hurried(_Conn, _Bound) ->
+    clear.
 
 %% For a process that cannot afford the drain `close/1` waits for on Windows,
 %% such as a pool: the close goes to a process of its own, which is killed if
@@ -488,7 +544,7 @@ closer(Os) ->
     {ok, _Timer} = timer:apply_after(?CLOSER_LIFETIME, ?MODULE, overdue, [self()]),
     receive
         {?MODULE, close, Socket, Grace} ->
-            _ = ssl:send(Socket, minato_protocol:encode(terminate)),
+            _ = session_write(Socket, minato_protocol:encode(terminate)),
             shut(ssl, Socket, Grace, Os)
     end.
 
@@ -506,13 +562,23 @@ overdue(Closer) ->
             ok
     end.
 
+%% A socket that is already closed, and a TLS session whose processes are
+%% already gone, are closed as far as a caller is concerned.
 -spec shut(transport(), socket(), timeout(), os()) -> ok.
-shut(ssl, Socket, Grace, {win32, _Name}) ->
+shut(Transport, Socket, Grace, Os) ->
+    try
+        released(Transport, Socket, Grace, Os)
+    catch
+        _Class:_Reason -> ok
+    end.
+
+-spec released(transport(), socket(), timeout(), os()) -> ok.
+released(ssl, Socket, Grace, {win32, _Name}) ->
     _ = ssl:setopts(Socket, [{active, false}]),
     ok = drained(Socket, erlang:monotonic_time(millisecond) + drain_cap(Grace)),
     _ = ssl:close(Socket),
     ok;
-shut(Transport, Socket, _Grace, _Os) ->
+released(Transport, Socket, _Grace, _Os) ->
     _ = Transport:close(Socket),
     ok.
 
@@ -616,7 +682,7 @@ session_write(Socket, Bytes) ->
     try
         write(ssl, Socket, Bytes)
     catch
-        exit:_Ended -> {error, {socket, closed}}
+        _Class:_Ended -> {error, {socket, closed}}
     end.
 
 -spec timed(conn(), ok | {error, term()}) -> ok | {error, error()}.

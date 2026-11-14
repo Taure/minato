@@ -494,6 +494,53 @@ a_close_that_cannot_be_set_aside_leaves_no_closer_test() ->
     ?assertEqual(Closers, closers()),
     minato_backend_server:stop(Server).
 
+%% The session the closer is handed may already be gone, and `m:ssl` answers
+%% a write to one of those by exiting the caller as readily as with an error.
+a_closer_handed_a_session_that_is_gone_ends_quietly_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    Closer = proc_lib:spawn(minato_conn, closer, [?WINDOWS]),
+    Ref = monitor(process, Closer),
+    ok = minato_conn:give_away(Conn, Closer),
+    Session = ended(Conn),
+    Closer ! {minato_conn, close, Session, 100},
+    receive
+        {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(normal, Reason)
+    after 4000 -> error(closer_lives_on)
+    end,
+    minato_backend_server:stop(Server).
+
+a_close_of_a_session_that_is_gone_is_still_ok_test_() ->
+    [
+        {Label, fun() ->
+            {Server, {ok, Conn}} = tls_connects(#{}, Given),
+            _ = ended(Conn),
+            ?assertEqual(ok, minato_conn:close(Conn, ?POSIX)),
+            ?assertEqual(ok, minato_conn:close(Conn, ?WINDOWS)),
+            ?assertEqual(ok, minato_conn:close_aside(Conn, ?POSIX)),
+            ?assertEqual(ok, minato_conn:close_aside(Conn, ?WINDOWS)),
+            minato_backend_server:stop(Server)
+        end}
+     || {Label, Given} <- [{"socket", #{}}, {"driver", #{transport => inet}}]
+    ].
+
+%% Kills the processes of the TLS session a connection holds, and answers the
+%% session. The connection is opaque, and so is the session: both are searched.
+ended(Conn) ->
+    [Session] = [
+        Field
+     || Field <- tuple_to_list(Conn), is_tuple(Field), element(1, Field) =:= sslsocket
+    ],
+    Pids = [Pid || Pid <- tuple_to_list(Session), is_pid(Pid)],
+    Monitors = [monitor(process, Pid) || Pid <- Pids],
+    _ = [exit(Pid, kill) || Pid <- Pids],
+    _ = [
+        receive
+            {'DOWN', Monitor, process, _Pid, _Reason} -> ok
+        end
+     || Monitor <- Monitors
+    ],
+    Session.
+
 an_overdue_closer_is_killed_and_logged_test() ->
     ok = logger:add_handler(overdue_capture, ?MODULE, #{config => self()}),
     Closer = spawn(fun() ->

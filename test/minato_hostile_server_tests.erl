@@ -200,6 +200,46 @@ a_tls_write_to_a_server_that_stopped_reading_gives_up_test_() ->
         ]
     ].
 
+%% `Terminate` is a courtesy, and a peer that has stopped reading is not owed
+%% a wait for it. The connection asks for no bound on a write, and another
+%% process is already waiting in one, so nothing but the close's own bound can
+%% end it. The last case is bounded by `m:ssl` and not by minato: its goodbye
+%% is a write through a driver that is not taking any.
+a_close_does_not_wait_on_a_server_that_stopped_reading_test_() ->
+    [
+        {timeout, 60,
+            {Label, fun() ->
+                {ok, _Started} = application:ensure_all_started(minato),
+                Stalls = Server#{after_script => stall},
+                Peer = minato_backend_server:start([?READY], Stalls),
+                Unbounded = #{socket_options => [{send_timeout, infinity}]},
+                Opts = maps:merge(Unbounded, Given),
+                {ok, Conn} = minato_conn:connect(
+                    case Server of
+                        #{tls := true} -> tls_opts(Peer, Opts);
+                        #{} -> opts(minato_backend_server:port(Peer), Opts)
+                    end
+                ),
+                Megabyte = binary:copy(~"x", 1 bsl 20),
+                Writer = spawn(fun() -> filled(Conn, Megabyte, 256) end),
+                ok = timer:sleep(500),
+                Started = erlang:monotonic_time(millisecond),
+                Closed = minato_conn:close(Conn),
+                Elapsed = erlang:monotonic_time(millisecond) - Started,
+                exit(Writer, kill),
+                minato_backend_server:stop(Peer),
+                ?assertEqual(ok, Closed),
+                ?assertEqual({ok, true}, {Closed, Elapsed < Bound orelse Elapsed})
+            end}}
+     || {Label, Server, Given, Bound} <- [
+            {"on the socket transport", #{}, #{}, 3000},
+            {"on the driver", #{}, #{transport => inet}, 3000},
+            {"behind TLS on the socket transport", #{tls => true}, #{}, 3000},
+            {"behind TLS on the driver, where ssl closes in its own time", #{tls => true},
+                #{transport => inet}, 20000}
+        ]
+    ].
+
 a_tls_write_that_is_in_time_is_left_alone_test() ->
     {ok, _Started} = application:ensure_all_started(minato),
     Answer = [{command_complete, ~"SELECT 0"}, {ready_for_query, idle}],
