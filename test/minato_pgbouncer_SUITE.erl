@@ -190,7 +190,7 @@ asked(Caller, Left) ->
     {ok, Left} = minato:transaction(?POOL, fun(Conn) ->
         {ok, #{rows := [{Sum}]}, Read} =
             minato_query:query(Conn, ~"SELECT $1::int4 + $2::int4", [Caller, Left]),
-        Sum = Caller + Left,
+        ?assertEqual(Caller + Left, Sum),
         {ok, Left, Read}
     end),
     asked(Caller, Left - 1).
@@ -271,15 +271,7 @@ a_kept_statement_lost_to_another_backend_is_parsed_again(Config) ->
 a_connection_that_keeps_no_statements_is_answered_by_any_backend(Config) ->
     ok = both_backends_idle(Config),
     {ok, Conn} = minato_conn:connect((pooler(Config))#{prepared_statements => 0}),
-    {Backends, Read} = lists:mapfoldl(
-        fun(Turn, Asked) ->
-            {ok, #{rows := [{Backend, Turn}]}, Answered} =
-                minato_query:cached(Asked, ~"SELECT pg_backend_pid(), $1::int4", [Turn]),
-            {Backend, Answered}
-        end,
-        Conn,
-        lists:seq(1, 10)
-    ),
+    {Backends, Read} = answered_by(Conn, lists:seq(1, 10)),
     ?assertEqual(2, length(lists:usort(Backends))),
     ok = minato_conn:close(Read).
 
@@ -305,6 +297,14 @@ released(Conn) ->
 backend(Conn) ->
     {ok, #{rows := [{Backend}]}, Read} = minato_query:query(Conn, ?BACKEND, []),
     {Backend, Read}.
+
+answered_by(Conn, []) ->
+    {[], Conn};
+answered_by(Conn, [Turn | Turns]) ->
+    {ok, #{rows := [{Backend, Turn}]}, Answered} =
+        minato_query:cached(Conn, ~"SELECT pg_backend_pid(), $1::int4", [Turn]),
+    {Backends, Read} = answered_by(Answered, Turns),
+    {[Backend | Backends], Read}.
 
 connected(Config) ->
     {ok, Conn} = minato_conn:connect(pooler(Config)),

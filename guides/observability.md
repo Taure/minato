@@ -193,7 +193,7 @@ handle([minato, _Span, _Ended], _Measurements, Metadata, _Config) ->
 %% The statement is not known to be a SELECT until it has been answered, so a
 %% query span starts under the name of its database and is renamed here.
 ended(Ctx, #{outcome := ok, command := Command, database := Database}) ->
-    Operation = string:uppercase(operation(Command)),
+    Operation = iolist_to_binary(string:uppercase(operation(Command))),
     _ = otel_span:update_name(Ctx, <<Operation/binary, " ", Database/binary>>),
     otel_span:set_attributes(Ctx, #{'db.operation.name' => Operation});
 ended(Ctx, #{reason := Reason}) ->
@@ -217,7 +217,10 @@ attributes(Metadata) ->
 addressed(Attributes, #{host := {local, _Path}}) ->
     Attributes;
 addressed(Attributes, #{host := Host}) when is_tuple(Host) ->
-    Attributes#{'server.address' => list_to_binary(inet:ntoa(Host))};
+    case inet:ntoa(Host) of
+        {error, einval} -> Attributes;
+        Address -> Attributes#{'server.address' => list_to_binary(Address)}
+    end;
 addressed(Attributes, #{host := Host}) when is_atom(Host) ->
     Attributes#{'server.address' => atom_to_binary(Host)};
 addressed(Attributes, #{host := Host}) ->

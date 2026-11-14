@@ -254,15 +254,9 @@ served(Peer, {ok, {cancel_request, _Pid, _Secret} = Message, _Rest}, _StartedUp,
     terminated(Peer);
 served(Peer, {ok, Message, Rest}, StartedUp, Script) ->
     told(Peer, Message),
-    answer(Peer, Rest, started_up(Message, StartedUp), replied(Message, Script));
+    answer(Peer, Message, Rest, started_up(Message, StartedUp), Script);
 served(Peer, closed, _StartedUp, _Script) ->
     Peer.
-
--spec replied(term(), [answer()]) -> [answer()].
-replied(Message, [{reply, {Module, Function}} | Script]) ->
-    [Module:Function(Message) | Script];
-replied(_Message, Script) ->
-    Script.
 
 -spec told(peer(), term()) -> ok.
 told(#{owner := Owner, acceptor := Acceptor}, Message) ->
@@ -293,19 +287,23 @@ gone(Peer) ->
     told(Peer, closed),
     Peer.
 
--spec answer(peer(), binary(), boolean(), [answer()]) -> peer().
-answer(#{transport := Transport, socket := Socket} = Peer, Rest, StartedUp, [Answer | Script]) ->
-    ok = sent(Transport, Socket, Answer),
+-spec answer(peer(), term(), binary(), boolean(), [answer()]) -> peer().
+answer(
+    #{transport := Transport, socket := Socket} = Peer, Message, Rest, StartedUp, [Answer | Script]
+) ->
+    ok = sent(Transport, Socket, Message, Answer),
     serve(Peer, Rest, StartedUp, Script);
-answer(Peer, Rest, StartedUp, []) ->
+answer(Peer, _Message, Rest, StartedUp, []) ->
     serve(Peer, Rest, StartedUp, []).
 
--spec sent(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), answer()) -> ok.
-sent(Transport, Socket, {then, First, Milliseconds, Second}) ->
-    ok = sent(Transport, Socket, First),
+-spec sent(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), term(), answer()) -> ok.
+sent(Transport, Socket, Message, {then, First, Milliseconds, Second}) ->
+    ok = sent(Transport, Socket, Message, First),
     ok = timer:sleep(Milliseconds),
-    sent(Transport, Socket, Second);
-sent(Transport, Socket, Answer) ->
+    sent(Transport, Socket, Message, Second);
+sent(Transport, Socket, Message, {reply, {Module, Function}}) ->
+    sent(Transport, Socket, Message, Module:Function(Message));
+sent(Transport, Socket, _Message, Answer) ->
     Transport:send(Socket, bytes(Answer)).
 
 -spec bytes([minato_backend_writer:message()] | {raw, iodata()}) -> iodata().

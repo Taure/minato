@@ -37,7 +37,8 @@ watch(Socket, Timeout) ->
 -doc "The write came back in time.".
 -spec finished(reference()) -> ok.
 finished(Timer) ->
-    erlang:cancel_timer(Timer, [{async, true}, {info, false}]).
+    _ = erlang:cancel_timer(Timer, [{async, true}, {info, false}]),
+    ok.
 
 -doc "Whether the write that just failed is one this process ended.".
 -spec ran_out(reference()) -> boolean().

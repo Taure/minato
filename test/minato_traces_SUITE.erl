@@ -175,13 +175,13 @@ nothing_the_caller_passed_is_in_a_span(_Config) ->
     Needle = ~"a-value-nobody-else-wrote",
     {_Request, Spans} = traced(fun() ->
         {ok, #{rows := [{Needle}]}} = minato:query(?POOL, ~"SELECT $1::text", [Needle]),
-        {error, {pgsql_error, #{code := ~"22P02", message := Quoted}}} =
+        {error, {pgsql_error, #{code := ~"22P02", message := <<Quoted/binary>>}}} =
             minato:query(?POOL, ~"SELECT $1::text::int4", [Needle]),
         ?assertNotEqual(nomatch, binary:match(Quoted, Needle)),
         ?assertError({minato_codec, _Report}, minato:query(?POOL, ~"SELECT $1::int4", [Needle]))
     end),
     ?assertEqual(6, length(Spans)),
-    Written = unicode:characters_to_binary(io_lib:format("~0tp", [Spans])),
+    Written = iolist_to_binary(io_lib:format("~0p", [Spans])),
     ?assertEqual(nomatch, binary:match(Written, Needle)).
 
 -spec the_statement_is_in_a_span_only_when_asked_for([{atom(), term()}]) -> ok.
