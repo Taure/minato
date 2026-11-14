@@ -2,11 +2,176 @@
 
 All notable changes to this project will be documented in this file.
 
+## [unreleased]
+
+### Upgrading
+
+Nothing in the API is removed or renamed. These are the changes a caller of
+1.1.6 can notice, most of them a refusal where there used to be silence.
+
+**Values and results**
+
+- A `numeric` outside what PostgreSQL stores, more than 131072 digits before
+  the point or 16383 after it, raises `{minato_codec, #{reason := out_of_range}}`
+  when encoded instead of being written with a wrapped header. One too large
+  for `numeric_format => float` raises a codec failure instead of `badarg`.
+- An array with more than six dimensions, a negative dimension, or more
+  elements declared than its bytes could hold is refused on decode.
+- `command` in a result is an atom for every tag PostgreSQL has, as before,
+  and the binary the server sent for a word that is not one of them. No atom
+  is made from bytes off the socket any more.
+- A message longer than 1,073,741,823 bytes, and a statement with more than
+  65,535 parameters, raise `{minato_protocol, _}` before anything is sent.
+- A row with more columns than its description raises
+  `{minato_protocol, #{reason := column_count_mismatch}}`, as one with fewer
+  already did, where it raised `column_longer_than_the_message`.
+- A parameter that will not encode raises with `value => redacted` where the
+  value was. `{minato, [{log_values, true}]}` puts it back.
+
+**Connecting**
+
+- `user`, `database` or a `parameters` entry holding a null byte makes
+  `minato_conn:connect/1` raise before it opens a socket.
+- `channel_binding => require` authenticates with `SCRAM-SHA-256-PLUS` or not
+  at all: cleartext, MD5, a server asking for no password and SCRAM without
+  `-PLUS` are refused with `{error, {channel_binding_required, Method}}`.
+- `{server_name_indication, disable}` in `ssl_options` no longer turns the
+  hostname check off with it. `{verify, verify_none}` is how to say that.
+- The exchange from the startup message to `ReadyForQuery` has to finish
+  within `timeout` as a whole, and `connect_timeout` covers the TCP connect,
+  the TLS request and the handshake together.
+- At most 64 `ParameterStatus` entries of 4096 bytes each are kept.
+
+**Timeouts**
+
+- `send_timeout` defaults to the connection's `timeout`, with
+  `send_timeout_close`, where it was `infinity`. A server that stops reading
+  now costs `{error, {socket, timeout}}` and the connection. A single value of
+  hundreds of megabytes over a slow link needs `send_timeout` raised in
+  `socket_options`.
+- The same holds for TLS on the socket transport, which `ssl` writes without
+  a deadline of its own: a new supervised process, `minato_overdue`, shuts the
+  socket down when a write runs out of time. It needs the `minato` application
+  running, and there the connection is closed whatever `send_timeout_close`
+  says.
+
+**Telemetry and logs**
+
+- The `reason` of a failed statement in `[minato, query, stop]` keeps the
+  fields of the server's error that name things and drops `message`, `detail`,
+  `hint` and the rest, which can quote a value. The caller is still returned
+  all of it. Frames in an event's `stacktrace` carry an arity, not arguments.
+  `log_values` restores both.
+- Query events carry `host`, `port`, `database` and, on a pooled connection,
+  `pool`.
+
+**Pools, listeners and transactions**
+
+- A parameter that will not encode, the wrong number of parameters, and a
+  column that will not decode still raise, but no longer cost the connection:
+  it is put back to ready first, `minato:query/4` and `minato:simple/3` return
+  it to the pool, and `disconnects` in `minato:stats/1` no longer counts them.
+- The rollback after an exception in `minato_txn:transaction/2` is sent
+  behind a `Sync` and read up to a mark of its own, so answers the function
+  left unread are not taken for it. A connection that cannot be rolled back
+  that way is closed.
+- A pool asks the server for `max_connections` from the process that
+  connects, so a slow or malformed answer no longer holds or stops the pool.
+- A listener whose `LISTEN` or `UNLISTEN` failed on the socket, or that was
+  sent bytes that are not a message, reconnects and tells its subscribers
+  instead of stopping.
+
+**Tested against**
+
+- PostgreSQL 14 to 18, and PgBouncer 1.26 in transaction mode. See
+  "PgBouncer and connection poolers" in the configuration guide for what does
+  not cross a pooler.
+
+### Bug Fixes
+
+- *(codec)* Bound numeric to the range PostgreSQL stores and decode it in one pass
+- *(codec)* Bound array dimensions, nesting and element counts on decode
+- *(protocol)* Read command tags against a closed vocabulary
+- *(protocol)* Refuse a frontend message that does not fit its length field
+- *(conn)* Refuse a startup parameter that holds a null byte
+- *(auth)* Make a required channel binding refuse every method that cannot carry one
+- *(telemetry)* Keep values out of failed-query events and say where a query went
+- *(pool)* Ask the server for its connection limit from the connector, and read any answer
+- *(listener)* Reconnect after a statement or a message that lost the connection
+- *(conn)* Bound the opening exchange as a whole and the parameters kept from it
+- *(tls)* Keep checking the hostname when the server name is left out of the handshake
+- *(conn)* Bound a write by the connection timeout unless told otherwise
+- *(query)* A value that does not fit no longer costs the connection
+- *(txn)* Roll back on a connection an exception left out of step
+- *(conn)* Give a TLS write on the socket transport a deadline
+- *(protocol)* Call a column the description does not have a count mismatch
+
+### Documentation
+
+- *(security)* What a server cannot make the client do
+- *(guides)* Say that a value that would not encode is raised redacted
+- Say which PostgreSQL versions are tested and what crosses a pooler
+- Add a security policy
+
+### Miscellaneous
+
+- *(types)* State what the new code and its tests hand eqWAlizer and the linter
+- *(mutate)* Point rebar3_mutate at the tests of modules tested under other names
+
+### Testing
+
+- *(protocol)* Generate only startup parameter names the encoder accepts
+- *(txn)* A downgraded commit through the pool, and what an exception leaves on the server
+- *(protocol)* Frame any stream of messages, and any row against its columns
+- *(transport)* Make the send timeout case wait on a write
+- *(pool)* Pin what a borrow costs and who is served next
+- Let the compose file start any PostgreSQL major
+- *(pgbouncer)* Run minato through a transaction pooler
+- *(traces)* Run the OpenTelemetry bridge the guide shows
+- *(txn)* What minato_txn sends for each outcome, against a scripted server
+- Cover the edges mutation testing found nothing watching
+- *(traces)* Find the guide from where rebar3 runs, not from the build directory
+- Bounds, refused text and row lengths that mutation testing found unasserted
+
+## [1.1.6] - 2026-11-06
+
+### Bug Fixes
+
+- Keep secrets out of child specs and status, retry raising connects, accept hour 24 only as midnight (#61)
+
+### Documentation
+
+- Position minato as an alternative to epgsql and pgo (#62)
+
+## [1.1.5] - 2026-11-02
+
+### Bug Fixes
+
+- Two Windows-only flakes, a TLS close that hangs and a probe that aborts connections (#60)
+
+## [1.1.4] - 2026-11-01
+
+### Bug Fixes
+
+- *(pool)* Validate pool options and keep the password out of start errors and status (#59)
+
+## [1.1.3] - 2026-10-25
+
+### Bug Fixes
+
+- *(pool)* Reset session state when a connection is checked in (#53)
+
+## [1.1.2] - 2026-10-24
+
+### Miscellaneous
+
+- Attribute licence to Daniel Widgren, not Widgrens IT AB (#52)
+
 ## [1.1.1] - 2026-08-11
 
 ### Documentation
 
-- A changelog that covers the releases that happened
+- A changelog that covers the releases that happened (#50)
 
 ## [1.1.0] - 2026-08-11
 
