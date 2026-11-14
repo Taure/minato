@@ -299,9 +299,50 @@ a_payload_that_does_not_fit_its_columns_is_refused_test_() ->
             {"bytes after the last column", Trailing, column_count_mismatch, {0, 0}},
             {"a length below minus one", Negative, {negative_column_length, -2}, -2},
             {"a column longer than what is left", Overrun, column_longer_than_the_message, {9, 3}},
-            {"no room for a count", <<0>>, malformed, <<0>>}
+            {"no room for a count", <<0>>, malformed, <<0>>},
+            {"an empty column the description does not have", payload(columns() ++ [~""]),
+                column_count_mismatch, {0, 1}},
+            {"a null column after the count ran out", <<0:16, -1:32/signed>>, column_count_mismatch,
+                {3, 0}},
+            {"a column after the count ran out", <<0:16, 1:32, "x">>, column_count_mismatch,
+                {3, 0}},
+            {"a long column after the count ran out", <<0:16, 9:32, "abc">>, column_count_mismatch,
+                {3, 0}}
         ]
     ].
+
+the_last_column_is_checked_like_the_others_test_() ->
+    One = minato_protocol:decoder([field(~"id", 23, binary)], #{}),
+    Map = minato_protocol:decoder([field(~"id", 23, binary)], #{return_rows_as_maps => true}),
+    [
+        [
+            ?_assertError(
+                {minato_protocol, #{reason := {negative_column_length, -2}}},
+                minato_protocol:decode_row(Decoder, <<1:16, -2:32/signed>>)
+            ),
+            ?_assertError(
+                {minato_protocol, #{reason := column_longer_than_the_message, data := {9, 3}}},
+                minato_protocol:decode_row(Decoder, <<1:16, 9:32, "abc">>)
+            )
+        ]
+     || Decoder <- [One, Map]
+    ].
+
+a_mismatch_says_how_many_of_each_were_left_test_() ->
+    [
+        ?_assertError(
+            {minato_protocol, #{reason := column_count_mismatch, data := {2, 0}}},
+            minato_protocol:row(description(), [<<0, 0, 0, 42>>], Opts)
+        )
+     || Opts <- [#{}, #{return_rows_as_maps => true}]
+    ] ++
+        [
+            ?_assertError(
+                {minato_protocol, #{reason := column_count_mismatch, data := {0, 2}}},
+                minato_protocol:row([field(~"id", 23, binary)], columns(), Opts)
+            )
+         || Opts <- [#{}, #{return_rows_as_maps => true}]
+        ].
 
 a_payload_splits_into_its_columns_test_() ->
     [

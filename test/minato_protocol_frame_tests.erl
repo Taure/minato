@@ -413,3 +413,34 @@ a_remainder_is_copied_when_it_is_a_quarter_of_the_buffer_or_less_test_() ->
         ?_assertEqual(100, retained(<<(sized(300))/binary, (arriving(100))/binary>>)),
         ?_assertEqual(400, retained(<<(sized(299))/binary, (arriving(101))/binary>>))
     ].
+
+the_default_limit_is_sixty_four_mebibytes_test_() ->
+    Limit = 64 * 1024 * 1024,
+    AtLimit = <<$D, Limit:32>>,
+    Over = <<$D, (Limit + 1):32>>,
+    Refused = {$D, Limit + 1, Limit},
+    [
+        ?_assertEqual({[], AtLimit}, minato_protocol:frame(AtLimit)),
+        ?_assertEqual(incomplete, minato_protocol:decode(AtLimit)),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := Refused}},
+            minato_protocol:frame(Over)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := Refused}},
+            minato_protocol:decode(Over)
+        )
+    ].
+
+one_message_is_decoded_under_the_limit_it_is_given_test_() ->
+    [
+        ?_assertEqual(
+            {ok, empty_query_response, <<1>>},
+            minato_protocol:decode(<<$I, 4:32, 1>>, #{max_message_length => 4})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := {$C, 5, 4}}},
+            minato_protocol:decode(<<$C, 5:32, 0>>, #{max_message_length => 4})
+        ),
+        ?_assertEqual(incomplete, minato_protocol:decode(<<$C, 5:32>>, #{}))
+    ].

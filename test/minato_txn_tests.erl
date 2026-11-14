@@ -227,7 +227,7 @@ connected(Script, Opts) ->
     Server = minato_backend_server:start([?READY | Script]),
     Port = minato_backend_server:port(Server),
     {ok, Conn} = minato_conn:connect(
-        maps:merge(#{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000}, Opts)
+        maps:merge(#{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 1000}, Opts)
     ),
     {Server, Conn}.
 

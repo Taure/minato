@@ -501,3 +501,19 @@ an_offset_is_taken_off_to_the_second_test_() ->
             {minato_codec, #{reason := malformed_offset}}, Read(~"+01:02:03:04")
         )
     ].
+
+what_is_not_a_date_or_a_time_is_refused_by_name_test_() ->
+    [
+        ?_assertError({minato_codec, #{reason := not_a_date}}, enc(1082, ~"2024-01-15", text)),
+        ?_assertError({minato_codec, #{reason := not_a_time}}, enc(1083, ~"12:00:00", binary)),
+        ?_assertError({minato_codec, #{reason := not_a_time}}, enc(1083, {12, 0}, text))
+    ].
+
+a_date_read_as_text_is_checked_like_one_written_test_() ->
+    Read = fun(Text) -> minato_codec:decode(1082, Text, text) end,
+    [
+        ?_assertError({minato_codec, #{reason := day_out_of_range}}, Read(~"2026-02-30")),
+        ?_assertError({minato_codec, #{reason := month_out_of_range}}, Read(~"2026-13-01")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"2026-02")),
+        ?_assertError({minato_codec, #{reason := malformed_text}}, Read(~"2026-02-03-04"))
+    ].

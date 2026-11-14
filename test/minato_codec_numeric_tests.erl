@@ -344,4 +344,17 @@ leading_zeros_are_not_digits_test_() ->
     [
         {binary_to_list(Written), ?_assertEqual(Plain, roundtrip(Written, binary))}
      || {Written, Plain} <- [{~"007", ~"7"}, {~"000", ~"0"}, {~"00.5", ~"0.5"}, {~"0010e1", ~"100"}]
-    ].
+    ] ++
+        [
+            {binary_to_list(Written), ?_assertEqual(Plain, enc(Written, text))}
+         || {Written, Plain} <- [
+                {~"007", ~"7"},
+                {~"000", ~"0"},
+                {~"00.5", ~"0.5"},
+                {~"0e5", ~"0"},
+                {~"0e1", ~"0"},
+                {~"1e2", ~"100"},
+                {~"1e0", ~"1"},
+                {~"-0.50", ~"-0.50"}
+            ]
+        ].
