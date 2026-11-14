@@ -445,8 +445,10 @@ gen_field_name() ->
         routine
     ]).
 
+%% An empty name is how the packet ends its parameter list, so the encoder
+%% refuses one and the generator leaves it out.
 gen_parameters() ->
-    ?LET(Pairs, list({gen_cstring(), gen_cstring()}), maps:from_list(Pairs)).
+    ?LET(Pairs, list({non_empty(gen_cstring()), gen_cstring()}), maps:from_list(Pairs)).
 
 gen_target() ->
     oneof([statement, portal]).
