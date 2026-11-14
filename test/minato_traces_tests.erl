@@ -14,6 +14,7 @@ the_guide_shows_the_module_that_is_tested_test() ->
     Shown = <<"```erlang\n", Module/binary, "```\n">>,
     ?assertNotEqual(nomatch, binary:match(Guide, Shown)).
 
-%% The application is built under `_build/<profile>/lib/minato`.
+%% `rebar3 eunit` runs where `rebar.config` is, wherever it builds.
 root() ->
-    filename:join(code:lib_dir(minato), "../../../..").
+    {ok, Root} = file:get_cwd(),
+    Root.
