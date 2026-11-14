@@ -24,7 +24,21 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   65,535 parameters, raise `{minato_protocol, _}` before anything is sent.
 - A row with more columns than its description raises
   `{minato_protocol, #{reason := column_count_mismatch}}`, as one with fewer
-  already did, where it raised `column_longer_than_the_message`.
+  already did, where it raised `column_longer_than_the_message`, or
+  `negative_column_length` when the extra column was NULL.
+- A list inside a list is a row of an array wherever an element cannot itself
+  be a list, so `[[1,2],[3,4]]` is a 2 by 2 `_int4` where it raised
+  `not_an_integer`, and what a multi-dimensional array decodes to can be sent
+  back. For `_text`, `_varchar`, `_json`, `_jsonb` and `_bytea` a list is
+  still one string, and `{array, Nested}` sends those as rows. A list that is
+  not rectangular raises `ragged_array`. A string written as a list and handed
+  to an array of numbers no longer raises: `["12"]` is a row of two character
+  codes.
+- A `date` or `timestamp` the binary format cannot hold, or that would land on
+  the value meaning `infinity`, raises
+  `{minato_codec, #{reason := out_of_range}}` instead of being written wrapped.
+  Day 0 raises `day_out_of_range`, where it said `month_out_of_range`, and a
+  `time` given as microseconds outside one day raises `time_out_of_range`.
 - A parameter that will not encode raises with `value => redacted` where the
   value was. `{minato, [{log_values, true}]}` puts it back.
 
@@ -51,9 +65,37 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   `socket_options`.
 - The same holds for TLS on the socket transport, which `ssl` writes without
   a deadline of its own: a new supervised process, `minato_overdue`, shuts the
-  socket down when a write runs out of time. It needs the `minato` application
-  running, and there the connection is closed whatever `send_timeout_close`
-  says.
+  socket down when a write runs out of time, and there the connection is
+  closed whatever `send_timeout_close` says. Without the `minato` application
+  running the deadline still holds, at the cost of a process per write.
+  `minato_overdue` and `minato_sup` cannot be the name of a pool or a
+  listener: `{error, {reserved_name, Name}}`.
+
+- `minato_conn:close/1` does not raise and does not wait on a server that has
+  stopped reading: `Terminate` gets the shorter of `send_timeout` and one
+  second, and is not written at all behind bytes the server has not taken. TLS
+  with `transport => inet` is closed by `ssl`, which gives up after about ten
+  seconds.
+
+**Statements kept on a connection**
+
+- The first use of a statement by `minato:query/3` and `minato_query:cached/3`
+  is two round trips, where it was three, and `minato_query:prepare/3` is one,
+  where it was two. The statement is parsed and run in one exchange, so the
+  first use also works behind a pooler that does not follow named statements;
+  later uses there still need `prepared_statements => 0`.
+- A kept statement is parsed again and run once more in more of the cases
+  where the table changed under it: when the server refuses its parameters and
+  their types have changed, when a value no longer fits the type it was kept
+  with, and when the number of result columns has changed. Still once, and
+  never inside a transaction the refusal has aborted: there the statement is
+  dropped and the server's error is returned as it came, where `0A000` used to
+  come back as `25P02`.
+- A statement run unnamed because the connection keeps no more keeps the
+  caller's `timeout` and is one `[minato, query]` span, where it was two.
+- A notification or a `ParameterStatus` that arrives while a statement is
+  being described is passed over, where it raised `unexpected_message` on a
+  session that had run `LISTEN`.
 
 **Telemetry and logs**
 

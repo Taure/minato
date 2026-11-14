@@ -160,10 +160,27 @@ backend means nothing to the next. PgBouncer follows them from 1.21 when its
 `max_prepared_statements` is above zero, and then nothing needs changing. With
 it at zero, or behind a pooler that does not do this, set
 `prepared_statements => 0` in the connection: every statement is then parsed
-unnamed inside the exchange that runs it. Left at the default, a statement
-fails with `26000`, `prepared statement does not exist`, whenever the pooler
-moves the client between parsing and running it, which is some of the time and
-more of it under load.
+unnamed inside the exchange that runs it. Left at the default, the first use
+of a statement works, because it is parsed and run in one exchange, and a
+later one fails with `26000`, `prepared statement does not exist`, whenever
+the pooler has moved the client to a backend that never parsed it. minato
+parses it again once, which lasts until the next move, or fails with `42P05`
+on a backend that already has the name.
+
+Behind a PgBouncer that follows statements, a migration needs one step more
+than it does on a direct connection. PgBouncer keeps a statement by its SQL
+text and prepares that on every backend it uses, so a statement the server
+refuses after a table changed (`0A000`, or `42883` when a parameter's type
+changed) stays refused, for new clients as well, until `RECONNECT` on
+PgBouncer's admin console gives it new backends. minato returns that error
+once and does not run the statement a third time. After the `RECONNECT`, a
+minato connection still holds the column and parameter types it was told
+before the migration, and PgBouncer has prepared the statement again without
+telling it. A different number of columns is noticed and parsed again; a
+column whose type changed in place is read as the type it used to be. So when
+a migration changes the type of a column, recycle the minato pools as well
+(`minato:stop_pool/1` and start, or a `max_age`), or run with
+`prepared_statements => 0`.
 
 A notification is sent to the backend that ran `LISTEN`, and the pooler has by
 then taken that backend back, so it has nobody to hand the notification to and

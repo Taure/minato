@@ -99,8 +99,8 @@ otherwise see:
 | warning | `connect_failed` | a pool could not open a connection; carries `reason` and `retry_in_ms` |
 | warning | `session_reset_failed` | a checkout closed a connection whose reset did not answer as sent: `reason` is `unread_answer` when the last borrower gave it back with answers unread, `sql_prepared_statement` when it left a statement prepared with SQL `PREPARE`, `in_transaction` or `failed` when the reset ended inside a transaction, otherwise the server's refusal by SQLSTATE `code` |
 | warning | `listener_resubscribed` | a listener reconnected, which means notifications were missed - `NOTIFY` has no replay |
-| info | `cached_plan_invalidated` | a schema change made PostgreSQL refuse a cached statement; minato recovered, but somebody ran a migration |
-| info | `cached_statement_deallocated` | something on the session ran a SQL `DEALLOCATE` of a statement minato had cached; outside a transaction minato parsed it again |
+| info | `cached_plan_invalidated` | a schema change left a cached statement with a result or parameters the table no longer has; minato parsed it again, but somebody ran a migration |
+| info | `cached_statement_deallocated` | the server no longer had a statement minato had cached, because something on the session ran a SQL `DEALLOCATE` or a pooler handed the client another backend; outside a transaction minato parsed it again |
 
 Failures a caller can act on are **returned, not logged**. A statement with a
 syntax error comes back as `{error, {pgsql_error, _}}` and stays out of the log,

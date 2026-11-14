@@ -235,18 +235,33 @@ The cache is the connection's, bounded by `prepared_statements` in
 A workload with unbounded distinct SQL therefore gets the uncached path rather
 than an unbounded pile of parsed statements in the backend.
 
-## A cached plan the server stops accepting
+## A kept statement the server stops accepting
 
-Changing a table under a prepared statement makes PostgreSQL refuse it with
-`0A000`, because the result type it was planned for is not the one it would
-return now. That is not an error the caller can do anything with, so it is not
-returned: the statement is dropped from the cache, parsed again, and run once
-more. A second `0A000` is a real failure and is returned.
+A statement is kept with what the server made of it when it was parsed: its
+plan, the types of its parameters and the columns of its result. Changing a
+table under it can make any of those wrong, and that is not an error the
+caller can do anything with. So where the server's answer says the statement
+may have gone stale, it is dropped from the cache, parsed again and run once
+more, and only what the second run answers is returned:
 
-A statement the server no longer has, because something on the session ran
-`DEALLOCATE`, comes back as `26000`. It is dropped from the cache and parsed
-again in the same way, unless a transaction is open: the error has aborted it,
-so parsing again could only fail, and the `26000` is returned instead.
+- `0A000`, the result is not the one the plan was made for;
+- `26000`, the server no longer has the statement, because something on the
+  session ran `DEALLOCATE` or a pooler handed the call to another backend;
+- `08P01` from the bind, which is a pooler having parsed the statement afresh
+  where it has another number of columns;
+- an error of class `42` for a statement with parameters, or a value that will
+  not encode as the type kept here, when asking the server again shows the
+  parameter types have changed. If they have not, the error or the raise was
+  about the call and is what the caller gets, at the cost of that one question.
+
+Never twice, and never inside a transaction the error has aborted, where
+parsing again could only fail: there the statement is dropped and closed, and
+the server's error is returned as it came.
+
+What this cannot see is a statement that still runs and now answers with
+other types in the same number of columns, which happens behind a pooler that
+prepares statements itself. See "PgBouncer and connection poolers" in the
+configuration guide.
 """.
 -spec cached(conn(), iodata(), [term()], opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
