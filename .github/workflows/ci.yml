@@ -52,8 +52,47 @@ jobs:
       enable-dependency-submission: true
       enable-summary: true
 
+  # The job above runs the suites on the PostgreSQL the compose file starts by
+  # default. This one runs them on every other major minato says it supports,
+  # each with the two PgBouncers the compose file puts in front of it.
+  postgres:
+    name: Common Test (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '18']
+    env:
+      MINATO_PG_TAG: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: Taure/erlang-ci@21e63960b4314b411e6dcd5fc1b7bea67d851fcb # v2.1.4
+        with:
+          version-file: '.tool-versions'
+      - name: Start PostgreSQL ${{ matrix.postgres }} and the poolers
+        run: docker compose -f test/docker-compose.yml up -d --wait
+      - name: Which server answered
+        run: >-
+          docker exec minato-differential-postgres
+          psql -U minato -d minato_test -Atc 'SHOW server_version'
+      - name: Common Test
+        timeout-minutes: 10
+        run: rebar3 ct
+      - name: The Common Test logs, which say which case
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ct-logs-postgres-${{ matrix.postgres }}-${{ github.run_attempt }}
+          path: _build/test/logs
+          retention-days: 5
+
   release:
-    needs: ci
+    needs: [ci, postgres]
     if: ${{ github.event_name == 'push' }}
     uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.4
     permissions:
