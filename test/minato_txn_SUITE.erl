@@ -23,13 +23,17 @@ Skips when no server answers.
     a_rolled_back_transaction_keeps_nothing/1,
     a_rollback_answer_reports_its_reason/1,
     an_exception_rolls_back_and_is_re_raised/1,
+    an_exception_leaves_no_transaction_open_on_the_server/1,
     a_commit_the_server_downgrades_is_reported/1,
+    a_pooled_commit_the_server_downgrades_is_reported/1,
+    a_pooled_transaction_that_raises_keeps_nothing/1,
     the_status_follows_the_transaction/1,
     a_savepoint_recovers_a_failed_statement/1,
     a_released_savepoint_keeps_its_work/1
 ]).
 
 -define(TIMEOUT, 10000).
+-define(POOL, minato_txn_pool).
 
 -spec all() -> [atom()].
 all() ->
@@ -38,7 +42,10 @@ all() ->
         a_rolled_back_transaction_keeps_nothing,
         a_rollback_answer_reports_its_reason,
         an_exception_rolls_back_and_is_re_raised,
+        an_exception_leaves_no_transaction_open_on_the_server,
         a_commit_the_server_downgrades_is_reported,
+        a_pooled_commit_the_server_downgrades_is_reported,
+        a_pooled_transaction_that_raises_keeps_nothing,
         the_status_follows_the_transaction,
         a_savepoint_recovers_a_failed_statement,
         a_released_savepoint_keeps_its_work
@@ -119,6 +126,64 @@ a_commit_the_server_downgrades_is_reported(Config) ->
     ?assertEqual(failed, minato_txn:status(Failed)),
     ?assertMatch({error, transaction_rolled_back, _Conn}, minato_txn:commit(Failed)),
     ?assertEqual([], committed()).
+
+%% Nothing committed is what an open transaction looks like from a second
+%% connection too, so the first one is asked: the server says whether it is in
+%% a transaction with every answer, and a row written after the exception has
+%% to be there for everybody at once.
+-spec an_exception_leaves_no_transaction_open_on_the_server([{atom(), term()}]) -> ok.
+an_exception_leaves_no_transaction_open_on_the_server(Config) ->
+    Conn = conn(Config),
+    ?assertError(
+        badarg,
+        minato_txn:transaction(Conn, fun(Open) ->
+            {ok, _Result, _Written} = insert(Open, ~"a"),
+            error(badarg)
+        end)
+    ),
+    {ok, _Result, Asked} = insert(Conn, ~"b"),
+    ?assertEqual(idle, minato_txn:status(Asked)),
+    ?assertEqual([~"b"], committed()).
+
+%% The same downgrade through the pool, where the caller sees only the answer:
+%% a function that swallowed a failed statement and answered `ok` must not be
+%% told its work was kept.
+-spec a_pooled_commit_the_server_downgrades_is_reported([{atom(), term()}]) -> ok.
+a_pooled_commit_the_server_downgrades_is_reported(_Config) ->
+    pooled(fun() ->
+        Answer = minato:transaction(?POOL, fun(Open) ->
+            {ok, _Result, Written} = insert(Open, ~"a"),
+            {error, {pgsql_error, _Fields}, Failed} = insert(Written, ~"a"),
+            {ok, done, Failed}
+        end),
+        ?assertEqual({error, transaction_rolled_back}, Answer),
+        ?assertEqual([], committed()),
+        ?assertMatch({ok, #{rows := [{1}]}}, minato:query(?POOL, ~"SELECT 1::int4", []))
+    end).
+
+-spec a_pooled_transaction_that_raises_keeps_nothing([{atom(), term()}]) -> ok.
+a_pooled_transaction_that_raises_keeps_nothing(_Config) ->
+    pooled(fun() ->
+        ?assertThrow(
+            no_thanks,
+            minato:transaction(?POOL, fun(Open) ->
+                {ok, _Result, _Written} = insert(Open, ~"a"),
+                throw(no_thanks)
+            end)
+        ),
+        ?assertEqual({ok, done}, minato:transaction(?POOL, fun(Open) -> {ok, done, Open} end)),
+        {ok, _Result} = minato:query(?POOL, ~"INSERT INTO minato_txn (name) VALUES ($1)", [~"b"]),
+        ?assertEqual([~"b"], committed())
+    end).
+
+pooled(Test) ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    {ok, _Pid} = minato:start_pool(?POOL, #{size => 1, connection => opts()}),
+    try
+        Test()
+    after
+        ok = minato:stop_pool(?POOL)
+    end.
 
 -spec the_status_follows_the_transaction([{atom(), term()}]) -> ok.
 the_status_follows_the_transaction(Config) ->
