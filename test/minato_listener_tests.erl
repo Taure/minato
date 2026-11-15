@@ -157,13 +157,7 @@ a_listener_that_cannot_connect_waits_a_time_of_its_own_test_() ->
         try
             Waits = waits(Pid, 3),
             Longest = [200, 400, 800],
-            ?assert(
-                lists:all(
-                    fun({Wait, Most}) -> Wait >= Most div 2 andalso Wait =< Most end,
-                    lists:zip(Waits, Longest)
-                ),
-                Waits
-            ),
+            ?assertEqual([], outside(Waits, Longest), Waits),
             ?assertNotEqual(Longest, Waits)
         after
             ok = minato_listener:stop(?LISTENER)
@@ -260,15 +254,18 @@ an_invalid_connection_stops_the_listener_without_its_options_test_() ->
      || Opts <- invalid()
     ].
 
+misspelt() ->
+    #{connection => #{user => ~"minato", channel_binding => sometimes}}.
+
 invalid() ->
     [#{}, #{connection => #{host => "127.0.0.1"}}, #{connection => []}].
 
 a_connection_with_an_option_that_is_refused_stops_the_listener_test() ->
     Trapping = process_flag(trap_exit, true),
     try
-        Opts = #{connection => #{user => ~"minato", channel_binding => sometimes}},
         ?assertEqual(
-            {error, {invalid_option, channel_binding}}, minato_listener:start_link(?LISTENER, Opts)
+            {error, {invalid_option, channel_binding}},
+            minato_listener:start_link(?LISTENER, misspelt())
         ),
         receive
             {'EXIT', _Pid, Reason} -> ?assertEqual({invalid_option, channel_binding}, Reason)
@@ -447,6 +444,10 @@ notifications(Count) ->
         end
      || _Each <- lists:seq(1, Count)
     ].
+
+%% The waits that are not in the upper half of the longest each could be.
+outside(Waits, Longest) ->
+    [Wait || {Wait, Most} <- lists:zip(Waits, Longest), Wait < Most div 2 orelse Wait > Most].
 
 %% How long the listener waits before each of its next attempts, read off the
 %% timers it starts.

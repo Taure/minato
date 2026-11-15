@@ -750,7 +750,9 @@ handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
     {noreply, grown(hand_out(Ready, Conn))};
 handle_info({server_limit, unknown}, State) ->
     {noreply, State#state{measured = true}};
-handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) ->
+handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) when
+    is_integer(Limit)
+->
     ok = crowded(Name, Size, Limit),
     {noreply, State#state{measured = true}};
 handle_info({server_limit, _Limit}, State) ->

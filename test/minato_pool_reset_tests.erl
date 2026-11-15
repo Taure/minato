@@ -94,8 +94,7 @@ a_connection_with_no_transaction_is_reset_without_a_rollback() ->
 a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slot_test_() ->
     {timeout, 30, fun() ->
         ok = ready(),
-        Unreadable = lists:duplicate(4, {reply, {?MODULE, unreadable}}),
-        Server = minato_backend_server:start([?READY | Unreadable]),
+        Server = minato_backend_server:start(script({?MODULE, unreadable})),
         {ok, _Pid} = minato:start_pool(?POOL, #{
             size => 1, min_size => 1, connection => connection(Server)
         }),
@@ -110,6 +109,9 @@ a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slo
             minato_backend_server:stop(Server)
         end
     end}.
+
+script(Reply) ->
+    [?READY | lists:duplicate(4, {reply, Reply})].
 
 %% The question is asked of the first connection only, so what a connection is
 %% sent is told apart by what it is, not by where it comes.

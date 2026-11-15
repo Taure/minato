@@ -287,13 +287,7 @@ a_pool_that_cannot_connect_waits_a_time_of_its_own_test_() ->
             Waits = [Wait || #{retry_in_ms := Wait} <- lists:sublist(Failed, 4)],
             Longest = [100, 200, 400, 800],
             ?assertEqual(4, length(Waits)),
-            ?assert(
-                lists:all(
-                    fun({Wait, Most}) -> Wait >= Most div 2 andalso Wait =< Most end,
-                    lists:zip(Waits, Longest)
-                ),
-                Waits
-            ),
+            ?assertEqual([], outside(Waits, Longest), Waits),
             ?assertNotEqual(Longest, Waits)
         after
             _ = minato:stop_pool(?POOL),
@@ -390,6 +384,10 @@ read(Server, Enough, Tries, Before) ->
 
 limits(Read) ->
     length([Sql || {query, ~"SHOW max_connections" = Sql} <- Read]).
+
+%% The waits that are not in the upper half of the longest each could be.
+outside(Waits, Longest) ->
+    [Wait || {Wait, Most} <- lists:zip(Waits, Longest), Wait < Most div 2 orelse Wait > Most].
 
 startups(Read) ->
     length([Startup || {startup, _Parameters} = Startup <- Read]).

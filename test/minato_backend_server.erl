@@ -165,10 +165,12 @@ stop(#{pid := Pid}) ->
 credentials(false) ->
     {undefined, []};
 credentials(true) ->
-    credentials([]);
+    chain([]);
 credentials(chained) ->
-    credentials([[{key, {namedCurve, ?secp256r1}}, {digest, sha384}]]);
-credentials(Intermediates) when is_list(Intermediates) ->
+    chain([[{key, {namedCurve, ?secp256r1}}, {digest, sha384}]]).
+
+-spec chain([[public_key:cert_opt()]]) -> {identity(), [ssl:tls_client_option()]}.
+chain(Intermediates) ->
     Key = [{key, {namedCurve, ?secp256r1}}, {digest, sha256}],
     Named = #'Extension'{
         extnID = ?'id-ce-subjectAltName', critical = false, extnValue = [{dNSName, "localhost"}]

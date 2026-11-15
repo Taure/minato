@@ -1828,13 +1828,31 @@ unnamed(Options) ->
 
 -spec carries(ssl:sslsocket(), string(), [ssl:tls_client_option()]) -> boolean().
 carries(Upgraded, Name, Options) ->
-    Customize = proplists:get_value(customize_hostname_check, Options, []),
     case ssl:peercert(Upgraded) of
         {ok, Certificate} ->
-            public_key:pkix_verify_hostname(Certificate, [reference(Name)], Customize);
+            public_key:pkix_verify_hostname(Certificate, [reference(Name)], customized(Options));
         {error, _Reason} ->
             false
     end.
+
+%% `m:ssl` has taken these options by now, so every one of them is a check.
+-spec customized([ssl:tls_client_option()]) ->
+    [{match_fun | fqdn_fun | fail_callback, fun()}].
+customized(Options) ->
+    case proplists:get_value(customize_hostname_check, Options, []) of
+        Checks when is_list(Checks) -> checks(Checks);
+        _Other -> []
+    end.
+
+-spec checks([term()]) -> [{match_fun | fqdn_fun | fail_callback, fun()}].
+checks([{match_fun, Fun} | Rest]) when is_function(Fun) -> [{match_fun, Fun} | checks(Rest)];
+checks([{fqdn_fun, Fun} | Rest]) when is_function(Fun) -> [{fqdn_fun, Fun} | checks(Rest)];
+checks([{fail_callback, Fun} | Rest]) when is_function(Fun) ->
+    [{fail_callback, Fun} | checks(Rest)];
+checks([_Other | Rest]) ->
+    checks(Rest);
+checks([]) ->
+    [].
 
 -spec reference(string()) -> {ip, inet:ip_address()} | {dns_id, string()}.
 reference(Name) ->
