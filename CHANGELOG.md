@@ -73,6 +73,8 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - `ssl_options` without `ssl => true` are `{invalid_option, ssl_options}`.
   They used to be ignored and the connection opened in the clear. Add
   `ssl => true`, or take them out.
+- `minato_conn:connect/1` checks its options before it reads the password, so
+  an option that is wrong is reported ahead of a password that is not text.
 - `{server_name_indication, disable}` in `ssl_options` no longer turns the
   hostname check off with it. `{verify, verify_none}` is how to say that. The
   certificate is checked for `host` once the handshake is over, and one that

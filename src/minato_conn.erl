@@ -399,7 +399,10 @@ connect(#{user := _} = Opts) ->
             user => maps:get(user, Opts),
             ssl => maps:get(ssl, Opts, false)
         },
-        fun() -> connected(opening(minato_secret:connection(Opts))) end
+        fun() ->
+            ok = known(validate(Opts)),
+            connected(opening(minato_secret:connection(Opts)))
+        end
     ).
 
 %% For the pool and the listener, which retry what fails here: a raise comes
@@ -429,7 +432,6 @@ connected({error, Reason}) ->
 
 -spec opening(opts()) -> {ok, conn()} | {error, error()}.
 opening(Opts) ->
-    ok = known(validate(Opts)),
     ok = terminator_free(startup_parameters(maps:get(user, Opts), Opts)),
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),

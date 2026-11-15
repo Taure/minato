@@ -128,6 +128,12 @@ tls_options_without_tls_are_refused_test_() ->
             )
         ].
 
+a_value_that_cannot_be_read_does_not_hide_an_option_that_is_wrong_test() ->
+    ?assertError(
+        {minato_conn, #{message := options, reason := {invalid_option, channel_binding}}},
+        minato_conn:connect(asking(5432, #{channel_binding => required, password => [nope]}))
+    ).
+
 %% A list that does not end in one, which a list's type cannot say.
 -spec ending_in(term(), dynamic()) -> dynamic().
 ending_in(Head, Tail) ->
