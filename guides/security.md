@@ -48,8 +48,9 @@ written down where a reviewer can see it.
 `{server_name_indication, disable}` keeps the server's name out of the
 handshake, where it travels in the clear, and that is all it does here. `m:ssl`
 on its own also stops checking the certificate for the name when it is given
-that option; minato puts the check back, against `host`, so the option cannot
-be used to turn hostname verification off by accident. The ways to turn it off
+that option; minato puts the check back, against `host`, once the handshake is
+over and before the startup message is sent, so the option cannot be used to
+turn hostname verification off by accident. The ways to turn it off
 are the ones that say so: `{verify, verify_none}`, a `verify_fun` of your own,
 or a `customize_hostname_check` whose `match_fun` accepts what you mean it to.
 

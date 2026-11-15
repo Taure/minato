@@ -50,6 +50,8 @@ How the server behaves beyond the script.
 
 `tls` answers `SSLRequest` with `S` and completes a handshake with a certificate
 made for the server, which `client_tls/1` hands the client the trust for.
+`tls => chained` puts an intermediate between that certificate and its root,
+signed with SHA-384 where everything else is signed with SHA-256.
 `after_terminate` is what happens once `Terminate` or `CancelRequest` is read:
 `close` is what PostgreSQL does, `hold` keeps the session open and silent
 until the client closes it, and `chatter` keeps writing to it, so a client waiting for the close
@@ -59,7 +61,7 @@ reading, with a small receive buffer, so that a client which goes on writing
 fills it.
 """.
 -type opts() :: #{
-    tls => boolean(),
+    tls => boolean() | chained,
     after_terminate => close | hold | chatter,
     after_script => read | stall
 }.
@@ -70,7 +72,7 @@ fills it.
 -export_type([answer/0, opts/0, server/0]).
 
 -type identity() :: #{
-    cert := public_key:der_encoded(), key := {'ECPrivateKey', public_key:der_encoded()}
+    cert := [public_key:der_encoded()], key := {'ECPrivateKey', public_key:der_encoded()}
 }.
 
 -type peer() :: #{
@@ -158,17 +160,23 @@ stop(#{pid := Pid}) ->
     exit(Pid, shutdown),
     ok.
 
--spec credentials(boolean()) ->
+-spec credentials(boolean() | chained) ->
     {identity() | undefined, [ssl:tls_client_option()]}.
 credentials(false) ->
     {undefined, []};
 credentials(true) ->
+    credentials([]);
+credentials(chained) ->
+    credentials([[{key, {namedCurve, ?secp256r1}}, {digest, sha384}]]);
+credentials(Intermediates) when is_list(Intermediates) ->
     Key = [{key, {namedCurve, ?secp256r1}}, {digest, sha256}],
     Named = #'Extension'{
         extnID = ?'id-ce-subjectAltName', critical = false, extnValue = [{dNSName, "localhost"}]
     },
     #{server_config := Server, client_config := Client} = public_key:pkix_test_data(#{
-        server_chain => #{root => Key, intermediates => [], peer => [{extensions, [Named]} | Key]},
+        server_chain => #{
+            root => Key, intermediates => Intermediates, peer => [{extensions, [Named]} | Key]
+        },
         client_chain => #{root => Key, intermediates => [], peer => Key}
     }),
     {identity(Server), [{cacerts, trusted(Client)}, {server_name_indication, "localhost"}]}.
@@ -180,11 +188,17 @@ trusted([]) -> [].
 
 -spec identity([public_key:conf_opt()]) -> identity().
 identity(Server) ->
-    #{cert => certificate(Server), key => private_key(Server)}.
+    #{cert => [certificate(Server) | between(Server)], key => private_key(Server)}.
 
 -spec certificate([public_key:conf_opt()]) -> public_key:der_encoded().
 certificate([{cert, Der} | _Rest]) -> Der;
 certificate([_Other | Rest]) -> certificate(Rest).
+
+%% The intermediates come back in `cacerts`, which is what a server sends
+%% after its own certificate.
+-spec between([public_key:conf_opt()]) -> [public_key:der_encoded()].
+between(Server) ->
+    [Der || Der <- trusted(Server), not public_key:pkix_is_self_signed(Der)].
 
 %% `public_key:conf_opt()` says the key comes back decoded. It comes back DER
 %% encoded with its type, which is what `m:ssl` takes.

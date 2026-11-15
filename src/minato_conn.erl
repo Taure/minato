@@ -50,8 +50,10 @@ possible and has to be written down.
 
 `{server_name_indication, disable}` is not a way to write it down. It keeps the
 name out of the handshake, and the certificate is still checked for `host`,
-which `m:ssl` alone would stop doing. `{verify, verify_none}`, a `verify_fun`
-or a `customize_hostname_check` is what changes the check.
+which `m:ssl` alone would stop doing. The check is made when the handshake is
+over and before anything is sent in the session, and one that fails is
+`{error, {tls, {bad_cert, hostname_check_failed}}}`. `{verify, verify_none}`, a
+`verify_fun` or a `customize_hostname_check` is what changes the check.
 
 Under TLS the SCRAM exchange is bound to the session by default:
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, which puts the hash of the
@@ -131,7 +133,7 @@ the server issued is the whole of the authorisation.
     origin/1,
     pooled/2
 ]).
--export([verified/3, validate/1, in_the_clear/1]).
+-export([validate/1, in_the_clear/1]).
 
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
@@ -1433,8 +1435,9 @@ negotiate({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     opts()
 ) -> {ok, ssl:sslsocket()} | {error, error()}.
 answered({ok, accepted, _Rest}, {Transport, Socket} = Plain, Host, Deadline, Opts) ->
-    case upgraded(Plain, tls_options(Host, Opts), left(Deadline)) of
-        {ok, Upgraded} -> {ok, Upgraded};
+    Options = tls_options(Host, Opts),
+    case upgraded(Plain, Options, left(Deadline)) of
+        {ok, Upgraded} -> named(Upgraded, Plain, server_name(Host), Options);
         {error, Reason} -> closing(Transport, Socket, {tls, Reason})
     end;
 answered({ok, _Refused, _Rest}, {Transport, Socket}, _Host, _Deadline, _Opts) ->
@@ -1797,25 +1800,40 @@ key(Option) ->
 -spec tls_options(inet:socket_address() | inet:hostname(), opts()) -> [ssl:tls_client_option()].
 tls_options(Host, Opts) ->
     Given = minato_secret:revealed(maps:get(ssl_options, Opts, [])),
-    Options = Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)],
-    hostname_checked(server_name(Host), Options).
+    Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
 
 %% `{server_name_indication, disable}` asks for the name to stay out of the
 %% handshake, and `m:ssl` takes it to mean the certificate need not carry the
 %% name either. Those are two decisions, and only the first was made, so the
-%% check `m:ssl` drops is put back as a `verify_fun`. A caller who gave a
-%% `verify_fun` or turned verification off has made the second one.
--spec hostname_checked(string(), [ssl:tls_client_option()]) -> [ssl:tls_client_option()].
-hostname_checked(Name, Options) ->
-    Unnamed = proplists:get_value(server_name_indication, Options) =:= disable,
-    Verifying = proplists:get_value(verify, Options) =:= verify_peer,
-    Own = proplists:is_defined(verify_fun, Options),
-    case Unnamed andalso Verifying andalso not Own of
+%% name is looked for here, once the handshake is over and before anything is
+%% said in the session. Not in a `verify_fun`: `m:ssl` asks one of those in
+%% place of checks of its own. A caller who gave a `verify_fun` or turned
+%% verification off has made the second decision.
+-spec named(ssl:sslsocket(), plain_socket(), string(), [ssl:tls_client_option()]) ->
+    {ok, ssl:sslsocket()} | {error, error()}.
+named(Upgraded, {Transport, Socket}, Name, Options) ->
+    case unnamed(Options) andalso not carries(Upgraded, Name, Options) of
         true ->
-            Customize = proplists:get_value(customize_hostname_check, Options, []),
-            [{verify_fun, {fun ?MODULE:verified/3, {reference(Name), Customize}}} | Options];
+            _ = ssl:close(Upgraded),
+            closing(Transport, Socket, {tls, {bad_cert, hostname_check_failed}});
         false ->
-            Options
+            {ok, Upgraded}
+    end.
+
+-spec unnamed([ssl:tls_client_option()]) -> boolean().
+unnamed(Options) ->
+    proplists:get_value(server_name_indication, Options) =:= disable andalso
+        proplists:get_value(verify, Options) =:= verify_peer andalso
+        not proplists:is_defined(verify_fun, Options).
+
+-spec carries(ssl:sslsocket(), string(), [ssl:tls_client_option()]) -> boolean().
+carries(Upgraded, Name, Options) ->
+    Customize = proplists:get_value(customize_hostname_check, Options, []),
+    case ssl:peercert(Upgraded) of
+        {ok, Certificate} ->
+            public_key:pkix_verify_hostname(Certificate, [reference(Name)], Customize);
+        {error, _Reason} ->
+            false
     end.
 
 -spec reference(string()) -> {ip, inet:ip_address()} | {dns_id, string()}.
@@ -1823,23 +1841,6 @@ reference(Name) ->
     case inet:parse_strict_address(Name) of
         {ok, Address} -> {ip, Address};
         {error, _Reason} -> {dns_id, Name}
-    end.
-
--doc false.
-%% Called by `m:ssl` with the state it was given, which is why the state is
-%% untyped here.
--spec verified(dynamic(), dynamic(), dynamic()) ->
-    {valid, dynamic()} | {unknown, dynamic()} | {fail, term()}.
-verified(_Certificate, {bad_cert, _Why} = Reason, _State) ->
-    {fail, Reason};
-verified(_Certificate, {extension, _Extension}, State) ->
-    {unknown, State};
-verified(_Certificate, valid, State) ->
-    {valid, State};
-verified(Certificate, valid_peer, {Reference, Customize} = State) ->
-    case public_key:pkix_verify_hostname(Certificate, [Reference], Customize) of
-        true -> {valid, State};
-        false -> {fail, {bad_cert, hostname_check_failed}}
     end.
 
 %% A default is replaced by the option that answers the same question, not

@@ -399,16 +399,52 @@ the_hostname_is_checked_with_no_server_name_sent_test_() ->
 any_hostname(_Reference, _Presented) ->
     true.
 
-a_hostname_check_refuses_what_validation_refused_test_() ->
-    State = {{dns_id, "localhost"}, []},
+a_name_the_certificate_does_not_carry_is_refused_before_anything_is_sent_test() ->
+    Server = tls_server([?READY]),
+    Trusted = proplists:lookup_all(cacerts, minato_backend_server:client_tls(Server)),
+    Opts = opts(minato_backend_server:port(Server), #{
+        socket_options => [inet],
+        ssl => true,
+        ssl_options => Trusted ++ [{server_name_indication, disable}]
+    }),
+    ?assertEqual({error, {tls, {bad_cert, hostname_check_failed}}}, minato_conn:connect(Opts)),
+    Read = minato_backend_server:received(Server, 100),
+    minato_backend_server:stop(Server),
+    ?assertEqual([], [Startup || {startup, _Parameters} = Startup <- Read]).
+
+%% The chain is the server's to choose and `m:ssl` checks every certificate in
+%% it against what the session allows. Leaving the name out of the handshake
+%% must not leave that out for the ones between the root and the server's own.
+the_whole_chain_is_checked_with_no_server_name_sent_test_() ->
+    Narrow = {signature_algs_cert, [ecdsa_secp256r1_sha256]},
+    Unnamed = {server_name_indication, disable},
     [
-        ?_assertEqual(
-            {fail, {bad_cert, cert_expired}},
-            minato_conn:verified(undefined, {bad_cert, cert_expired}, State)
-        ),
-        ?_assertEqual({unknown, State}, minato_conn:verified(undefined, {extension, any}, State)),
-        ?_assertEqual({valid, State}, minato_conn:verified(undefined, valid, State))
+        {Label, fun() ->
+            {ok, _Started} = application:ensure_all_started(ssl),
+            Server = minato_backend_server:start([?READY], #{tls => chained}),
+            Trusted = proplists:lookup_all(cacerts, minato_backend_server:client_tls(Server)),
+            Opts = opts(minato_backend_server:port(Server), #{
+                host => "localhost",
+                socket_options => [inet],
+                ssl => true,
+                ssl_options => Trusted ++ Given
+            }),
+            Result = minato_conn:connect(Opts),
+            _ = [minato_conn:close(Conn) || {ok, Conn} <- [Result]],
+            minato_backend_server:stop(Server),
+            ?assertEqual(Expected, handshake(Result), Result)
+        end}
+     || {Label, Given, Expected} <- [
+            {"a chain the session allows", [], completed},
+            {"a chain the session allows, unnamed", [Unnamed], completed},
+            {"an intermediate it does not", [Narrow], refused},
+            {"an intermediate it does not, unnamed", [Narrow, Unnamed], refused}
+        ]
     ].
+
+handshake({ok, _Conn}) -> completed;
+handshake({error, {tls, _Reason}}) -> refused;
+handshake({error, Reason}) -> Reason.
 
 %%----------------------------------------------------------------------
 %% Channel binding that was required
