@@ -6,7 +6,7 @@ server that answers the question with whatever each case needs.
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([log/2]).
+-export([log/2, asked/4]).
 
 -define(POOL, minato_pool_limit_tests).
 
@@ -85,7 +85,7 @@ a_pool_still_answers_while_its_question_goes_unanswered_test_() ->
     {timeout, 30, fun() ->
         ok = ready(),
         Server = minato_backend_server:start([?READY]),
-        Connection = opts(minato_backend_server:port(Server), #{timeout => 5000}),
+        Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
         {ok, _Pool} = minato:start_pool(?POOL, #{
             size => 1, min_size => 1, connection => Connection
         }),
@@ -167,7 +167,7 @@ a_connection_opened_after_the_answer_is_not_asked_again_test_() ->
         try
             ok = pooled(Server, #{size => 1, min_size => 1}),
             ?assertEqual(
-                {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 5000)
+                {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 1000)
             ),
             Read = read(Server, fun(Seen) -> resets(Seen) >= 2 end),
             ?assert(resets(Read) >= 2),
@@ -177,6 +177,56 @@ a_connection_opened_after_the_answer_is_not_asked_again_test_() ->
             minato_backend_server:stop(Server)
         end
     end}.
+
+%% An answer that names no limit is still the server's answer, and the next
+%% connection would only be given it again.
+an_answer_with_no_limit_in_it_is_not_asked_for_again_test_() ->
+    Refusal = [
+        {error_response, #{severity => ~"ERROR", code => ~"42501", message => ~"denied"}},
+        {ready_for_query, idle}
+    ],
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                Server = minato_backend_server:start([?READY, Answer, ?NOT_THE_RESET]),
+                try
+                    ok = pooled(Server, #{size => 1, min_size => 1}),
+                    ?assertEqual(
+                        {error, {session_reset, unread_answer}},
+                        minato_pool:checkout(?POOL, 1000)
+                    ),
+                    Read = read(Server, fun(Seen) -> resets(Seen) >= 2 end),
+                    ?assert(resets(Read) >= 2),
+                    ?assertEqual(1, limits(Read))
+                after
+                    _ = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Answer} <- [{"not a number", shown(~"plenty")}, {"a refusal", Refusal}]
+    ].
+
+%% The question is a statement like any other, and its event says whose it is.
+the_question_is_an_event_that_names_the_pool_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start([?READY, shown(~"100")]),
+        Handler = {?MODULE, asked},
+        ok = telemetry:attach(Handler, [minato, query, stop], fun ?MODULE:asked/4, self()),
+        try
+            ok = pooled(Server, #{size => 1, min_size => 1}),
+            receive
+                {asked, Metadata} -> ?assertMatch(#{pool := ?POOL}, Metadata)
+            after 1000 -> error(never_asked)
+            end
+        after
+            telemetry:detach(Handler),
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+asked(_Event, _Measurements, Metadata, Test) ->
+    Test ! {asked, Metadata}.
 
 a_question_that_is_never_answered_costs_the_connection_test_() ->
     {timeout, 30, fun() ->
@@ -322,7 +372,7 @@ pooled(Server, Sizes, Opts) ->
 
 opts(Port, Opts) ->
     maps:merge(
-        #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000},
+        #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 1000},
         Opts
     ).
 

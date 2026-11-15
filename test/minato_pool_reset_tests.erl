@@ -6,6 +6,8 @@ real server can be made to do without a superuser.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([unreadable/1]).
+
 -define(POOL, minato_pool_reset_tests).
 
 -define(READY, [
@@ -40,7 +42,7 @@ a_checkout_gives_up_after_the_pool_and_one_more() ->
     }),
     try
         ?assertEqual(
-            {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 5000)
+            {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 1000)
         ),
         Opened = [Startup || {startup, _} = Startup <- minato_backend_server:received(Server)],
         ?assert(length(Opened) =< 5)
@@ -61,7 +63,7 @@ a_refused_reset_reports_only_its_sqlstate() ->
     try
         ?assertEqual(
             {error, {session_reset, {pgsql_error, #{code => ~"42501"}}}},
-            minato_pool:checkout(?POOL, 5000)
+            minato_pool:checkout(?POOL, 1000)
         )
     after
         ok = minato:stop_pool(?POOL),
@@ -92,8 +94,8 @@ a_connection_with_no_transaction_is_reset_without_a_rollback() ->
 a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slot_test_() ->
     {timeout, 30, fun() ->
         ok = ready(),
-        NotOne = {raw, <<$Z, 5:32, $X>>},
-        Server = minato_backend_server:start([?READY, ?SHOWN, NotOne]),
+        Unreadable = lists:duplicate(4, {reply, {?MODULE, unreadable}}),
+        Server = minato_backend_server:start([?READY | Unreadable]),
         {ok, _Pid} = minato:start_pool(?POOL, #{
             size => 1, min_size => 1, connection => connection(Server)
         }),
@@ -108,6 +110,11 @@ a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slo
             minato_backend_server:stop(Server)
         end
     end}.
+
+%% The question is asked of the first connection only, so what a connection is
+%% sent is told apart by what it is, not by where it comes.
+unreadable({query, ~"SHOW max_connections"}) -> ?SHOWN;
+unreadable({query, _Reset}) -> {raw, <<$Z, 5:32, $X>>}.
 
 %% A run that was cut short leaves what it started under the supervisor, and
 %% the next run would find the name taken.

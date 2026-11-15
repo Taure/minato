@@ -290,7 +290,7 @@ separate because one of them is a problem and the other is the pool working.
 
 -type info() ::
     {connected, minato_conn:conn()}
-    | {server_limit, non_neg_integer()}
+    | {server_limit, non_neg_integer() | unknown}
     | {connect_failed, term()}
     | retry
     | sweep
@@ -742,13 +742,14 @@ answered_gave_up({From, _Pid, Monitor, _Deadline}) ->
     gen_server:reply(From, {error, checkout_timeout}).
 
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
-handle_info({connected, Opened}, #state{connecting = Connecting} = State) ->
+handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
     ok = minato_telemetry:event([minato, connection, opened], #{pool => State#state.name}),
-    Conn = minato_conn:pooled(Opened, State#state.name),
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },
     {noreply, grown(hand_out(Ready, Conn))};
+handle_info({server_limit, unknown}, State) ->
+    {noreply, State#state{measured = true}};
 handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) ->
     ok = crowded(Name, Size, Limit),
     {noreply, State#state{measured = true}};
@@ -1110,22 +1111,24 @@ connects(State, Count) ->
 -spec connect(#state{}) -> #state{}.
 connect(#state{opts = Opts, connectors = Connectors, connecting = Connecting} = State) ->
     Pool = self(),
+    Name = State#state.name,
     Measured = State#state.measured,
-    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts, Measured) end),
+    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Name, Opts, Measured) end),
     State#state{connectors = Connectors#{Ref => Pid}, connecting = Connecting + 1}.
 
--spec connected(pid(), minato_conn:opts(), boolean()) -> ok.
-connected(Pool, Opts, Measured) ->
+-spec connected(pid(), name(), minato_conn:opts(), boolean()) -> ok.
+connected(Pool, Name, Opts, Measured) ->
     case minato_conn:attempt(Opts) of
-        {ok, Conn} when Measured -> handed(Pool, Conn);
-        {ok, Conn} -> asked_its_limit(Pool, Conn);
+        {ok, Conn} when Measured -> handed(Pool, minato_conn:pooled(Conn, Name));
+        {ok, Conn} -> asked_its_limit(Pool, minato_conn:pooled(Conn, Name));
         {error, Reason} -> refused(Pool, Reason)
     end.
 
 %% The connector asks, not the pool: the answer is the server's to delay or to
 %% get wrong, and the pool is the one process every caller is waiting on. A
 %% server that refuses the question still has a connection worth keeping, and
-%% one that answers out of protocol does not.
+%% one that answers out of protocol does not. An answer with no limit in it is
+%% an answer all the same, and the pool is told so that nobody asks again.
 -spec asked_its_limit(pid(), minato_conn:conn()) -> ok.
 asked_its_limit(Pool, Conn) ->
     try minato_query:simple(Conn, ~"SHOW max_connections") of
@@ -1133,6 +1136,7 @@ asked_its_limit(Pool, Conn) ->
             ok = told(Pool, limit(Results)),
             handed(Pool, Read);
         {error, _Refused, Read} ->
+            ok = told(Pool, unknown),
             handed(Pool, Read);
         {error, Reason} ->
             ok = minato_conn:close(Conn),
@@ -1144,8 +1148,6 @@ asked_its_limit(Pool, Conn) ->
     end.
 
 -spec told(pid(), non_neg_integer() | unknown) -> ok.
-told(_Pool, unknown) ->
-    ok;
 told(Pool, Limit) ->
     Pool ! {server_limit, Limit},
     ok.
