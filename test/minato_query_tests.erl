@@ -322,7 +322,8 @@ a_server_that_says_ready_and_nothing_else_has_run_nothing_test() ->
 what_the_server_says_unasked_before_the_bind_is_answered_is_passed_over_test_() ->
     [
         {atom_to_list(element(1, Unasked)), fun() ->
-            Script = kept() ++ [[Unasked, bind_complete] | tl(ran([<<9:32>>]))],
+            Answered = [{data_row, [<<9:32>>]}, {command_complete, ~"SELECT 1"}],
+            Script = kept() ++ [[Unasked, bind_complete], Answered, ?IDLE],
             {_Server, Conn} = connected(Script),
             {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
             ?assertMatch({ok, #{rows := [{9}]}, _Read}, minato_query:cached(Kept, ?SQL, [7]))
