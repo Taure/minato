@@ -11,8 +11,10 @@ something has already gone wrong.
 -include_lib("eunit/include/eunit.hrl").
 
 -export([served/1, published/1, published_at_length/1, refusing/1, garbled/1, deaf/1]).
+-export([interrupting/1, turning/1]).
 
 -define(LISTENER, minato_listener_tests_listener).
+-define(TURNED, {?MODULE, turned}).
 
 -define(READY, [
     authentication_ok,
@@ -187,6 +189,51 @@ a_connection_that_drops_is_listened_on_again_and_announced_test_() ->
         )
     end).
 
+%% Nothing was asked, so there is no caller to tell: the listener has to take
+%% it as a connection that dropped and still be there afterwards.
+bytes_nobody_asked_for_that_are_not_a_message_lose_the_connection_test_() ->
+    listening({?MODULE, interrupting}, fun(_Server) ->
+        Listener = whereis(?LISTENER),
+        ok = minato_listener:listen(?LISTENER, ~"jobs"),
+        ?assertEqual([resubscribed], announcements(1)),
+        ?assertEqual(Listener, whereis(?LISTENER)),
+        ?assertEqual(#{~"jobs" => 1}, minato_listener:channels(?LISTENER))
+    end).
+
+%% Told to connect when it already has, the listener keeps the connection it
+%% has, and still goes for another when that one is lost.
+a_listener_told_to_reconnect_while_connected_opens_nothing_test_() ->
+    listening({?MODULE, garbled}, fun(Server) ->
+        ok = minato_listener:listen(?LISTENER, ~"jobs"),
+        whereis(?LISTENER) ! reconnect,
+        ?assertEqual(#{~"jobs" => 1}, minato_listener:channels(?LISTENER)),
+        ?assertEqual(1, startups(minato_backend_server:received(Server, 100))),
+        ?assertMatch({error, _Reason}, minato_listener:listen(?LISTENER, ~"garbled")),
+        ?assertEqual([resubscribed], announcements(1)),
+        ?assertEqual(1, startups(minato_backend_server:received(Server, 100)))
+    end).
+
+%% A connection lost while its channels are being listened to again is lost
+%% once, however many places notice, so one wait is started for it and each
+%% wait is the first: none of them is the doubled one a second would be.
+a_connection_lost_while_resubscribing_is_waited_for_once_test_() ->
+    listening({?MODULE, turning}, fun(_Server) ->
+        Listener = whereis(?LISTENER),
+        ok = minato_listener:listen(?LISTENER, ~"jobs"),
+        ok = watched(Listener),
+        try
+            persistent_term:put(?TURNED, true),
+            ?assertMatch({error, _Reason}, minato_listener:listen(?LISTENER, ~"mail")),
+            Waits = waited(Listener, 4),
+            ?assert(lists:all(fun(Wait) -> Wait >= 50 andalso Wait =< 100 end, Waits), Waits)
+        after
+            _ = persistent_term:erase(?TURNED),
+            unwatched(Listener)
+        end,
+        ?assertEqual([resubscribed], announcements(1)),
+        ?assertEqual(#{~"jobs" => 1}, minato_listener:channels(?LISTENER))
+    end).
+
 a_listen_that_gets_no_answer_loses_the_connection_test_() ->
     listening({?MODULE, deaf}, #{timeout => 200}, fun(Server) ->
         ?assertMatch({error, _Reason}, minato_listener:listen(?LISTENER, ~"jobs")),
@@ -204,7 +251,7 @@ an_invalid_connection_stops_the_listener_without_its_options_test_() ->
                 ),
                 receive
                     {'EXIT', _Pid, Reason} -> ?assertEqual(invalid_connection, Reason)
-                after 1000 -> ok
+                after 0 -> ok
                 end
             after
                 process_flag(trap_exit, Trapping)
@@ -215,6 +262,43 @@ an_invalid_connection_stops_the_listener_without_its_options_test_() ->
 
 invalid() ->
     [#{}, #{connection => #{host => "127.0.0.1"}}, #{connection => []}].
+
+a_connection_with_an_option_that_is_refused_stops_the_listener_test() ->
+    Trapping = process_flag(trap_exit, true),
+    try
+        Opts = #{connection => #{user => ~"minato", channel_binding => sometimes}},
+        ?assertEqual(
+            {error, {invalid_option, channel_binding}}, minato_listener:start_link(?LISTENER, Opts)
+        ),
+        receive
+            {'EXIT', _Pid, Reason} -> ?assertEqual({invalid_option, channel_binding}, Reason)
+        after 0 -> ok
+        end
+    after
+        process_flag(trap_exit, Trapping)
+    end.
+
+%% A supervisor stops a child with an exit signal, and the listener has a
+%% connection to close when it gets one.
+a_listener_shut_down_by_its_parent_says_so_to_the_server_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start(script({?MODULE, served})),
+        Trapping = process_flag(trap_exit, true),
+        try
+            {ok, Pid} = minato_listener:start_link(?LISTENER, #{
+                connection => connection(minato_backend_server:port(Server))
+            }),
+            exit(Pid, shutdown),
+            receive
+                {'EXIT', Pid, shutdown} -> ok
+            after 1000 -> error(never_stopped)
+            end,
+            ?assert(lists:member(terminate, minato_backend_server:received(Server)))
+        after
+            process_flag(trap_exit, Trapping),
+            minato_backend_server:stop(Server)
+        end
+    end}.
 
 the_password_is_not_in_the_status_test_() ->
     listening({?MODULE, served}, fun(_Server) ->
@@ -256,6 +340,23 @@ refusing(_Message) ->
 garbled({query, ~"LISTEN \"garbled\""}) -> {raw, <<"?", 0, 0, 0, 1>>};
 garbled(Message) -> served(Message).
 
+%% A server that says something that is not a message, a moment after `jobs`
+%% is listened to.
+interrupting({query, ~"LISTEN \"jobs\""} = Listen) ->
+    {then, served(Listen), 50, {raw, <<"?", 0, 0, 0, 1>>}};
+interrupting(Message) ->
+    served(Message).
+
+%% A server that answers every `LISTEN` with something that is not a message
+%% for as long as it is told to.
+turning({query, <<"LISTEN ", _/binary>>} = Listen) ->
+    case persistent_term:get(?TURNED, false) of
+        true -> {raw, <<"?", 0, 0, 0, 1>>};
+        false -> served(Listen)
+    end;
+turning(Message) ->
+    served(Message).
+
 deaf(_Message) -> [].
 
 %%----------------------------------------------------------------------
@@ -292,6 +393,9 @@ connection(Port) ->
 
 %% The listener answers its caller once the server has answered it, and what
 %% it sends on its own is waited for before this is asked.
+startups(Read) ->
+    length([Startup || {startup, _Parameters} = Startup <- Read]).
+
 statements(Server) ->
     [Sql || {query, Sql} <- minato_backend_server:received(Server, 20)].
 
@@ -305,7 +409,7 @@ subscriber(Channel) ->
     end),
     receive
         {subscribed, Pid} -> Pid
-    after 5000 -> error(not_subscribed)
+    after 1000 -> error(not_subscribed)
     end.
 
 subscribed(Owner) ->
@@ -323,7 +427,7 @@ subscribed(Owner) ->
 told(Pid) ->
     receive
         {told, Pid, Notification} -> [Notification]
-    after 2000 -> []
+    after 1000 -> []
     end.
 
 stopped(Pid) ->
@@ -331,14 +435,14 @@ stopped(Pid) ->
     Pid ! stop,
     receive
         {'DOWN', Monitor, process, Pid, _Reason} -> ok
-    after 5000 -> error(not_stopped)
+    after 1000 -> error(not_stopped)
     end.
 
 notifications(Count) ->
     [
         receive
             {minato_notification, Channel, Payload, From} -> {Channel, Payload, From}
-        after 2000 -> missing
+        after 1000 -> missing
         end
      || _Each <- lists:seq(1, Count)
     ].
@@ -346,26 +450,37 @@ notifications(Count) ->
 %% How long the listener waits before each of its next attempts, read off the
 %% timers it starts.
 waits(Pid, Count) ->
+    ok = watched(Pid),
+    try
+        waited(Pid, Count)
+    after
+        unwatched(Pid)
+    end.
+
+watched(Pid) ->
     _ = erlang:trace_pattern({erlang, send_after, 3}, true, []),
     _ = erlang:trace(Pid, true, [call]),
-    try
-        [
-            receive
-                {trace, Pid, call, {erlang, send_after, [Wait, Pid, reconnect]}} -> Wait
-            after 1000 -> missing
-            end
-         || _Each <- lists:seq(1, Count)
-        ]
-    after
-        _ = erlang:trace(Pid, false, [call]),
-        _ = erlang:trace_pattern({erlang, send_after, 3}, false, [])
-    end.
+    ok.
+
+waited(Pid, Count) ->
+    [
+        receive
+            {trace, Pid, call, {erlang, send_after, [Wait, Pid, reconnect]}} -> Wait
+        after 1000 -> missing
+        end
+     || _Each <- lists:seq(1, Count)
+    ].
+
+unwatched(Pid) ->
+    _ = erlang:trace(Pid, false, [call]),
+    _ = erlang:trace_pattern({erlang, send_after, 3}, false, []),
+    ok.
 
 announcements(Count) ->
     [
         receive
             {minato_listener, ?LISTENER, What} -> What
-        after 5000 -> missing
+        after 1000 -> missing
         end
      || _Each <- lists:seq(1, Count)
     ].
