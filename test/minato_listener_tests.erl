@@ -141,6 +141,33 @@ a_listener_with_nothing_to_connect_to_says_so_and_goes_on_trying_test_() ->
         end
     end}.
 
+%% Every listener that lost the same server would otherwise ask for it again
+%% at the same instants, each time the wait doubled. The first wait is over
+%% before anybody can watch, so the ones after it are what is looked at.
+a_listener_that_cannot_connect_waits_a_time_of_its_own_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start(script({?MODULE, served})),
+        Port = minato_backend_server:port(Server),
+        minato_backend_server:stop(Server),
+        {ok, Pid} = minato_listener:start_link(?LISTENER, #{
+            connection => (connection(Port))#{connect_timeout => 200}
+        }),
+        try
+            Waits = waits(Pid, 3),
+            Longest = [200, 400, 800],
+            ?assert(
+                lists:all(
+                    fun({Wait, Most}) -> Wait >= Most div 2 andalso Wait =< Most end,
+                    lists:zip(Waits, Longest)
+                ),
+                Waits
+            ),
+            ?assertNotEqual(Longest, Waits)
+        after
+            ok = minato_listener:stop(?LISTENER)
+        end
+    end}.
+
 a_connection_that_drops_is_listened_on_again_and_announced_test_() ->
     listening({?MODULE, garbled}, fun(Server) ->
         ok = minato_listener:listen(?LISTENER, ~"jobs"),
@@ -315,6 +342,24 @@ notifications(Count) ->
         end
      || _Each <- lists:seq(1, Count)
     ].
+
+%% How long the listener waits before each of its next attempts, read off the
+%% timers it starts.
+waits(Pid, Count) ->
+    _ = erlang:trace_pattern({erlang, send_after, 3}, true, []),
+    _ = erlang:trace(Pid, true, [call]),
+    try
+        [
+            receive
+                {trace, Pid, call, {erlang, send_after, [Wait, Pid, reconnect]}} -> Wait
+            after 1000 -> missing
+            end
+         || _Each <- lists:seq(1, Count)
+        ]
+    after
+        _ = erlang:trace(Pid, false, [call]),
+        _ = erlang:trace_pattern({erlang, send_after, 3}, false, [])
+    end.
 
 announcements(Count) ->
     [

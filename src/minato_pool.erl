@@ -24,7 +24,9 @@ what that will replace, and it is honest in the meantime.
 
 Connecting happens in the background and is retried with exponential backoff, so
 a pool started before its database is a pool that fills up when the database
-arrives rather than a supervisor that gives up. `checkout/2` waits for that
+arrives rather than a supervisor that gives up. Each wait is a random time in
+the upper half of what the backoff allows, so the pools of many nodes do not
+return to a restarted database at the same instant. `checkout/2` waits for that
 exactly as it waits for a busy connection.
 
 A borrower that dies takes the socket with it, because the socket belongs to the
@@ -755,7 +757,7 @@ handle_info({server_limit, _Limit}, State) ->
 handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
     State = State0#state{failures = State0#state.failures + 1},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
-    Delay = State#state.backoff,
+    Delay = spread(State#state.backoff),
     ?LOG_WARNING(
         #{
             event => connect_failed,
@@ -766,7 +768,9 @@ handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) 
         #{domain => [minato]}
     ),
     _ = erlang:send_after(Delay, self(), retry),
-    {noreply, State#state{connecting = fewer(Connecting), backoff = longer(Delay)}};
+    {noreply, State#state{
+        connecting = fewer(Connecting), backoff = longer(State#state.backoff)
+    }};
 handle_info(retry, State) ->
     {noreply, replenished(State)};
 handle_info(sweep, State) ->
@@ -1173,6 +1177,12 @@ handed(Pool, Conn) ->
 refused(Pool, Reason) ->
     Pool ! {connect_failed, Reason},
     ok.
+
+%% Somewhere in the upper half of the wait, so that pools which lost one server
+%% together do not all come back to it together.
+-spec spread(pos_integer()) -> pos_integer().
+spread(Longest) ->
+    Longest - rand:uniform(Longest div 2 + 1) + 1.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

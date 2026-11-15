@@ -30,7 +30,8 @@ session where nothing is waiting.
 
 A connection that drops takes its subscriptions with it, and anything the server
 published while it was gone is gone: `NOTIFY` is fire and forget, with no
-replay. This process reconnects with backoff, `LISTEN`s again for every channel
+replay. This process reconnects with backoff, each wait a random time in the
+upper half of what the backoff allows, `LISTEN`s again for every channel
 that still has a subscriber, and then tells each subscriber
 `{minato_listener, Name, resubscribed}`.
 
@@ -433,8 +434,14 @@ disconnected(#state{conn = Conn} = State) ->
 retry(#state{retrying = true} = State) ->
     State;
 retry(#state{backoff = Delay} = State) ->
-    _ = erlang:send_after(Delay, self(), reconnect),
+    _ = erlang:send_after(spread(Delay), self(), reconnect),
     State#state{backoff = longer(Delay), retrying = true}.
+
+%% Somewhere in the upper half of the wait, so that listeners which lost one
+%% server together do not all come back to it together.
+-spec spread(pos_integer()) -> pos_integer().
+spread(Longest) ->
+    Longest - rand:uniform(Longest div 2 + 1) + 1.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

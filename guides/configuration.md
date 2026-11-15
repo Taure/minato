@@ -134,7 +134,9 @@ Each caller waiting gets a connection opened for it, side by side with the
 others, until the pool is at `size`. So the most connects a pool has in flight
 is `size`, which is also the most a restart of the server costs it at once.
 While the last attempt failed there is one attempt at a time, with the backoff
-between them, however many callers are waiting.
+between them, however many callers are waiting. The backoff doubles from 100 ms
+to 30 s, and each wait is a random time in its upper half, so many nodes that
+lost the same server do not all return to it at once.
 
 `max_idle` is the other half of `min_size`. A pool that grew to meet a busy hour
 would otherwise hold that hour's connections until the process died, which is a

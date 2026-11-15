@@ -215,6 +215,43 @@ an_answer_that_is_not_a_message_costs_the_connection_test_() ->
     end}.
 
 %%----------------------------------------------------------------------
+%% Trying again
+%%----------------------------------------------------------------------
+
+%% Every pool that lost the same server would otherwise ask for it again at
+%% the same instants, each time the wait doubled.
+a_pool_that_cannot_connect_waits_a_time_of_its_own_test_() ->
+    {timeout, 30, fun() ->
+        Refused =
+            {error_response, #{
+                severity => ~"FATAL",
+                code => ~"57P03",
+                message => ~"the database system is starting up"
+            }},
+        Server = minato_backend_server:start([[Refused]]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 1, min_size => 1}),
+                read(Server, fun(Seen) -> startups(Seen) >= 4 end)
+            end),
+            Waits = [Wait || #{retry_in_ms := Wait} <- lists:sublist(Failed, 4)],
+            Longest = [100, 200, 400, 800],
+            ?assertEqual(4, length(Waits)),
+            ?assert(
+                lists:all(
+                    fun({Wait, Most}) -> Wait >= Most div 2 andalso Wait =< Most end,
+                    lists:zip(Waits, Longest)
+                ),
+                Waits
+            ),
+            ?assertNotEqual(Longest, Waits)
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%%----------------------------------------------------------------------
 %% A pool that would send everything in the clear
 %%----------------------------------------------------------------------
 
@@ -303,6 +340,9 @@ read(Server, Enough, Tries, Before) ->
 
 limits(Read) ->
     length([Sql || {query, ~"SHOW max_connections" = Sql} <- Read]).
+
+startups(Read) ->
+    length([Startup || {startup, _Parameters} = Startup <- Read]).
 
 resets(Read) ->
     length([Sql || {query, <<"CLOSE ALL; ", _/binary>> = Sql} <- Read]).
