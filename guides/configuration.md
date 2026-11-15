@@ -97,6 +97,12 @@ it can connect and complain at start up rather than at the first query. The rest
 open when a caller finds none free. Set it to `size` for a pool that must be
 warm on the first request, and to `0` for one that may never be used at all.
 
+Each caller waiting gets a connection opened for it, side by side with the
+others, until the pool is at `size`. So the most connects a pool has in flight
+is `size`, which is also the most a restart of the server costs it at once.
+While the last attempt failed there is one attempt at a time, with the backoff
+between them, however many callers are waiting.
+
 `max_idle` is the other half of `min_size`. A pool that grew to meet a busy hour
 would otherwise hold that hour's connections until the process died, which is a
 cost the server pays and nobody sees. The floor is never swept below, because

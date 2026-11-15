@@ -182,6 +182,11 @@ with twenty pools does not want a hundred connections the moment it boots, while
 a pool that cannot connect at all still says so at start up rather than at the
 first query. `0` opens nothing until asked.
 
+Every caller waiting has a connection on its way while the pool is below
+`size`: one is opened for each, side by side, and never more than `size` allows.
+While the last attempt to connect failed there is one attempt at a time however
+many are waiting, so a server that is down is not asked `size` times over.
+
 A `size` that is not a positive integer, or a `min_size` that is not a
 non-negative integer, stops the pool before it connects, and `start_link/2`
 returns `{error, {invalid_size, Size}}` or `{error, {invalid_min_size, MinSize}}`.
@@ -711,7 +716,7 @@ handle_info({connected, Opened}, #state{connecting = Connecting} = State) ->
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },
-    {noreply, hand_out(Ready, Conn)};
+    {noreply, grown(hand_out(Ready, Conn))};
 handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) ->
     ok = crowded(Name, Size, Limit),
     {noreply, State#state{measured = true}};
@@ -837,14 +842,21 @@ unreachable(#state{disconnected = wait}) ->
 unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
     Failures > 0 andalso Idle =:= [] andalso holders(Borrowed) =:= 0.
 
+%% Everybody waiting has a connection on its way, as far as the size allows: a
+%% caller that arrives behind a connect already in flight is not served by it,
+%% because whoever arrived first is. A server that refused the last connect is
+%% asked one at a time until it stops refusing, however many are waiting.
 -spec grown(#state{}) -> #state{}.
-grown(#state{size = Size, connecting = Connecting} = State) ->
-    case held(State) < Size andalso Connecting =:= 0 of
-        true ->
-            connect(State);
-        false ->
-            State
+grown(#state{size = Size, connecting = Connecting, waiting = Waiting} = State) ->
+    Room = Size - held(State),
+    case wanted(queue:len(Waiting), State#state.failures) - Connecting of
+        Missing when Missing > 0, Room > 0 -> connects(State, min(Missing, Room));
+        _Covered -> State
     end.
+
+-spec wanted(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+wanted(Waiting, 0) -> Waiting;
+wanted(Waiting, _Failures) -> min(Waiting, 1).
 
 -spec held(#state{}) -> non_neg_integer().
 held(#state{idle = Idle, borrowed = Borrowed, connecting = Connecting}) ->
@@ -1042,11 +1054,7 @@ expired(Deadline) -> erlang:monotonic_time(millisecond) >= Deadline.
 %% connection nobody is going to open.
 -spec replenished(#state{}) -> #state{}.
 replenished(State) ->
-    Filled = fill(State),
-    case queue:is_empty(Filled#state.waiting) of
-        true -> Filled;
-        false -> grown(Filled)
-    end.
+    grown(fill(State)).
 
 -doc false.
 -spec fill(#state{}) -> #state{}.
