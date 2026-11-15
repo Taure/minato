@@ -115,8 +115,11 @@ joined([{Pid, Ref} | Rest], Total) ->
     after 120000 -> error({minato_saturation, {worker_timeout, Pid}})
     end.
 
-warmed(_Run, 0) -> ok;
-warmed(Run, N) -> ok = Run(), warmed(Run, N - 1).
+warmed(_Run, 0) ->
+    ok;
+warmed(Run, N) ->
+    ok = Run(),
+    warmed(Run, N - 1).
 
 %% The warm up runs in this process, which for epgsql would take a connection
 %% one of the workers needs.

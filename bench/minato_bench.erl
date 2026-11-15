@@ -68,6 +68,7 @@ clients on the same run, and a difference under about ten percent is noise.
 
 -define(DEFAULT_ITERATIONS, 2000).
 -define(DEFAULT_WARMUP, 200).
+-define(FIRST_USE_BATCH, 500).
 -define(POOL_SIZE, 8).
 -define(WORKERS, 8).
 
@@ -220,16 +221,25 @@ stateful(Fun) ->
         end
     end.
 
-%% A connection of its own, with room to keep every statement of the run, so
+%% A connection of its own, with room to keep every statement it is given, so
 %% that each call is the first use of a statement and never the unnamed path.
+%% It is replaced every 500 statements: kept for the whole run, the server and
+%% the client would both hold more with every call, and a later sample would
+%% cost more than an earlier one for that alone.
 first_use() ->
     case get({?MODULE, first_use}) of
         undefined ->
-            {ok, Conn} = minato_conn:connect((connection())#{prepared_statements => 1000000}),
-            {0, Conn};
+            {0, first_use_connection()};
+        {Turn, Conn} when Turn rem ?FIRST_USE_BATCH =:= 0 ->
+            ok = minato_conn:close(Conn),
+            {Turn, first_use_connection()};
         Held ->
             Held
     end.
+
+first_use_connection() ->
+    {ok, Conn} = minato_conn:connect((connection())#{prepared_statements => ?FIRST_USE_BATCH}),
+    Conn.
 
 held() ->
     get({?MODULE, conn}).
@@ -322,10 +332,11 @@ parsed(epgsql, #{conn := Conn} = Setup) ->
         {wide_row, "bench_wide", binary_to_list(wide_sql())},
         {insert, "bench_insert", binary_to_list(insert_sql())}
     ],
-    Statements = #{
-        Key => element(2, epgsql:parse(Conn, Name, Sql, []))
-     || {Key, Name, Sql} <- Named
-    },
+    Statements =
+        #{
+            Key => element(2, epgsql:parse(Conn, Name, Sql, []))
+         || {Key, Name, Sql} <- Named
+        },
     Setup#{statements => Statements};
 parsed(_Client, Setup) ->
     Setup.
