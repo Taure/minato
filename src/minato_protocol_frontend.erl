@@ -51,6 +51,13 @@ or value holds a null byte, and a name that is empty, raise
 `error({minato_protocol, #{message := startup}})` naming the parameter and not
 its value.
 
+The other strings are a statement's text and the names of statements and
+portals, in `Query`, `Parse`, `Bind`, `Describe`, `Execute` and `Close`. One
+that holds a null byte raises
+`error({minato_protocol, #{message := Message, reason := null_byte, data :=
+Field}})`, where `Field` is `query`, `name`, `portal` or `statement`, before
+anything is sent. A parameter value is length prefixed and may hold any byte.
+
 ## What is not enforced
 
 An encoder writes the message it is given. It does not check that
@@ -82,30 +89,33 @@ encode({sasl_initial_response, Mechanism, Data}) ->
 encode({sasl_response, Data}) ->
     typed($p, Data);
 encode({query, Query}) ->
-    typed($Q, [Query, 0]);
+    typed($Q, string(query, query, Query));
 encode({parse, Name, Query, Parameters}) ->
-    typed($P, [Name, 0, Query, 0, count(Parameters), [<<Oid:32>> || Oid <- Parameters]]);
+    typed($P, [
+        string(parse, name, Name),
+        string(parse, query, Query),
+        count(Parameters),
+        [<<Oid:32>> || Oid <- Parameters]
+    ]);
 encode({bind, Portal, Statement, ParameterFormats, Parameters, ResultFormats}) ->
     typed($B, [
-        Portal,
-        0,
-        Statement,
-        0,
+        string(bind, portal, Portal),
+        string(bind, statement, Statement),
         formats(ParameterFormats),
         count(Parameters),
         [length_prefixed(Parameter) || Parameter <- Parameters],
         formats(ResultFormats)
     ]);
 encode({describe, Target, Name}) ->
-    typed($D, [target(Target), Name, 0]);
+    typed($D, [target(Target), string(describe, name, Name)]);
 encode({execute, Portal, MaxRows}) ->
-    typed($E, [Portal, 0, <<MaxRows:32>>]);
+    typed($E, [string(execute, portal, Portal), <<MaxRows:32>>]);
 encode(sync) ->
     <<$S, 4:32>>;
 encode(flush) ->
     <<$H, 4:32>>;
 encode({close, Target, Name}) ->
-    typed($C, [target(Target), Name, 0]);
+    typed($C, [target(Target), string(close, name, Name)]);
 encode(terminate) ->
     <<$X, 4:32>>.
 
@@ -140,6 +150,21 @@ parameter_value(Name, Value) ->
         nomatch -> Value;
         _Found -> minato_protocol:bad(startup, null_byte_in_parameter, Name)
     end.
+
+%% A string with its terminator, once it is known to hold no other. The reason
+%% names which string of which message and not what was in it.
+-spec string(atom(), atom(), iodata()) -> iodata().
+string(Message, Field, Text) ->
+    case holds_null(Text) of
+        false -> [Text, 0];
+        true -> minato_protocol:bad(Message, null_byte, Field)
+    end.
+
+-spec holds_null(iodata() | byte()) -> boolean().
+holds_null(Text) when is_binary(Text) -> binary:match(Text, <<0>>) =/= nomatch;
+holds_null([Head | Tail]) -> holds_null(Head) orelse holds_null(Tail);
+holds_null([]) -> false;
+holds_null(Byte) -> Byte =:= 0.
 
 -spec count([term()]) -> binary().
 count(Values) ->

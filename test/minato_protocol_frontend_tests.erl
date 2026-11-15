@@ -60,6 +60,30 @@ a_startup_parameter_cannot_end_early_test_() ->
         )
     ].
 
+a_name_or_a_statement_cannot_end_early_test_() ->
+    Cut = <<"SELECT 1", 0, "; DROP TABLE t">>,
+    [
+        ?_assertError(
+            {minato_protocol, #{message := Message, reason := null_byte, data := Field}},
+            minato_protocol:encode(Sent)
+        )
+     || {Message, Field, Sent} <- [
+            {query, query, {query, Cut}},
+            {query, query, {query, [~"SELECT ", [<<0>>], ~"1"]}},
+            {parse, name, {parse, <<"s", 0>>, ~"SELECT 1", []}},
+            {parse, query, {parse, ~"s", Cut, []}},
+            {bind, portal, {bind, <<0, "p">>, ~"s", [], [], []}},
+            {bind, statement, {bind, ~"", <<"s", 0, "t">>, [], [], []}},
+            {describe, name, {describe, statement, <<"s", 0>>}},
+            {execute, portal, {execute, <<"p", 0>>, 0}},
+            {close, name, {close, portal, <<0>>}}
+        ]
+    ].
+
+a_null_byte_in_a_parameter_value_is_only_a_byte_test() ->
+    Bind = {bind, ~"", ~"s", [binary], [<<1, 0, 2>>], [binary]},
+    ?assertEqual(Bind, minato_frontend_reader:read(enc(Bind))).
+
 ssl_request_test() ->
     ?assertEqual(<<0, 0, 0, 8, 4, 210, 22, 47>>, enc(ssl_request)).
 
