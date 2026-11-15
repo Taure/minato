@@ -120,6 +120,9 @@ means it was away, and `NOTIFY` has no replay, so anything published while it
 was gone is gone. Treat a notification as something that makes a poll faster,
 never as the only way you find out.
 
+PostgreSQL lets any role that can connect publish on any channel, so a payload
+is input from whoever did: check it as you would anything else from outside.
+
 ## Where next
 
 - [Configuration](configuration.md) - every option, with its default and why

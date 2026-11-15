@@ -10,7 +10,7 @@ something has already gone wrong.
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([served/1, published/1, refusing/1, garbled/1, deaf/1]).
+-export([served/1, published/1, published_at_length/1, refusing/1, garbled/1, deaf/1]).
 
 -define(LISTENER, minato_listener_tests_listener).
 
@@ -106,6 +106,19 @@ a_notification_reaches_every_subscriber_of_its_channel_test_() ->
         ok = stopped(Other)
     end).
 
+%% What a subscriber is sent is cut out of what was read off the socket. Kept
+%% as it came, it would keep the whole read alive for as long as the subscriber
+%% keeps the payload.
+a_notification_holds_on_to_nothing_but_itself_test_() ->
+    listening({?MODULE, published_at_length}, fun(_Server) ->
+        ok = minato_listener:listen(?LISTENER, ~"jobs"),
+        [{Channel, Payload, 7}] = notifications(1),
+        ?assertEqual(~"jobs", Channel),
+        ?assertEqual(200, byte_size(Payload)),
+        ?assertEqual(byte_size(Payload), binary:referenced_byte_size(Payload)),
+        ?assertEqual(byte_size(Channel), binary:referenced_byte_size(Channel))
+    end).
+
 %%----------------------------------------------------------------------
 %% Losing the connection
 %%----------------------------------------------------------------------
@@ -197,6 +210,11 @@ published({query, ~"LISTEN \"jobs\""} = Listen) ->
         {notification_response, 8, ~"nobody", ~"unheard"}
     ]};
 published(Message) ->
+    served(Message).
+
+published_at_length({query, ~"LISTEN \"jobs\""} = Listen) ->
+    {then, served(Listen), 50, [{notification_response, 7, ~"jobs", binary:copy(~"x", 200)}]};
+published_at_length(Message) ->
     served(Message).
 
 refusing({query, _Sql}) ->

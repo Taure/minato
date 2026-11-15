@@ -89,7 +89,11 @@ What a subscriber receives.
 
 The payload is whatever `NOTIFY` was given, and the pid is the server side
 process that sent it, which is how a subscriber tells its own writes from
-somebody else's.
+somebody else's. Both binaries are copies, so keeping one keeps nothing else.
+
+PostgreSQL asks for no privilege to `NOTIFY`: any role that can connect to the
+database can publish on any channel, with any payload. A payload is input from
+whoever that is, to be checked like any other, and never a statement of fact.
 """.
 -type notification() ::
     {minato_notification, Channel :: binary(), Payload :: binary(), From :: integer()}.
@@ -109,7 +113,9 @@ gets `ok` is registered rather than about to be. A channel already listened to
 costs no round trip.
 
 The name is quoted rather than interpolated, so a channel name from outside is
-a channel name and not a statement.
+a channel name and not a statement. The server cuts a name off at 63 bytes and
+publishes under what is left, so a longer one is subscribed to and never heard
+from.
 """.
 -spec listen(name(), binary()) -> ok | {error, term()}.
 listen(Name, Channel) ->
@@ -307,8 +313,10 @@ delivered(State, [_Message | Rest]) ->
     delivered(State, Rest).
 
 -spec notify(#state{}, binary(), binary(), integer()) -> ok.
-notify(#state{name = Name, channels = Channels}, Channel, Payload, From) ->
-    Subscribers = maps:get(Channel, Channels, #{}),
+notify(#state{name = Name, channels = Channels}, Read, Carried, From) ->
+    Subscribers = maps:get(Read, Channels, #{}),
+    Channel = binary:copy(Read),
+    Payload = binary:copy(Carried),
     _ = [Pid ! {minato_notification, Channel, Payload, From} || Pid := _Monitor <- Subscribers],
     minato_telemetry:event(
         [minato, notification, received],
