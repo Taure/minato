@@ -148,19 +148,10 @@ the server issued is the whole of the authorisation.
 -include_lib("kernel/include/logger.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
-%% eqWAlizer cannot see that the transport field decides what the socket field
-%% holds, and `ssl:connect/3` is specified for the sockets that existed before
-%% it learned to take a handle from `m:socket`. Both are true at run time and
-%% neither is expressible, so the crossings live here rather than spread
-%% through the module.
--eqwalizer({nowarn_function, handle/1}).
--eqwalizer({nowarn_function, upgraded/3}).
--eqwalizer({nowarn_function, over/3}).
-
 -record(conn, {
     transport :: transport(),
     socket :: socket(),
-    under :: minato_socket:socket() | undefined,
+    plain :: plain_socket(),
     binding :: binary() | undefined,
     buffer = ~"" :: binary(),
     pending = [] :: [minato_protocol:backend()],
@@ -347,6 +338,7 @@ An authentication method the server may ask for.
 -type transport() :: plain() | ssl.
 -type plain() :: gen_tcp | minato_socket.
 -type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
+-type plain_socket() :: {gen_tcp, gen_tcp:socket()} | {minato_socket, minato_socket:socket()}.
 -type os() :: {atom(), atom()}.
 
 -doc """
@@ -410,10 +402,27 @@ opening(Opts) ->
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
     Deadline = within(Timeout),
-    Transport = transport(Opts),
-    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> secure(Transport, Socket, Host, Deadline, Opts);
+    case reach(transport(Opts), Host, Port, socket_options(Opts), Timeout) of
+        {ok, Plain} -> secure(Plain, Host, Deadline, Opts);
         {error, Reason} -> {error, {socket, Reason}}
+    end.
+
+-spec reach(
+    plain(),
+    inet:socket_address() | inet:hostname(),
+    inet:port_number(),
+    [gen_tcp:connect_option()],
+    timeout()
+) -> {ok, plain_socket()} | {error, term()}.
+reach(gen_tcp, Host, Port, Options, Timeout) ->
+    case gen_tcp:connect(Host, Port, Options, Timeout) of
+        {ok, Socket} -> {ok, {gen_tcp, Socket}};
+        {error, Reason} -> {error, Reason}
+    end;
+reach(minato_socket, Host, Port, Options, Timeout) ->
+    case minato_socket:connect(Host, Port, Options, Timeout) of
+        {ok, Socket} -> {ok, {minato_socket, Socket}};
+        {error, Reason} -> {error, Reason}
     end.
 
 %% A timeout given to each step is a timeout a server can spend once per step.
@@ -493,16 +502,22 @@ shorter(Timeout, Cap) -> min(Timeout, Cap).
 %% either. So nothing is written, and what is held is dropped with the socket
 %% instead of being waited on.
 -spec hurried(conn(), non_neg_integer()) -> clear | behind.
-hurried(#conn{transport = Transport, under = undefined, socket = Socket}, Bound) when
-    Transport =:= gen_tcp; Transport =:= ssl
-->
-    Module = options_module(Transport),
-    case Module:getstat(Socket, [send_pend]) of
+hurried(#conn{transport = gen_tcp, plain = {gen_tcp, Socket}}, Bound) ->
+    case inet:getstat(Socket, [send_pend]) of
         {ok, [{send_pend, 0}]} ->
-            _ = Module:setopts(Socket, [{send_timeout, Bound}]),
+            _ = inet:setopts(Socket, [{send_timeout, Bound}]),
             clear;
         _Held ->
-            _ = Module:setopts(Socket, [{linger, {true, 0}}]),
+            _ = inet:setopts(Socket, [{linger, {true, 0}}]),
+            behind
+    end;
+hurried(#conn{transport = ssl, plain = {gen_tcp, _Port}, socket = Socket}, Bound) ->
+    case ssl:getstat(Socket, [send_pend]) of
+        {ok, [{send_pend, 0}]} ->
+            _ = ssl:setopts(Socket, [{send_timeout, Bound}]),
+            clear;
+        _Held ->
+            _ = ssl:setopts(Socket, [{linger, {true, 0}}]),
             behind
     end;
 hurried(_Conn, _Bound) ->
@@ -611,9 +626,8 @@ cancel(#conn{key = Key, grace = Grace, opts = Opts}, Os) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    Transport = transport(Opts),
-    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> requested(Transport, Socket, Host, Key, {Timeout, Grace, Os}, Opts);
+    case reach(transport(Opts), Host, Port, socket_options(Opts), Timeout) of
+        {ok, Plain} -> requested(Plain, Host, Key, {Timeout, Grace, Os}, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
@@ -649,8 +663,10 @@ send(#conn{} = Conn, Message) ->
 -spec written(conn(), iodata()) -> ok | {error, error()}.
 written(#conn{transport = minato_socket, send_timeout = Timeout} = Conn, Bytes) ->
     timed(Conn, minato_socket:send(handle(Conn), Bytes, Timeout));
-written(#conn{transport = ssl, under = Under, send_timeout = Timeout} = Conn, Bytes) when
-    Under =/= undefined, is_integer(Timeout)
+written(
+    #conn{transport = ssl, plain = {minato_socket, Under}, send_timeout = Timeout} = Conn, Bytes
+) when
+    is_integer(Timeout)
 ->
     Timer = minato_overdue:watch(Under, Timeout),
     watched(Conn, Timer, session_write(Conn#conn.socket, Bytes));
@@ -1256,78 +1272,77 @@ with_timeout(Conn, Timeout) ->
 %%----------------------------------------------------------------------
 
 -spec secure(
-    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
 ) ->
     {ok, conn()} | {error, error()}.
-secure(Transport, Socket, Host, Deadline, Opts) ->
+secure({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     case maps:get(ssl, Opts, false) of
         false ->
-            start(new(Transport, Socket, Opts), Opts);
+            start(new(Transport, Socket, Plain, Opts), Opts);
         true ->
-            case upgrade(Transport, Socket, Host, Deadline, Opts) of
-                {ok, Upgraded} -> start(over(new(ssl, Upgraded, Opts), Transport, Socket), Opts);
+            case upgrade(Plain, Host, Deadline, Opts) of
+                {ok, Upgraded} -> start(new(ssl, Upgraded, Plain, Opts), Opts);
                 {error, Reason} -> {error, Reason}
             end
     end.
 
--spec over(conn(), plain(), socket()) -> conn().
-over(Conn, minato_socket, Socket) -> Conn#conn{under = Socket};
-over(Conn, gen_tcp, _Port) -> Conn.
-
 -spec upgrade(
-    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
 ) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-upgrade(Transport, Socket, Host, Deadline, Opts) ->
+upgrade({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     case Transport:send(Socket, minato_protocol:encode(ssl_request)) of
-        ok -> negotiate(Transport, Socket, Host, Deadline, Opts);
+        ok -> negotiate(Plain, Host, Deadline, Opts);
         {error, Reason} -> closing(Transport, Socket, {socket, Reason})
     end.
 
 -spec negotiate(
-    plain(), socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
 ) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-negotiate(Transport, Socket, Host, Deadline, Opts) ->
+negotiate({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     case Transport:recv(Socket, 1, left(Deadline)) of
         {ok, Answer} when is_binary(Answer) ->
-            answered(minato_protocol:ssl_response(Answer), Transport, Socket, Host, Deadline, Opts);
+            answered(minato_protocol:ssl_response(Answer), Plain, Host, Deadline, Opts);
         {error, Reason} ->
             closing(Transport, Socket, {socket, Reason})
     end.
 
 -spec answered(
     {ok, accepted | rejected | error_response, binary()} | incomplete,
-    plain(),
-    socket(),
+    plain_socket(),
     inet:socket_address() | inet:hostname(),
     integer() | infinity,
     opts()
 ) -> {ok, ssl:sslsocket()} | {error, error()}.
-answered({ok, accepted, _Rest}, Transport, Socket, Host, Deadline, Opts) ->
-    case upgraded(Socket, tls_options(Host, Opts), left(Deadline)) of
+answered({ok, accepted, _Rest}, {Transport, Socket} = Plain, Host, Deadline, Opts) ->
+    case upgraded(Plain, tls_options(Host, Opts), left(Deadline)) of
         {ok, Upgraded} -> {ok, Upgraded};
         {error, Reason} -> closing(Transport, Socket, {tls, Reason})
     end;
-answered({ok, _Refused, _Rest}, Transport, Socket, _Host, _Deadline, _Opts) ->
+answered({ok, _Refused, _Rest}, {Transport, Socket}, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, tls_refused);
-answered(incomplete, Transport, Socket, _Host, _Deadline, _Opts) ->
+answered(incomplete, {Transport, Socket}, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, {socket, closed}).
 
 -spec handle(conn()) -> minato_socket:socket().
-handle(#conn{socket = Socket}) ->
+handle(#conn{plain = {minato_socket, Socket}}) ->
     Socket.
 
--spec upgraded(socket(), [ssl:tls_client_option()], timeout()) ->
+-spec upgraded(plain_socket(), [ssl:tls_client_option()], timeout()) ->
     {ok, ssl:sslsocket()} | {error, term()}.
-upgraded(Socket, Options, Timeout) ->
-    ssl:connect(Socket, Options, Timeout).
+upgraded({_Transport, Socket}, Options, Timeout) ->
+    case ssl:connect(Socket, Options, Timeout) of
+        {ok, Upgraded} -> {ok, Upgraded};
+        {error, Reason} -> {error, Reason}
+    end.
 
--spec new(transport(), socket(), opts()) -> conn().
-new(Transport, Socket, Opts) ->
+-spec new(transport(), socket(), plain_socket(), opts()) -> conn().
+new(Transport, Socket, Plain, Opts) ->
     #conn{
         transport = Transport,
         socket = Socket,
+        plain = Plain,
         binding = binding(Transport, Socket),
         opened = erlang:monotonic_time(millisecond),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
@@ -1594,15 +1609,14 @@ all_methods() ->
 %% The server closes a cancel connection as soon as it has read the request, so
 %% the TLS one waits for that close on Windows for the same reason `close/1` does.
 -spec requested(
-    plain(),
-    socket(),
+    plain_socket(),
     inet:socket_address() | inet:hostname(),
     key(),
     {timeout(), timeout(), os()},
     opts()
 ) -> ok | {error, error()}.
-requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
-    case secured(Transport, Socket, Host, Timeout, Opts) of
+requested(Plain, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
+    case secured(Plain, Host, Timeout, Opts) of
         {ok, Secure, Secured} ->
             Sent = write(Secure, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
             ok = shut(Secure, Secured, Grace, Os),
@@ -1611,16 +1625,16 @@ requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
             {error, Reason}
     end.
 
--spec secured(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secured(plain_socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, transport(), socket()} | {error, error()}.
-secured(Transport, Socket, _Host, _Timeout, #{ssl := false}) ->
+secured({Transport, Socket}, _Host, _Timeout, #{ssl := false}) ->
     {ok, Transport, Socket};
-secured(Transport, Socket, Host, Timeout, #{ssl := true} = Opts) ->
-    case upgrade(Transport, Socket, Host, within(Timeout), Opts) of
+secured(Plain, Host, Timeout, #{ssl := true} = Opts) ->
+    case upgrade(Plain, Host, within(Timeout), Opts) of
         {ok, Upgraded} -> {ok, ssl, Upgraded};
         {error, Reason} -> {error, Reason}
     end;
-secured(Transport, Socket, _Host, _Timeout, _Opts) ->
+secured({Transport, Socket}, _Host, _Timeout, _Opts) ->
     {ok, Transport, Socket}.
 
 %%----------------------------------------------------------------------
