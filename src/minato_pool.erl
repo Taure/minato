@@ -835,7 +835,7 @@ named(Reason) ->
 
 -spec kind(term()) -> atom().
 kind(Why) when is_atom(Why) -> Why;
-kind(Why) when is_tuple(Why), is_atom(element(1, Why)) -> element(1, Why);
+kind(Why) when is_tuple(Why), tuple_size(Why) > 0 -> kind(element(1, Why));
 kind(_Why) -> unnamed.
 
 %% A crash reason can carry a stacktrace, and its frames the options, so only an
