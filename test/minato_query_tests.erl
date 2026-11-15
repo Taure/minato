@@ -213,6 +213,20 @@ an_unnamed_statement_with_a_value_that_does_not_fit_is_ended_with_a_sync_test() 
     ?assertEqual([parse, describe, flush, sync], kinds(asked(Server))),
     ?assertMatch({ok, [#{rows := [{~"1"}]}], _Next}, minato_query:simple(Conn, ~"SELECT 1")).
 
+a_sync_that_is_never_answered_closes_the_connection_under_the_raise_test() ->
+    {Server, Conn} = connected(parsed([?INT4], [?INT4]), #{timeout => 100}),
+    ?assertError({minato_codec, _Report}, minato_query:query(Conn, ?SQL, [~"seven"])),
+    ?assert(lists:member(terminate, kinds(asked(Server, 500)))).
+
+a_value_that_does_not_fit_is_raised_on_a_connection_already_closed_test() ->
+    {_Server, Conn} = connected(prepared([?INT4], [?INT4])),
+    {ok, Statement, Ready} = minato_query:prepare(Conn, ~"mine", ?SQL),
+    ok = minato_conn:close(Ready),
+    ?assertError(
+        {minato_codec, #{reason := not_an_integer}},
+        minato_query:execute(Ready, Statement, [~"seven"])
+    ).
+
 %%----------------------------------------------------------------------
 %% A kept statement the server stops accepting
 %%----------------------------------------------------------------------
@@ -304,6 +318,44 @@ a_server_that_says_ready_and_nothing_else_has_run_nothing_test() ->
     ?assertMatch(
         {ok, #{command := unknown, rows := []}, _Read}, minato_query:cached(Kept, ?SQL, [7])
     ).
+
+what_the_server_says_unasked_before_the_bind_is_answered_is_passed_over_test_() ->
+    [
+        {atom_to_list(element(1, Unasked)), fun() ->
+            Script = kept() ++ [[Unasked, bind_complete] | tl(ran([<<9:32>>]))],
+            {_Server, Conn} = connected(Script),
+            {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+            ?assertMatch({ok, #{rows := [{9}]}, _Read}, minato_query:cached(Kept, ?SQL, [7]))
+        end}
+     || Unasked <- [
+            {notice_response, #{severity => ~"NOTICE", code => ~"00000", message => ~"hm"}},
+            {notification_response, 77, ~"channel", ~"payload"},
+            {parameter_status, ~"TimeZone", ~"Europe/Stockholm"}
+        ]
+    ].
+
+an_answer_that_belongs_to_a_parse_is_raised_where_the_bind_was_awaited_test_() ->
+    [
+        {atom_to_list(kind(Misplaced)), fun() ->
+            {_Server, Conn} = connected(kept() ++ [[Misplaced]]),
+            {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+            ?assertError(
+                {minato_query, #{message := execute, reason := unexpected_message}},
+                minato_query:cached(Kept, ?SQL, [7])
+            )
+        end}
+     || Misplaced <- [parse_complete, no_data, {parameter_description, [?INT4]}]
+    ].
+
+a_bind_that_is_never_answered_is_an_error_test() ->
+    {_Server, Conn} = connected(kept(), #{timeout => 100}),
+    {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+    ?assertMatch({error, _Reason}, minato_query:cached(Kept, ?SQL, [7])).
+
+a_refusal_that_is_never_followed_by_ready_is_an_error_test() ->
+    {_Server, Conn} = connected(kept() ++ [[refused(~"0A000")]], #{timeout => 100}),
+    {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+    ?assertMatch({error, _Reason}, minato_query:cached(Kept, ?SQL, [7])).
 
 a_statement_the_server_no_longer_has_is_parsed_again_test() ->
     Script = kept() ++ stale(~"26000", idle) ++ parsed([?INT4], [?INT4]) ++ ran([<<9:32>>]),
