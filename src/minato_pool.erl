@@ -757,7 +757,7 @@ handle_info({server_limit, _Limit}, State) ->
 handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
     State = State0#state{failures = State0#state.failures + 1},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
-    Delay = spread(State#state.backoff),
+    Delay = minato_backoff:spread(State#state.backoff),
     ?LOG_WARNING(
         #{
             event => connect_failed,
@@ -1177,12 +1177,6 @@ handed(Pool, Conn) ->
 refused(Pool, Reason) ->
     Pool ! {connect_failed, Reason},
     ok.
-
-%% Somewhere in the upper half of the wait, so that pools which lost one server
-%% together do not all come back to it together.
--spec spread(pos_integer()) -> pos_integer().
-spread(Longest) ->
-    Longest - rand:uniform(Longest div 2 + 1) + 1.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

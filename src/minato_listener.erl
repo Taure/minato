@@ -432,14 +432,8 @@ disconnected(#state{conn = Conn} = State) ->
 retry(#state{retrying = true} = State) ->
     State;
 retry(#state{backoff = Delay} = State) ->
-    _ = erlang:send_after(spread(Delay), self(), reconnect),
+    _ = erlang:send_after(minato_backoff:spread(Delay), self(), reconnect),
     State#state{backoff = longer(Delay), retrying = true}.
-
-%% Somewhere in the upper half of the wait, so that listeners which lost one
-%% server together do not all come back to it together.
--spec spread(pos_integer()) -> pos_integer().
-spread(Longest) ->
-    Longest - rand:uniform(Longest div 2 + 1) + 1.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->
