@@ -155,6 +155,25 @@ the server issued is the whole of the authorisation.
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
 -define(DEFAULT_CANCEL_TIMEOUT, 5000).
+-define(OPTIONS, [
+    host,
+    port,
+    user,
+    password,
+    database,
+    parameters,
+    ssl,
+    ssl_options,
+    channel_binding,
+    auth,
+    connect_timeout,
+    timeout,
+    socket_options,
+    transport,
+    prepared_statements,
+    cancel_timeout,
+    frame_opts
+]).
 -define(CLOSE_DRAIN_CAP, 1000).
 -define(CLOSER_LIFETIME, 5000).
 
@@ -422,8 +441,14 @@ opening(Opts) ->
     end.
 
 -doc """
-Whether the options that decide how a connection is secured say something
-minato knows.
+Whether every option is one minato has, and those that decide how a connection
+is secured say something it knows.
+
+A key that is not in `t:opts/0` is refused, whatever its value: `sslmode`,
+`tls`, or `channel_binding` misspelt would otherwise be skipped, and the
+connection opened with the default the caller meant to change. `ssl_options`
+are refused without `ssl => true`, because options for a TLS session nobody
+asked for are a session the caller believes it has.
 
 `channel_binding` is `prefer`, `require` or `disable`; `ssl` is a boolean;
 `auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
@@ -434,8 +459,9 @@ session is kept for another connection or resumed from one: `reuse_sessions`
 is `false`, `session_tickets` is `disabled`, and there is no `reuse_session`
 or `use_ticket`.
 
-Anything else answers `{error, {invalid_option, Key}}` for the first of those
-keys that is wrong, without the value. A value minato did not know used to be
+Anything else answers `{error, {invalid_option, Key}}` for the first key that
+is wrong, a key that is not an option before a value that is not one, without
+the value. A value minato did not know used to be
 read as the default, which is the weaker one: `channel_binding => required`, or
 `~"require"` out of a configuration file, was `prefer`.
 
@@ -443,15 +469,18 @@ read as the default, which is the weaker one: `channel_binding => required`, or
 {invalid_option, Key}}})` before it opens a socket, and a pool or a listener
 does not start: `{error, {invalid_option, Key}}`.
 """.
--spec validate(opts()) -> ok | {error, {invalid_option, atom()}}.
+-spec validate(opts()) -> ok | {error, {invalid_option, term()}}.
 validate(Opts) ->
-    validate([channel_binding, ssl, auth, ssl_options, password], Opts).
+    case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
+        [] -> validate([channel_binding, ssl, auth, ssl_options, password], Opts);
+        [Key | _Others] -> {error, {invalid_option, Key}}
+    end.
 
 -spec validate([atom()], opts()) -> ok | {error, {invalid_option, atom()}}.
 validate([Key | Rest], Opts) ->
     case Opts of
         #{Key := Value} ->
-            case valid(Key, Value) of
+            case valid(Key, Value, Opts) of
                 true -> validate(Rest, Opts);
                 false -> {error, {invalid_option, Key}}
             end;
@@ -461,18 +490,18 @@ validate([Key | Rest], Opts) ->
 validate([], _Opts) ->
     ok.
 
--spec valid(atom(), term()) -> boolean().
-valid(channel_binding, Binding) ->
+-spec valid(atom(), term(), opts()) -> boolean().
+valid(channel_binding, Binding, _Opts) ->
     Binding =:= prefer orelse Binding =:= require orelse Binding =:= disable;
-valid(ssl, Wanted) ->
+valid(ssl, Wanted, _Opts) ->
     is_boolean(Wanted);
-valid(auth, [_ | _] = Methods) ->
+valid(auth, [_ | _] = Methods, _Opts) ->
     methods(Methods);
-valid(auth, _NotMethods) ->
+valid(auth, _NotMethods, _Opts) ->
     false;
-valid(ssl_options, Options) ->
-    tls_shaped(minato_secret:revealed(Options));
-valid(password, Password) ->
+valid(ssl_options, Options, Opts) ->
+    maps:get(ssl, Opts, false) andalso tls_shaped(minato_secret:revealed(Options));
+valid(password, Password, _Opts) ->
     is_binary(Password) orelse is_list(Password) orelse is_function(Password, 0).
 
 -spec methods(term()) -> boolean().
@@ -539,7 +568,7 @@ here(Name) when is_list(Name) ->
         {error, _NotAnAddress} -> false
     end.
 
--spec known(ok | {error, {invalid_option, atom()}}) -> ok.
+-spec known(ok | {error, {invalid_option, term()}}) -> ok.
 known(ok) -> ok;
 known({error, {invalid_option, Key} = Reason}) -> bad(options, Reason, Key).
 

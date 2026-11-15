@@ -65,6 +65,14 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   `{minato_conn, #{reason := {invalid_option, Key}}}`, and a pool or a listener
   does not start: `{error, {invalid_option, Key}}`. A misspelt
   `channel_binding` used to be read as `prefer`.
+- A key that is not an option is refused, in a connection's options, a pool's
+  and a listener's: `{invalid_option, Key}`, before a socket opens. A key
+  minato did not know used to be passed over, so `sslmode => require` or a
+  misspelt `channel_binding` connected with the default. The options are the
+  ones in the configuration guide; remove anything else from what is passed.
+- `ssl_options` without `ssl => true` are `{invalid_option, ssl_options}`.
+  They used to be ignored and the connection opened in the clear. Add
+  `ssl => true`, or take them out.
 - `{server_name_indication, disable}` in `ssl_options` no longer turns the
   hostname check off with it. `{verify, verify_none}` is how to say that. The
   certificate is checked for `host` once the handshake is over, and one that

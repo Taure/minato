@@ -134,6 +134,16 @@ pool or a listener does not start. In `ssl_options`, `verify` has to be
 answers with a session that has verified nothing yet, and so is anything that
 resumes a TLS session or keeps one for another connection to resume.
 
+The same goes for a key minato has no option by. `sslmode => require`,
+`tls => true` or `chanel_binding => require` used to be passed over, and the
+connection was opened with the defaults the caller thought it had changed: in
+the clear, or unbound. Every key in a connection's options, a pool's and a
+listener's has to be one of the options in the
+[configuration guide](configuration.md), and the first that is not is
+`{invalid_option, Key}`. `ssl_options` without `ssl => true` are refused in the
+same way, because options for a TLS session nobody asked for are a session the
+caller believes it has.
+
 ## What a server cannot make the client do
 
 The server is not trusted either. It may be compromised, or it may be somebody
@@ -179,7 +189,7 @@ that was chosen. For each of these there is a test with a server that tries.
 - **Be connected to as often as callers arrive.** A pool that could not
   connect waits before it tries again, twice as long each time up to a limit,
   and opens nothing during the wait whoever asks. A database that is down or
-  restarting is asked a few times a second at most by each pool, however many
+  restarting is asked when a wait ends and one connect at a time, however many
   callers are queued.
 - **Choose a weaker authentication.** See the two sections above: the methods
   in `auth` are the only ones answered, and `channel_binding => require` is

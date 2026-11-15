@@ -122,6 +122,7 @@ connection's `timeout` unless `socket_options` says otherwise.
 -define(LONGEST_LIMIT, 10).
 -define(SWEEP_INTERVAL, 5000).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
+-define(OPTIONS, [connection, disconnected, max_age, max_idle, min_size, size]).
 -define(MINIMUM_BACKOFF, 100).
 -define(MAXIMUM_BACKOFF, 30000).
 -define(RESET,
@@ -206,8 +207,9 @@ pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `invalid_opts`. A `connection` whose `channel_binding`, `ssl`, `auth`,
 `ssl_options` or `password` is not something minato knows stops it with
 `{invalid_option, Key}`, as `minato_conn:validate/1` answers, so a pool that
-could not be secured as asked does not start and retry. None of these reasons
-carries the options.
+could not be secured as asked does not start and retry. So does a key that is
+not an option at all, here or in `connection`. None of these reasons carries
+the options.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
 prints its child specs: in its progress report when the pool starts, when a
@@ -621,7 +623,7 @@ call(Name, Message, Timeout) ->
     | {invalid_max_idle, term()}
     | {invalid_max_age, term()}
     | {invalid_disconnected, term()}
-    | {invalid_option, atom()}.
+    | {invalid_option, term()}.
 
 -type settings() :: {pos_integer(), non_neg_integer(), timeout(), timeout(), fail | wait}.
 
@@ -641,6 +643,13 @@ init({_Name, _Opts}) ->
 
 -spec checked(opts()) -> {ok, settings()} | {refused, refused()}.
 checked(Opts) ->
+    case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
+        [] -> settings(Opts);
+        [Key | _Others] -> {refused, {invalid_option, Key}}
+    end.
+
+-spec settings(opts()) -> {ok, settings()} | {refused, refused()}.
+settings(Opts) ->
     Settings = {
         maps:get(size, Opts, ?DEFAULT_SIZE),
         maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),

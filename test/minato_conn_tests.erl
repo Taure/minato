@@ -49,9 +49,84 @@ an_option_that_decides_how_a_connection_is_secured_is_checked_before_a_socket_op
 
 %% Options the type may forbid, because what is checked is that they are
 %% refused at run time too.
--spec asking(inet:port_number(), #{atom() => term()}) -> dynamic().
+-spec asking(inet:port_number(), #{term() => term()}) -> dynamic().
+asking(Port, #{ssl_options := _} = Options) when not is_map_key(ssl, Options) ->
+    maps:merge(opts(Port, #{ssl => true}), Options);
 asking(Port, Options) ->
     maps:merge(opts(Port, #{}), Options).
+
+%% A key that is not an option was skipped, so one that was misspelt left the
+%% default in force and nothing said so.
+an_option_minato_has_no_name_for_is_refused_before_a_socket_opens_test_() ->
+    {setup, fun() -> gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]) end,
+        fun({ok, Listen}) -> gen_tcp:close(Listen) end, fun({ok, Listen}) ->
+            {ok, Port} = inet:port(Listen),
+            [
+                {lists:flatten(io_lib:format("~p", [Key])), fun() ->
+                    ?assertError(
+                        {minato_conn, #{
+                            message := options, reason := {invalid_option, Key}, data := Key
+                        }},
+                        minato_conn:connect(asking(Port, #{Key => Value}))
+                    ),
+                    ?assertEqual({error, timeout}, gen_tcp:accept(Listen, 0))
+                end}
+             || {Key, Value} <- [
+                    {sslmode, require},
+                    {tls, true},
+                    {ssl_opts, [{verify, verify_peer}]},
+                    {chanel_binding, require},
+                    {channel_bindings, require},
+                    {pasword, ~"secret"},
+                    {username, ~"minato"},
+                    {~"ssl", true},
+                    {"ssl", true}
+                ]
+            ]
+        end}.
+
+every_option_there_is_has_a_name_test() ->
+    Every = #{
+        host => "db",
+        port => 5432,
+        user => ~"minato",
+        password => ~"secret",
+        database => ~"minato",
+        parameters => #{},
+        ssl => true,
+        ssl_options => [],
+        channel_binding => prefer,
+        auth => [scram_sha_256],
+        connect_timeout => 5000,
+        timeout => 15000,
+        socket_options => [],
+        transport => socket,
+        prepared_statements => 0,
+        cancel_timeout => 5000,
+        frame_opts => #{}
+    },
+    ?assertEqual(ok, minato_conn:validate(Every)).
+
+%% Options for a TLS session that nobody asked for are a session the caller
+%% believes it has.
+tls_options_without_tls_are_refused_test_() ->
+    [
+        ?_assertEqual({error, {invalid_option, ssl_options}}, minato_conn:validate(Opts))
+     || Opts <- [
+            #{user => ~"minato", ssl_options => [{verify, verify_peer}]},
+            #{user => ~"minato", ssl_options => []},
+            #{user => ~"minato", ssl => false, ssl_options => [{verify, verify_peer}]}
+        ]
+    ] ++
+        [
+            ?_assertEqual(ok, minato_conn:validate(#{user => ~"minato", ssl => false})),
+            ?_assertEqual(
+                ok,
+                minato_conn:validate(#{
+                    user => ~"minato", ssl => true, ssl_options => [{verify, verify_peer}]
+                })
+            )
+        ].
 
 %% A list that does not end in one, which a list's type cannot say.
 -spec ending_in(term(), dynamic()) -> dynamic().

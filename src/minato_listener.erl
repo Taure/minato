@@ -81,8 +81,9 @@ What to connect to.
 
 Passed to `minato_conn:connect/1` unchanged. One connection, held for the life
 of the listener. A `connection` that is missing, not a map, or has no `user`
-stops the listener with `invalid_connection`, and one with a security option
-`minato_conn:validate/1` refuses stops it with `{invalid_option, Key}`.
+stops the listener with `invalid_connection`, and one with an option
+`minato_conn:validate/1` refuses stops it with `{invalid_option, Key}`, as does
+any key here other than `connection`.
 """.
 -type opts() :: #{connection := minato_conn:opts()}.
 
@@ -182,13 +183,15 @@ format_status(Status) ->
 %% Options can come from the environment, so anything reaches here. The reason
 %% never carries the options: they hold the password.
 -spec init({name(), dynamic()}) ->
-    {ok, #state{}} | {stop, invalid_connection | {invalid_option, atom()}}.
-init({Name, #{connection := #{user := _} = Connection}}) ->
-    case minato_conn:validate(Connection) of
-        ok ->
+    {ok, #state{}} | {stop, invalid_connection | {invalid_option, term()}}.
+init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
+    case {maps:keys(maps:remove(connection, Opts)), minato_conn:validate(Connection)} of
+        {[], ok} ->
             process_flag(trap_exit, true),
             {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
-        {error, Reason} ->
+        {[Key | _Others], _Connection} ->
+            {stop, {invalid_option, Key}};
+        {[], {error, Reason}} ->
             {stop, Reason}
     end;
 init({_Name, _Opts}) ->

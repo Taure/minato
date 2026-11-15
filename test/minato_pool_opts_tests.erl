@@ -134,9 +134,41 @@ a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() 
 
 %% A connection that asks for something the type forbids, because what is
 %% checked is that it is refused at run time too.
--spec asking(atom(), term()) -> dynamic().
+-spec asking(term(), term()) -> dynamic().
+asking(ssl_options, Value) ->
+    (connection())#{ssl => true, ssl_options => Value};
 asking(Key, Value) ->
     (connection())#{Key => Value}.
+
+%% A key nobody reads is a setting somebody believes is in force.
+an_option_a_pool_has_no_name_for_is_refused_test_() ->
+    [
+        ?_assertEqual({error, {invalid_option, Key}}, linked(Opts))
+     || {Key, Opts} <- [
+            {pool_size, #{pool_size => 10, connection => connection()}},
+            {max_size, #{size => 2, max_size => 10, connection => connection()}},
+            {ssl, #{size => 2, ssl => true, connection => connection()}},
+            {~"size", #{~"size" => 2, connection => connection()}},
+            {sslmode, #{size => 2, connection => asking(sslmode, require)}},
+            {ssl_options, #{size => 2, connection => (connection())#{ssl_options => []}}}
+        ]
+    ].
+
+an_option_a_listener_has_no_name_for_is_refused_test_() ->
+    [
+        fun() ->
+            ok = ready(),
+            ?assertEqual(
+                {error, {invalid_option, Key}},
+                minato:start_listener(minato_pool_opts_tests_listener, Opts)
+            )
+        end
+     || {Key, Opts} <- [
+            {channel, #{channel => ~"jobs", connection => connection()}},
+            {size, #{size => 1, connection => connection()}},
+            {sslmode, #{connection => asking(sslmode, require)}}
+        ]
+    ].
 
 linked(Opts) ->
     Trapping = process_flag(trap_exit, true),

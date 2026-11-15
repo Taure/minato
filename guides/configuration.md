@@ -60,6 +60,11 @@ required`, `ssl => ~"true"` or `auth => scram_sha_256` makes
 `{error, {invalid_option, Key}}`. `minato_conn:validate/1` answers the same
 question for a configuration that has not been used yet.
 
+A key that is not in the table above is refused in the same way, whatever its
+value, and so is a key a pool or a listener has no option by: `sslmode`,
+`pool_size` or a misspelt `channel_binding` would otherwise be passed over and
+the default left in force. `ssl_options` are refused without `ssl => true`.
+
 Two startup parameters are sent unless `parameters` overrides them:
 `client_encoding` is `UTF8`, because the codecs decode text as UTF-8 and a
 server sending LATIN1 would put mojibake in a binary rather than raise;
