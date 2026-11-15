@@ -62,7 +62,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - `channel_binding => require` authenticates with `SCRAM-SHA-256-PLUS` or not
   at all: cleartext, MD5, a server asking for no password, SCRAM without
   `-PLUS` and SCRAM on a connection without TLS are all refused with
-  `{error, {channel_binding_required, Method}}`.
+  `{error, {channel_binding_required, Method}}`. A server that takes the bound
+  mechanism and answers `AuthenticationOk` before the exchange is finished is
+  refused the same way, where under `require` it raised
+  `{minato_auth, #{reason := sasl_exchange_unfinished}}`. Without `require` it
+  still raises that.
 - `channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
   before a socket opens. A value minato does not know, such as a misspelt
   `channel_binding`, a `verify` that is neither `verify_peer` nor

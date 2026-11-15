@@ -91,7 +91,9 @@ carry a binding. Under `require` each of them is refused before a byte of the
 password is read: `{error, {channel_binding_required, Method}}`. A server that
 offers SCRAM without `-PLUS`, and `require` on a connection with no TLS under
 it, are refused the same way with nothing sent, `Method` being
-`scram_sha_256`, which a pool reports as a failed connect.
+`scram_sha_256`, which a pool reports as a failed connect. So is a server that
+takes the bound mechanism and then lets the client in before it has proved it
+knows the password.
 
 A client that can bind but is offered no `-PLUS` mechanism sends `y,,` in the
 gs2 header, which is how a server that *does* support binding learns its

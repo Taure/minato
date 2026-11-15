@@ -1709,7 +1709,7 @@ authenticate(Conn, State, Asked) ->
         {ok, {notice_response, _Fields}, Read} ->
             authenticate(Read, State, Asked);
         {ok, Message, Read} ->
-            case permitted(Message, Read, Asked) of
+            case permitted(Message, Read, Asked, minato_auth:proven(State)) of
                 ok -> answer(Read, minato_auth:step(Message, State));
                 {error, Reason} -> closing(Read, Reason)
             end;
@@ -1765,8 +1765,14 @@ store(Conn, _Name, _Value) ->
 %% What the server is allowed to ask for
 %%----------------------------------------------------------------------
 
--spec permitted(minato_protocol:backend(), conn(), boolean()) -> ok | {error, error()}.
-permitted(Message, #conn{transport = Transport, binding = Hash, opts = Opts}, Asked) ->
+%% Under a required binding the only exchange that gets as far as being
+%% answered is the bound one, so a server that lets the client in before
+%% proving itself has not bound anything either.
+-spec permitted(minato_protocol:backend(), conn(), boolean(), boolean()) ->
+    ok | {error, error()}.
+permitted(authentication_ok, #conn{opts = #{channel_binding := require}}, true, false) ->
+    {error, {channel_binding_required, scram_sha_256}};
+permitted(Message, #conn{transport = Transport, binding = Hash, opts = Opts}, Asked, _Proven) ->
     case method(Message, Asked) of
         undefined ->
             ok;

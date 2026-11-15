@@ -742,6 +742,16 @@ a_required_binding_on_a_plain_socket_answers_nothing_test_() ->
         ]
     ].
 
+%% The bound mechanism is offered and taken, and then the server lets the
+%% client in before it has proved it knows the password.
+a_bound_exchange_the_server_does_not_finish_is_refused_like_the_rest_test() ->
+    Offer = [{authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}],
+    {Server, Result} = tls_connects([Offer, ?READY], #{
+        password => ~"pencil", channel_binding => require
+    }),
+    minato_backend_server:stop(Server),
+    ?assertEqual({error, {channel_binding_required, scram_sha_256}}, Result).
+
 a_preferred_binding_still_answers_what_the_server_asks_for_test() ->
     {Server, Result} = tls_connects([[authentication_cleartext_password], ?READY], #{
         password => ~"pencil"

@@ -286,6 +286,15 @@ authentication_ok_is_accepted_once_the_server_has_proved_itself_test() ->
     {continue, Done} = minato_auth:step({authentication_sasl_final, ServerFinal}, Check),
     ?assertEqual(authenticated, minato_auth:step(authentication_ok, Done)).
 
+only_a_finished_exchange_has_a_server_that_proved_itself_test() ->
+    {send, {sasl_initial_response, _Mechanism, _Data}, Started} = offer([~"SCRAM-SHA-256"]),
+    {Check, ServerFinal} = exchange_to_final(),
+    {continue, Done} = minato_auth:step({authentication_sasl_final, ServerFinal}, Check),
+    ?assertEqual(
+        [false, false, true],
+        [minato_auth:proven(State) || State <- [Started, Check, Done]]
+    ).
+
 a_cleartext_demand_part_way_through_a_scram_exchange_is_refused_test() ->
     {send, {sasl_initial_response, _Mechanism, _Data}, Started} = offer([~"SCRAM-SHA-256"]),
     ?assertError(

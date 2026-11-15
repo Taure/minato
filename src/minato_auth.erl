@@ -97,7 +97,7 @@ place, could ask for something that cannot be bound instead. That is what
 `channel_binding=require` means in libpq as well.
 """.
 
--export([init/1, step/2]).
+-export([init/1, step/2, proven/1]).
 
 -define(SCRAM_SHA_256, ~"SCRAM-SHA-256").
 -define(SCRAM_SHA_256_PLUS, ~"SCRAM-SHA-256-PLUS").
@@ -182,6 +182,16 @@ init(#{user := User} = Credentials) ->
         scram_opts = maps:get(scram, Credentials, #{}),
         sasl = none
     }.
+
+-doc """
+Whether the server has proved, in a SCRAM exchange, that it knows the password.
+
+`false` before the exchange, during it, and for every other method, none of
+which has the server prove anything.
+""".
+-spec proven(state()) -> boolean().
+proven(#state{sasl = verified}) -> true;
+proven(#state{}) -> false.
 
 -doc """
 Answer one `Authentication*` message.
