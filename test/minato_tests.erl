@@ -11,7 +11,7 @@ server sees the `Terminate`.
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([served/1, commit_rolled_back/1, silent/1]).
+-export([served/1, commit_rolled_back/1, silent/1, deaf_to_sync/1]).
 
 -define(POOL, minato_tests_pool).
 -define(LISTENER, minato_tests_listener).
@@ -81,6 +81,16 @@ a_statement_raised_over_its_values_keeps_its_connection_test_() ->
         ),
         ?assertMatch({ok, _Result}, minato:query(?POOL, ~"SELECT 1", [])),
         ?assertNot(closed(Server))
+    end).
+
+a_statement_raised_over_its_values_on_a_connection_it_lost_gives_it_up_test_() ->
+    pooled(script({?MODULE, deaf_to_sync}), fun(Server) ->
+        ?assertError(
+            {minato_codec, #{reason := _}},
+            minato:query(?POOL, ~"SELECT $1", [~"not a number"], #{timeout => 200})
+        ),
+        ?assertMatch(#{disconnects := 1, idle := 0}, minato:stats(?POOL)),
+        ?assert(closed(Server))
     end).
 
 a_pool_that_is_not_there_is_asked_nothing_test_() ->
@@ -309,6 +319,14 @@ commit_rolled_back({query, ~"COMMIT"}) -> [{command_complete, ~"ROLLBACK"}, ?IDL
 commit_rolled_back(flush) -> [?REFUSED];
 commit_rolled_back(sync) -> [?IDLE];
 commit_rolled_back(Message) -> served(Message).
+
+%% A server that takes one number and never says the exchange is over.
+deaf_to_sync(flush) ->
+    [parse_complete, {parameter_description, [?INT4]}, {row_description, [column(?INT4)]}];
+deaf_to_sync(sync) ->
+    [];
+deaf_to_sync(Message) ->
+    served(Message).
 
 %% A server that answers the pool and nobody else.
 silent({query, _Sql} = Query) -> served(Query);
