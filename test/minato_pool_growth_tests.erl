@@ -151,7 +151,7 @@ startups(Read) ->
 borrower() ->
     Test = self(),
     spawn_link(fun() ->
-        Answer = minato_pool:checkout(?POOL, 1000),
+        Answer = minato_pool:checkout(?POOL, 800),
         Test ! {borrowed, self(), Answer},
         receive
             return -> gave_back(Answer)
@@ -165,14 +165,14 @@ gave_back({error, _Reason}) -> ok.
 borrowed(Borrower) ->
     receive
         {borrowed, Borrower, Answer} -> Answer
-    after 3000 -> error(never_answered)
+    after 1000 -> error(never_answered)
     end.
 
 returned(Borrower) ->
     Borrower ! return,
     receive
         {returned, Borrower} -> ok
-    after 3000 -> error(never_returned)
+    after 1000 -> error(never_returned)
     end.
 
 pooled(Server, Sizes) ->
