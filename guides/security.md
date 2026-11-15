@@ -251,6 +251,12 @@ each of those prints `#Fun<...>` where the secret would be. Pools, listeners
 and connections hold them the same way. The application environment itself
 still holds what `sys.config` gave it.
 
+What `ssl` is handed it is handed as given, and what `ssl` reports is its own.
+On OTP 28 the supervisor of each TLS connection prints the options the
+connection was started with in its progress report, so a node logging at
+`debug` writes an `srp_identity` given in `ssl_options` there. OTP 29 does not
+print them.
+
 This is hygiene for logs and reports, not a security boundary. Anyone who can
 run code on the node, from a remote shell or otherwise, can still read the
 secrets: with `erlang:fun_info/2` on the fun, `sys:get_state/1` on a pool,

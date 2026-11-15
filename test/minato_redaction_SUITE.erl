@@ -265,7 +265,21 @@ drained(Logged) ->
     end.
 
 leaking(Logged) ->
-    [Event || Event <- Logged, holds(Event) orelse holds(formatted(Event))].
+    [
+        Event
+     || Event <- Logged, not from_tls(Event), holds(Event) orelse holds(formatted(Event))
+    ].
+
+%% What `ssl` reports about a connection it was asked for is not minato's to
+%% keep quiet. On OTP 28 the supervisor of a TLS connection prints the options
+%% the connection was started with, an `srp_identity` among them.
+from_tls(#{msg := {report, #{label := {supervisor, progress}, report := Report}}}) ->
+    case lists:keyfind(supervisor, 1, Report) of
+        {supervisor, {_Pid, tls_dyn_connection_sup}} -> true;
+        _Other -> false
+    end;
+from_tls(_Event) ->
+    false.
 
 formatted(Event) ->
     logger_formatter:format(Event, #{single_line => true, max_size => unlimited, depth => unlimited}).
