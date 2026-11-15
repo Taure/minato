@@ -437,24 +437,30 @@ failures(Fun) ->
 
 %% What this pool warned of while `Fun` ran. A run that was killed in here
 %% never took its handler away, and the name would be taken.
+%%
+%% Every capture has a reference of its own. The pool is still failing when
+%% one ends, so it can warn once more before the handler is gone, and the
+%% tests of a module share a process: without the reference that warning was
+%% the first thing the next test heard.
 warnings(Fun) ->
     Handler = minato_pool_limit_tests_capture,
+    Capture = make_ref(),
     _ = logger:remove_handler(Handler),
-    ok = logger:add_handler(Handler, ?MODULE, #{config => self()}),
+    ok = logger:add_handler(Handler, ?MODULE, #{config => {self(), Capture}}),
     try
         _ = Fun(),
-        heard()
+        heard(Capture)
     after
         logger:remove_handler(Handler)
     end.
 
-log(#{level := warning, msg := {report, #{pool := ?POOL} = Report}}, #{config := Test}) ->
-    Test ! {warned, Report};
+log(#{level := warning, msg := {report, #{pool := ?POOL} = Report}}, #{config := {Test, Capture}}) ->
+    Test ! {warned, Capture, Report};
 log(_Event, _Config) ->
     ok.
 
-heard() ->
+heard(Capture) ->
     receive
-        {warned, Report} -> [Report | heard()]
+        {warned, Capture, Report} -> [Report | heard(Capture)]
     after 100 -> []
     end.
