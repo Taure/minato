@@ -58,6 +58,12 @@ numbering, so decoding such a text value raises rather than guess.
 -define(INT32_MIN, -2147483648).
 -define(INT64_MAX, 9223372036854775807).
 -define(INT64_MIN, -9223372036854775808).
+-define(LONGEST_DATE, 32).
+-define(LONGEST_TIME, 32).
+-define(LONGEST_TIMESTAMP, 64).
+-define(DATE_YEAR_DIGITS, 7).
+-define(TIMESTAMP_YEAR_DIGITS, 6).
+-define(FIELD_DIGITS, 2).
 
 -doc "Encode a temporal value to `Format` wire bytes.".
 -spec encode(
@@ -112,7 +118,7 @@ decode(date, ~"infinity", text, _Opts) ->
 decode(date, ~"-infinity", text, _Opts) ->
     neg_infinity;
 decode(date, Bin, text, _Opts) ->
-    parse_date(Bin);
+    parse_date(Bin, ?DATE_YEAR_DIGITS);
 decode(time, <<Micros:64/signed>>, binary, Opts) ->
     day_micros_out(Micros, Opts);
 decode(time, Bin, text, Opts) ->
@@ -328,35 +334,51 @@ pad(N, Width) ->
         _ -> Bin
     end.
 
--spec parse_date(binary()) -> {integer(), integer(), integer()}.
-parse_date(Bin) ->
+%% The text is split on its separators, which makes a list as long as there
+%% are separators, and each field is read as an integer, which costs more than
+%% its length. So the whole is held to more than a server writes before it is
+%% split, and each field to the digits it has: seven for the year of the last
+%% `date`, six for the year of the last `timestamp`, and two for the rest.
+-spec parse_date(binary(), pos_integer()) -> {integer(), integer(), integer()}.
+parse_date(Bin, YearDigits) when byte_size(Bin) =< ?LONGEST_DATE ->
     reject_bc(date, Bin),
     case binary:split(Bin, ~"-", [global]) of
         [Y, M, D] ->
-            {Year, Month, Day} = {to_integer(date, Y), to_integer(date, M), to_integer(date, D)},
+            {Year, Month, Day} = {
+                to_integer(date, Y, YearDigits),
+                to_integer(date, M, ?FIELD_DIGITS),
+                to_integer(date, D, ?FIELD_DIGITS)
+            },
             valid_date(Year, Month, Day),
             {Year, Month, Day};
         _ ->
             minato_codec:bad(date, malformed_text, Bin)
-    end.
+    end;
+parse_date(Bin, _YearDigits) ->
+    minato_codec:bad(date, malformed_text, Bin).
 
 -spec parse_time(binary()) -> integer().
-parse_time(Bin) ->
+parse_time(Bin) when byte_size(Bin) =< ?LONGEST_TIME ->
     case binary:split(Bin, ~":", [global]) of
         [H, Mi, S] ->
             {Sec, Frac} = split_seconds(time, S),
-            to_integer(time, H) * 3600000000 + to_integer(time, Mi) * 60000000 + Sec * 1000000 +
+            to_integer(time, H, ?FIELD_DIGITS) * 3600000000 +
+                to_integer(time, Mi, ?FIELD_DIGITS) * 60000000 + Sec * 1000000 +
                 Frac;
         _ ->
             minato_codec:bad(time, malformed_text, Bin)
-    end.
+    end;
+parse_time(Bin) ->
+    minato_codec:bad(time, malformed_text, Bin).
 
 -spec parse_timestamp(timestamp | timestamptz, binary()) -> integer().
+parse_timestamp(Type, Bin) when byte_size(Bin) > ?LONGEST_TIMESTAMP ->
+    minato_codec:bad(Type, malformed_text, Bin);
 parse_timestamp(Type, Bin) ->
     reject_bc(Type, Bin),
     case binary:split(Bin, ~" ") of
         [DatePart, TimePart] ->
-            {Y, M, D} = parse_date(DatePart),
+            {Y, M, D} = parse_date(DatePart, ?TIMESTAMP_YEAR_DIGITS),
             {Clock, OffsetSecs} = split_offset(Type, TimePart),
             days_from_civil(Y, M, D) * ?DAY_MICROS + parse_time(Clock) -
                 OffsetSecs * 1000000;
@@ -379,7 +401,10 @@ split_offset(timestamptz, TimePart) ->
 
 -spec parse_offset(binary()) -> integer().
 parse_offset(<<Sign, Rest/binary>>) ->
-    Fields = [to_integer(timestamptz, F) || F <- binary:split(Rest, ~":", [global])],
+    Fields = [
+        to_integer(timestamptz, F, ?FIELD_DIGITS)
+     || F <- binary:split(Rest, ~":", [global])
+    ],
     Secs = offset_seconds(Fields, Rest),
     case Sign of
         $- -> -Secs;
@@ -396,10 +421,10 @@ offset_seconds(_Fields, Raw) -> minato_codec:bad(timestamptz, malformed_offset, 
 split_seconds(Type, Bin) ->
     case binary:split(Bin, ~".") of
         [Sec] ->
-            {to_integer(Type, Sec), 0};
+            {to_integer(Type, Sec, ?FIELD_DIGITS), 0};
         [Sec, Frac] when byte_size(Frac) =< 6, Frac =/= ~"" ->
-            Scaled = to_integer(Type, Frac) * pow10(6 - byte_size(Frac)),
-            {to_integer(Type, Sec), Scaled};
+            Scaled = to_integer(Type, Frac, 6) * pow10(6 - byte_size(Frac)),
+            {to_integer(Type, Sec, ?FIELD_DIGITS), Scaled};
         _ ->
             minato_codec:bad(Type, malformed_text, Bin)
     end.
@@ -415,10 +440,12 @@ reject_bc(Type, Bin) ->
         _ -> minato_codec:bad(Type, bc_dates_unsupported, Bin)
     end.
 
--spec to_integer(atom(), binary()) -> integer().
-to_integer(Type, Bin) ->
+-spec to_integer(atom(), binary(), pos_integer()) -> integer().
+to_integer(Type, Bin, Digits) when byte_size(Bin) =< Digits ->
     try
         binary_to_integer(Bin)
     catch
         error:badarg -> minato_codec:bad(Type, malformed_text, Bin)
-    end.
+    end;
+to_integer(Type, Bin, _Digits) ->
+    minato_codec:bad(Type, malformed_text, Bin).

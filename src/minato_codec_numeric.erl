@@ -154,10 +154,14 @@ decode_text(~"inf") -> infinity;
 decode_text(~"-inf") -> neg_infinity;
 decode_text(Bin) -> valid_decimal(Bin).
 
+%% A sign, every digit there can be before the point, the point and every
+%% digit after it is the longest a server writes.
 -spec valid_decimal(binary()) -> binary().
-valid_decimal(Bin) ->
+valid_decimal(Bin) when byte_size(Bin) =< ?MAX_INTEGER_DIGITS + ?MAX_SCALE + 2 ->
     _ = parse(Bin),
-    Bin.
+    Bin;
+valid_decimal(Bin) ->
+    minato_codec:bad(numeric, out_of_range, Bin).
 
 -spec header(non_neg_integer(), integer(), non_neg_integer(), non_neg_integer()) -> binary().
 header(NDigits, Weight, Sign, DScale) ->

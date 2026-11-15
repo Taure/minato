@@ -17,6 +17,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   for `numeric_format => float` raises a codec failure instead of `badarg`.
 - An array with more than six dimensions, a negative dimension, or more
   elements declared than its bytes could hold is refused on decode.
+- An `int2`, `int4` or `int8` that arrives as text and does not fit its type
+  raises `{minato_codec, #{reason := out_of_range}}` instead of coming back as
+  a larger integer, and so does a `numeric` longer than PostgreSQL writes one.
+  A float, a date, a time or a timestamp in text longer than a server writes
+  raises `malformed_text`. A value a PostgreSQL server sent decodes as before.
 - `command` in a result is an atom for every tag PostgreSQL has, as before,
   and the binary the server sent for a word that is not one of them. No atom
   is made from bytes off the socket any more.

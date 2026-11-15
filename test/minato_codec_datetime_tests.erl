@@ -616,6 +616,56 @@ an_offset_is_taken_off_to_the_second_test_() ->
         )
     ].
 
+%% The longest text a server writes for each, and what is longer than that in
+%% one field or as a whole. A field is read as an integer, and that costs more
+%% than its length; the whole is split on its separators, and that makes a
+%% list as long as there are separators.
+the_longest_date_and_time_a_server_writes_is_read_test_() ->
+    Micros = #{datetime_format => microseconds},
+    [
+        ?_assertEqual({5874897, 12, 31}, minato_codec:decode(1082, ~"5874897-12-31", text)),
+        ?_assertEqual(86399999999, minato_codec:decode(1083, ~"23:59:59.999999", text, Micros)),
+        ?_assertEqual(
+            {{294276, 12, 31}, {23, 59, 59}},
+            minato_codec:decode(1114, ~"294276-12-31 23:59:59", text)
+        ),
+        ?_assertEqual(
+            minato_codec:decode(1184, ~"2024-01-15 00:00:00+00", text, Micros) - 57599000000,
+            minato_codec:decode(1184, ~"2024-01-15 00:00:00.000000+15:59:59", text, Micros)
+        )
+    ].
+
+a_date_or_a_time_longer_than_a_server_writes_is_not_read_test_() ->
+    [
+        {
+            lists:flatten(
+                io_lib:format("~p ~s", [Oid, binary:part(Text, 0, min(40, byte_size(Text)))])
+            ),
+            ?_assertError(
+                {minato_codec, #{reason := malformed_text}}, minato_codec:decode(Oid, Text, text)
+            )
+        }
+     || {Oid, Text} <- [
+            {1082, ~"58748970-12-31"},
+            {1082, ~"2024-001-15"},
+            {1082, ~"2024-01-015"},
+            {1082, <<(binary:copy(~"9", 100000))/binary, "-01-15">>},
+            {1082, binary:copy(~"-", 100000)},
+            {1083, ~"012:00:00"},
+            {1083, ~"12:000:00"},
+            {1083, ~"12:00:000"},
+            {1083, <<(binary:copy(~"1", 100000))/binary, ":00:00">>},
+            {1083, binary:copy(~":", 100000)},
+            {1114, ~"2942760-12-31 23:59:59"},
+            {1114, ~"2024-01-15 012:00:00"},
+            {1114, <<"2024-01-15 ", (binary:copy(~"1", 100000))/binary, ":00:00">>},
+            {1184, ~"2024-01-15 00:00:00+015"},
+            {1184, ~"2024-01-15 00:00:00+15:059"},
+            {1184, <<"2024-01-15 00:00:00+", (binary:copy(~"1", 100000))/binary>>},
+            {1184, <<"2024-01-15 00:00:00+", (binary:copy(~":", 100000))/binary>>}
+        ]
+    ].
+
 what_is_not_a_date_or_a_time_is_refused_by_name_test_() ->
     [
         ?_assertError({minato_codec, #{reason := not_a_date}}, enc(1082, ~"2024-01-15", text)),

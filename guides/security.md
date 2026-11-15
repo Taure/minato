@@ -157,7 +157,11 @@ that was chosen. For each of these there is a test with a server that tries.
   PostgreSQL stores, 131072 digits before the point and 16383 after, whatever
   its header claims, and decodes in time linear in its length. An array has at
   most six dimensions and no more elements than the bytes that arrived could
-  hold, so its header cannot ask for a list longer than the message.
+  hold, so its header cannot ask for a list longer than the message. A number,
+  a date or a time sent as text is read no further than the longest one a
+  server writes for that type, and an integer has to fit the column it came
+  in: more digits than that is a codec failure, not time spent reading them,
+  and the connection is ready for the next statement.
 - **Make atoms.** A command tag is read against the words PostgreSQL uses. One
   it does not use comes back as a binary: `command` and `num_rows` in a result
   are atoms and integers for every statement there is, and binaries for one a

@@ -131,6 +131,40 @@ column(Name) ->
     }.
 
 %%----------------------------------------------------------------------
+%% A value longer than its type
+%%----------------------------------------------------------------------
+
+%% A simple query is answered in text, so this is the path a long run of
+%% digits arrives on. Two lengths, because they failed differently: the shorter
+%% was read as an integer no `int4` holds, and the longer is more digits than
+%% the emulator will make an integer of at all.
+a_value_too_long_for_its_column_is_refused_and_the_connection_kept_test_() ->
+    [
+        {timeout, 60,
+            {integer_to_list(Digits) ++ " digits", fun() ->
+                Next = [{command_complete, ~"SELECT 0"}, {ready_for_query, idle}],
+                {Server, {ok, Conn}} = connects([?READY, overlong(Digits), Next], #{}),
+                ?assertError(
+                    {minato_codec, #{type := int4, reason := out_of_range}},
+                    minato_query:simple(Conn, ~"q")
+                ),
+                Answer = minato_query:simple(Conn, ~"q"),
+                ok = minato_conn:close(Conn),
+                minato_backend_server:stop(Server),
+                ?assertMatch({ok, [#{command := select, num_rows := 0}], _Read}, Answer)
+            end}}
+     || Digits <- [100000, 2200000]
+    ].
+
+overlong(Digits) ->
+    [
+        {row_description, [(column(~"id"))#{type_oid => 23, type_size => 4}]},
+        {data_row, [binary:copy(~"7", Digits)]},
+        {command_complete, ~"SELECT 1"},
+        {ready_for_query, idle}
+    ].
+
+%%----------------------------------------------------------------------
 %% An opening exchange that does not end
 %%----------------------------------------------------------------------
 

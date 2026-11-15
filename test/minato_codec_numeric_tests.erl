@@ -233,6 +233,26 @@ a_header_no_server_writes_is_refused_test_() ->
         )
     ].
 
+%% The longest text a server writes is a sign, every digit it stores before
+%% the point, the point and every digit after it.
+a_numeric_in_text_is_no_longer_than_a_server_writes_one_test_() ->
+    Longest = <<
+        $-, (binary:copy(~"9", 131072))/binary, $., (binary:copy(~"9", 16383))/binary
+    >>,
+    [
+        ?_assertEqual(Longest, minato_codec:decode(?NUMERIC, Longest, text)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}},
+            minato_codec:decode(?NUMERIC, <<Longest/binary, $9>>, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, binary:copy(~"9", 1000000), text, #{numeric_format => float}
+            )
+        )
+    ].
+
 the_widest_header_decodes_to_a_bounded_value_test() ->
     Wire = <<1:16, 32767:16/signed, 16#4000:16, 16383:16, 9999:16>>,
     Decoded = minato_codec:decode(?NUMERIC, Wire, binary),
