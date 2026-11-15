@@ -6,7 +6,7 @@ real server can be made to do without a superuser.
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([unreadable/1]).
+-export([unreadable/1, kept/1]).
 
 -define(POOL, minato_pool_reset_tests).
 
@@ -109,6 +109,31 @@ a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slo
             minato_backend_server:stop(Server)
         end
     end}.
+
+%% The reset is given as long as one read of the connection and no longer. That
+%% time is the reset's own, and a borrower who reads the connection by hand has
+%% not been given what was left of it.
+a_borrowed_connection_is_not_held_to_the_time_its_reset_was_given_test_() ->
+    {timeout, 30, fun() ->
+        ok = ready(),
+        Server = minato_backend_server:start([?READY | lists:duplicate(3, {reply, {?MODULE, kept}})]),
+        Connection = maps:put(timeout, 300, connection(Server)),
+        {ok, _Pid} = minato_owned:pool(?POOL, #{
+            size => 1, min_size => 1, connection => Connection
+        }),
+        try
+            {ok, Conn} = minato_pool:checkout(?POOL, 1000),
+            timer:sleep(400),
+            ok = minato_conn:send(Conn, {query, ~"SELECT 1"}),
+            ?assertMatch({ok, {command_complete, _Tag}, _Read}, minato_conn:next(Conn, 1000))
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+kept({query, ~"SELECT 1"}) -> ?NOT_THE_RESET;
+kept(Asked) -> minato_pool_growth_tests:answered(Asked).
 
 script(Reply) ->
     [?READY | lists:duplicate(4, {reply, Reply})].

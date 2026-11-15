@@ -58,7 +58,7 @@ a_pool_outlives_whatever_answers_its_question_test_() ->
                     size => 1, min_size => 1, connection => Connection
                 }),
                 try
-                    ok = asked_for_the_limit(Server, 50),
+                    ok = asked_for_the_limit(Server, 10),
                     timer:sleep(300),
                     ?assertEqual(Pool, whereis(?POOL)),
                     ?assertMatch(#{size := 1}, minato:stats(?POOL))
@@ -90,7 +90,7 @@ a_pool_still_answers_while_its_question_goes_unanswered_test_() ->
             size => 1, min_size => 1, connection => Connection
         }),
         try
-            ok = asked_for_the_limit(Server, 50),
+            ok = asked_for_the_limit(Server, 10),
             {Microseconds, Stats} = timer:tc(fun() -> minato:stats(?POOL) end),
             ?assertMatch(#{size := 1, idle := 0}, Stats),
             ?assert(Microseconds < 1000000)
@@ -296,6 +296,32 @@ a_pool_that_cannot_connect_waits_a_time_of_its_own_test_() ->
         end
     end}.
 
+%% A pool below its floor opens what is missing at once, so the first refusal
+%% starts the wait and the others arrive during it.
+a_connect_that_fails_during_the_wait_is_warned_of_as_well_test_() ->
+    {timeout, 30, fun() ->
+        Refused =
+            {error_response, #{
+                severity => ~"FATAL",
+                code => ~"57P03",
+                message => ~"the database system is starting up"
+            }},
+        Server = minato_backend_server:start([[Refused]]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 5, min_size => 5}),
+                Read = read(Server, fun(Seen) -> startups(Seen) >= 5 end),
+                ?assert(startups(Read) >= 5)
+            end),
+            Waits = [Wait || #{retry_in_ms := Wait} <- Failed],
+            ?assert(length(Waits) >= 5, Waits),
+            ?assertEqual([], [Wait || Wait <- Waits, not (is_integer(Wait) andalso Wait >= 0)])
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
 %%----------------------------------------------------------------------
 %% A pool that would send everything in the clear
 %%----------------------------------------------------------------------
@@ -410,7 +436,7 @@ opts(Port, Opts) ->
 %% Everything the server has read, once that is enough or it has been asked
 %% often enough. The server hands over what it read only once, so it is kept.
 read(Server, Enough) ->
-    read(Server, Enough, 25, []).
+    read(Server, Enough, 10, []).
 
 read(Server, Enough, Tries, Before) ->
     Read = Before ++ minato_backend_server:received(Server),
