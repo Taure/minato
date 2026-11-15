@@ -27,21 +27,25 @@ a_limit_is_read_from_a_short_run_of_digits_and_nothing_else_test_() ->
     [
         ?_assertEqual(Expected, minato_pool:limit(Results))
      || {Expected, Results} <- [
-            {100, [#{rows => [{~"100"}]}]},
-            {0, [#{rows => [{~"0"}]}]},
-            {1234567890, [#{rows => [{~"1234567890"}]}]},
-            {unknown, [#{rows => [{~"plenty"}]}]},
-            {unknown, [#{rows => [{~"100 or so"}]}]},
-            {unknown, [#{rows => [{~"-1"}]}]},
-            {unknown, [#{rows => [{~""}]}]},
-            {unknown, [#{rows => [{binary:copy(~"9", 11)}]}]},
-            {unknown, [#{rows => [{null}]}]},
-            {unknown, [#{rows => [{~"100"}, {~"200"}]}]},
-            {unknown, [#{rows => [{~"100", ~"200"}]}]},
-            {unknown, [#{rows => []}]},
+            {100, [answered([{~"100"}])]},
+            {0, [answered([{~"0"}])]},
+            {1234567890, [answered([{~"1234567890"}])]},
+            {unknown, [answered([{~"plenty"}])]},
+            {unknown, [answered([{~"100 or so"}])]},
+            {unknown, [answered([{~"-1"}])]},
+            {unknown, [answered([{~""}])]},
+            {unknown, [answered([{binary:copy(~"9", 11)}])]},
+            {unknown, [answered([{null}])]},
+            {unknown, [answered([{~"100"}, {~"200"}])]},
+            {unknown, [answered([{~"100", ~"200"}])]},
+            {unknown, [answered([])]},
             {unknown, []}
         ]
     ].
+
+-spec answered([minato_protocol:row()]) -> minato_protocol:result().
+answered(Rows) ->
+    #{command => show, num_rows => length(Rows), rows => Rows}.
 
 a_pool_outlives_whatever_answers_its_question_test_() ->
     [

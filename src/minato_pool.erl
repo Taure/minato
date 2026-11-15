@@ -1111,7 +1111,7 @@ told(Pool, Limit) ->
 %% Exported for its tests. Anything but a short run of digits is `unknown`: the
 %% text is the server's, and a long one is an integer worth megabytes.
 -doc false.
--spec limit(dynamic()) -> non_neg_integer() | unknown.
+-spec limit([minato_protocol:result()]) -> non_neg_integer() | unknown.
 limit([#{rows := [{Text}]}]) when is_binary(Text), byte_size(Text) =< ?LONGEST_LIMIT ->
     case string:to_integer(Text) of
         {Limit, ~""} when is_integer(Limit), Limit >= 0 -> Limit;
