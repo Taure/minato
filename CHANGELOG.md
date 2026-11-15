@@ -46,16 +46,32 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   `time` given as microseconds outside one day raises `time_out_of_range`.
 - A parameter that will not encode raises with `value => redacted` where the
   value was. `{minato, [{log_values, true}]}` puts it back.
+- A null byte in a statement's text, or in the name of a statement or a
+  portal, raises `{minato_protocol, #{reason := null_byte}}` before anything
+  is sent, where it was sent as it was.
 
 **Connecting**
 
 - `user`, `database` or a `parameters` entry holding a null byte makes
   `minato_conn:connect/1` raise before it opens a socket.
 - `channel_binding => require` authenticates with `SCRAM-SHA-256-PLUS` or not
-  at all: cleartext, MD5, a server asking for no password and SCRAM without
-  `-PLUS` are refused with `{error, {channel_binding_required, Method}}`.
+  at all: cleartext, MD5, a server asking for no password, SCRAM without
+  `-PLUS` and SCRAM on a connection without TLS are all refused with
+  `{error, {channel_binding_required, Method}}`.
+- `channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
+  before a socket opens. A value minato does not know, such as a misspelt
+  `channel_binding`, a `verify` that is neither `verify_peer` nor
+  `verify_none`, or `{handshake, hello}`, makes `minato_conn:connect/1` raise
+  `{minato_conn, #{reason := {invalid_option, Key}}}`, and a pool or a listener
+  does not start: `{error, {invalid_option, Key}}`. A misspelt
+  `channel_binding` used to be read as `prefer`.
 - `{server_name_indication, disable}` in `ssl_options` no longer turns the
-  hostname check off with it. `{verify, verify_none}` is how to say that.
+  hostname check off with it. `{verify, verify_none}` is how to say that. The
+  certificate is checked for `host` once the handshake is over, and one that
+  does not carry it is `{error, {tls, {bad_cert, hostname_check_failed}}}`.
+- A pool started without `ssl` for a host that is not this machine logs one
+  warning, `unencrypted_connection`. `ssl => false` written out says it was
+  meant and logs nothing.
 - The exchange from the startup message to `ReadyForQuery` has to finish
   within `timeout` as a whole, and `connect_timeout` covers the TCP connect,
   the TLS request and the handshake together.
@@ -95,6 +111,15 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   never inside a transaction the refusal has aborted: there the statement is
   dropped and the server's error is returned as it came, where `0A000` used to
   come back as `25P02`.
+- It is run again only when the server refused it before it began, at
+  `Bind`. An error from a statement that had started is returned as it came,
+  whatever its code, because running it again would run it twice.
+- A value that no longer fits a kept statement raises at once inside a
+  transaction, without the server being asked anything in it. Outside one the
+  statement is described again first, as before.
+- `prepared_statements` counts the statements a connection is keeping. It
+  counted every name ever handed out, so a connection that closed its
+  statements still ran out of room.
 - A statement run unnamed because the connection keeps no more keeps the
   caller's `timeout` and is one `[minato, query]` span, where it was two.
 - A notification or a `ParameterStatus` that arrives while a statement is
@@ -106,8 +131,8 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - The `reason` of a failed statement in `[minato, query, stop]` keeps the
   fields of the server's error that name things and drops `message`, `detail`,
   `hint` and the rest, which can quote a value. The caller is still returned
-  all of it. Frames in an event's `stacktrace` carry an arity, not arguments.
-  `log_values` restores both.
+  all of it. Frames in an event's `stacktrace` carry an arity, not arguments,
+  including the frame of a fun. `log_values` restores both.
 - Query events carry `host`, `port`, `database` and, on a pooled connection,
   `pool`.
 
@@ -123,9 +148,24 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   that way is closed.
 - A pool asks the server for `max_connections` from the process that
   connects, so a slow or malformed answer no longer holds or stops the pool.
+  It asks until it has an answer and then not again, whatever the answer was.
+- A pool opens a connection for every caller that is waiting, side by side,
+  up to `size`. It opened one at a time, so a caller could time out below
+  `size` while a connect was in flight. While connects are failing it is still
+  one at a time.
+- A reset answered with bytes that are not a message costs the connection:
+  the checkout tries the next one and answers
+  `{error, {session_reset, {minato_protocol, Reason}}}` if none is left, where
+  it raised in the caller and left the connection counted as borrowed.
+- The wait before a pool or a listener connects again is a random time in the
+  upper half of the backoff, so `retry_in_ms` in `connect_failed` is no longer
+  exactly 100, 200, 400 and so on.
 - A listener whose `LISTEN` or `UNLISTEN` failed on the socket, or that was
   sent bytes that are not a message, reconnects and tells its subscribers
-  instead of stopping.
+  instead of stopping. `minato:listen/2` on a connection lost that way answers
+  `{error, {minato_protocol, Reason}}` or the socket's error.
+- The channel and the payload of a notification are copies, so a subscriber
+  that keeps one keeps nothing else.
 
 **Tested against**
 
@@ -136,6 +176,7 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 ### Features
 
 - *(codec)* Send an array of more than one dimension only as `{array, Rows}`
+- *(pool)* Warn once when a pool would reach another host without TLS
 
 ### Bug Fixes
 
@@ -163,6 +204,19 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(codec)* Name the date field that is wrong, and refuse what the wire cannot hold
 - *(codec)* Write an array of more than one dimension
 - *(overdue)* Keep minato's own names, and the write deadline, whatever is started
+- *(telemetry)* Take the arguments out of a frame that names no module
+- *(pool)* Open a connection for every caller waiting, up to the size
+- *(conn)* Refuse a security option minato does not know before a socket opens
+- *(auth)* Refuse SCRAM that cannot be bound the way every other method is refused
+- *(pool)* Give up a connection whose reset is answered with bytes that are no message
+- *(protocol)* Refuse a null byte in a statement's text or in a statement or portal name
+- *(query)* Run a kept statement again only when it was refused before it began
+- *(conn)* Count the room for statements in statements kept, not in names handed out
+- *(query)* Raise a value that will not encode at once inside an open transaction
+- *(tls)* Check the hostname after the handshake when no server name is sent
+- *(listener)* Send subscribers copies of the channel and the payload
+- *(pool)* Wait a random part of the backoff before connecting again
+- *(pool)* Ask the server for its limit once, whatever it answers
 
 ### Documentation
 
@@ -173,6 +227,8 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(codec)* Say what a string in an array of numbers becomes
 - What a kept statement, a close, an array and a date now do for a caller
 - The write deadline without the application, a bounded close and minato's own names
+- *(security)* The setting for production, and what the defaults leave open
+- What raises and why, what listen/2 can answer, and a command that is a binary
 
 ### Perf
 
