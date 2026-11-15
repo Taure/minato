@@ -131,7 +131,7 @@ the server issued is the whole of the authorisation.
     origin/1,
     pooled/2
 ]).
--export([verified/3, validate/1]).
+-export([verified/3, validate/1, in_the_clear/1]).
 
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
@@ -479,6 +479,41 @@ tls_shaped([]) ->
     true;
 tls_shaped(_NotOptions) ->
     false.
+
+-doc false.
+%% Whether these options send everything unencrypted to another machine without
+%% anybody having said so: `ssl` left out, and a host that is not this one. A
+%% name is not resolved to find out, so only `localhost` is known to be here.
+-spec in_the_clear(opts()) -> {true, inet:socket_address() | inet:hostname()} | false.
+in_the_clear(#{ssl := _Said}) ->
+    false;
+in_the_clear(Opts) ->
+    Host = maps:get(host, Opts, ?DEFAULT_HOST),
+    case here(Host) of
+        true -> false;
+        false -> {true, Host}
+    end.
+
+-spec here(inet:socket_address() | inet:hostname()) -> boolean().
+here({local, _Path}) ->
+    true;
+here({127, _, _, _}) ->
+    true;
+here({0, 0, 0, 0, 0, 0, 0, 1}) ->
+    true;
+here(Address) when is_tuple(Address) ->
+    false;
+here(loopback) ->
+    true;
+here(Name) when is_atom(Name) ->
+    here(atom_to_list(Name));
+here("localhost") ->
+    true;
+here(Name) when is_list(Name) ->
+    case inet:parse_address(Name) of
+        {ok, Address} -> here(Address);
+        {error, _NotAnAddress} -> false
+    end.
 
 -spec known(ok | {error, {invalid_option, atom()}}) -> ok.
 known(ok) -> ok;

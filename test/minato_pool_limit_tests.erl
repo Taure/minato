@@ -215,6 +215,55 @@ an_answer_that_is_not_a_message_costs_the_connection_test_() ->
     end}.
 
 %%----------------------------------------------------------------------
+%% A pool that would send everything in the clear
+%%----------------------------------------------------------------------
+
+a_pool_without_tls_to_another_host_says_so_once_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Host])), fun() ->
+            ?assertEqual(
+                [#{event => unencrypted_connection, pool => ?POOL, host => Host}],
+                unencrypted(#{host => Host})
+            )
+        end}
+     || Host <- [
+            "db.example.invalid", "10.0.0.5", {10, 0, 0, 5}, {8193, 3512, 0, 0, 0, 0, 0, 1}, 'db'
+        ]
+    ].
+
+a_pool_on_this_machine_or_one_that_said_how_says_nothing_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Connection])), fun() ->
+            ?assertEqual([], unencrypted(Connection))
+        end}
+     || Connection <- [
+            #{host => "db.example.invalid", ssl => false},
+            #{host => "db.example.invalid", ssl => true},
+            #{},
+            #{host => "localhost"},
+            #{host => localhost},
+            #{host => loopback},
+            #{host => "127.0.0.1"},
+            #{host => "127.8.9.10"},
+            #{host => {127, 0, 0, 1}},
+            #{host => "::1"},
+            #{host => {0, 0, 0, 0, 0, 0, 0, 1}},
+            #{host => {local, "/var/run/postgresql/.s.PGSQL.5432"}}
+        ]
+    ].
+
+%% Nothing is opened: the floor is zero and nobody asks.
+unencrypted(Connection) ->
+    Warnings = warnings(fun() ->
+        ok = ready(),
+        {ok, _Pool} = minato:start_pool(?POOL, #{
+            size => 1, min_size => 0, connection => Connection#{user => ~"minato"}
+        }),
+        ok = minato:stop_pool(?POOL)
+    end),
+    [Warning || #{event := unencrypted_connection} = Warning <- Warnings].
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 

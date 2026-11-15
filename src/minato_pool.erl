@@ -655,8 +655,21 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
         max_age = MaxAge,
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
+    ok = unencrypted(Name, minato_conn:in_the_clear(Connection)),
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, fill(State)}.
+
+%% Once per start. `ssl => false` written out is a decision and is not second
+%% guessed; `ssl` left out towards another machine is more often an omission.
+-spec unencrypted(name(), {true, inet:socket_address() | inet:hostname()} | false) -> ok.
+unencrypted(Name, {true, Host}) ->
+    _ = ?LOG_WARNING(
+        #{event => unencrypted_connection, pool => Name, host => Host},
+        #{domain => [minato]}
+    ),
+    ok;
+unencrypted(_Name, false) ->
+    ok.
 
 -doc false.
 -spec format_status(gen_server:format_status()) -> gen_server:format_status().
