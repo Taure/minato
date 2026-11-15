@@ -88,6 +88,18 @@ over TLS the password itself, to anything that asks. `auth` is what libpq calls
 A method outside the list is refused with `{error, {auth_method_refused,
 Method}}` before anything is sent in answer to it.
 
+## A setting minato does not know
+
+`channel_binding => required`, or `~"require"` as a configuration file or an
+environment variable would hand it over, is not `require`. Reading it as the
+default would be reading it as the weaker setting, so it is not read at all:
+`channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
+before a socket is opened, `minato_conn:connect/1` raises
+`{minato_conn, #{message := options, reason := {invalid_option, Key}}}`, and a
+pool or a listener does not start. In `ssl_options`, `verify` has to be
+`verify_peer` or `verify_none`, and `{handshake, hello}` is refused because it
+answers with a session that has verified nothing yet.
+
 ## What a server cannot make the client do
 
 The server is not trusted either. It may be compromised, or it may be somebody

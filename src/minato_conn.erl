@@ -131,7 +131,7 @@ the server issued is the whole of the authorisation.
     origin/1,
     pooled/2
 ]).
--export([verified/3]).
+-export([verified/3, validate/1]).
 
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
@@ -397,6 +397,7 @@ connected({error, Reason}) ->
 
 -spec opening(opts()) -> {ok, conn()} | {error, error()}.
 opening(Opts) ->
+    ok = known(validate(Opts)),
     ok = terminator_free(startup_parameters(maps:get(user, Opts), Opts)),
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
@@ -406,6 +407,82 @@ opening(Opts) ->
         {ok, Plain} -> secure(Plain, Host, Deadline, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
+
+-doc """
+Whether the options that decide how a connection is secured say something
+minato knows.
+
+`channel_binding` is `prefer`, `require` or `disable`; `ssl` is a boolean;
+`auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
+`none`; `password` is a binary, a string or a fun that answers one; and
+`ssl_options` is a list of options, in which `verify` is `verify_peer` or
+`verify_none` and the handshake is not paused with `{handshake, hello}`.
+
+Anything else answers `{error, {invalid_option, Key}}` for the first of those
+keys that is wrong, without the value. A value minato did not know used to be
+read as the default, which is the weaker one: `channel_binding => required`, or
+`~"require"` out of a configuration file, was `prefer`.
+
+`connect/1` raises `error({minato_conn, #{message := options, reason :=
+{invalid_option, Key}}})` before it opens a socket, and a pool or a listener
+does not start: `{error, {invalid_option, Key}}`.
+""".
+-spec validate(opts()) -> ok | {error, {invalid_option, atom()}}.
+validate(Opts) ->
+    validate([channel_binding, ssl, auth, ssl_options, password], Opts).
+
+-spec validate([atom()], opts()) -> ok | {error, {invalid_option, atom()}}.
+validate([Key | Rest], Opts) ->
+    case Opts of
+        #{Key := Value} ->
+            case valid(Key, Value) of
+                true -> validate(Rest, Opts);
+                false -> {error, {invalid_option, Key}}
+            end;
+        #{} ->
+            validate(Rest, Opts)
+    end;
+validate([], _Opts) ->
+    ok.
+
+-spec valid(atom(), term()) -> boolean().
+valid(channel_binding, Binding) ->
+    Binding =:= prefer orelse Binding =:= require orelse Binding =:= disable;
+valid(ssl, Wanted) ->
+    is_boolean(Wanted);
+valid(auth, [_ | _] = Methods) ->
+    methods(Methods);
+valid(auth, _NotMethods) ->
+    false;
+valid(ssl_options, Options) ->
+    tls_shaped(minato_secret:revealed(Options));
+valid(password, Password) ->
+    is_binary(Password) orelse is_list(Password) orelse is_function(Password, 0).
+
+-spec methods(term()) -> boolean().
+methods([Method | Rest]) -> lists:member(Method, all_methods()) andalso methods(Rest);
+methods([]) -> true;
+methods(_Improper) -> false.
+
+%% A handshake paused at the server's hello answers with a session that has
+%% verified nothing yet, and nothing here would go on to finish it.
+-spec tls_shaped(term()) -> boolean().
+tls_shaped([{handshake, hello} | _Rest]) ->
+    false;
+tls_shaped([{verify, Verify} | Rest]) ->
+    (Verify =:= verify_peer orelse Verify =:= verify_none) andalso tls_shaped(Rest);
+tls_shaped([{Name, _Value} | Rest]) when is_atom(Name) ->
+    tls_shaped(Rest);
+tls_shaped([Name | Rest]) when is_atom(Name) ->
+    tls_shaped(Rest);
+tls_shaped([]) ->
+    true;
+tls_shaped(_NotOptions) ->
+    false.
+
+-spec known(ok | {error, {invalid_option, atom()}}) -> ok.
+known(ok) -> ok;
+known({error, {invalid_option, Key} = Reason}) -> bad(options, Reason, Key).
 
 -spec reach(
     plain(),

@@ -195,7 +195,11 @@ A `min_size` above `size` is lowered to `size`. `max_idle` and `max_age` must be
 pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `{invalid_disconnected, _}`. A `connection` that is missing, not a map, or has no
 `user` stops it with `invalid_connection`, and options that are not a map with
-`invalid_opts`. None of these reasons carries the options.
+`invalid_opts`. A `connection` whose `channel_binding`, `ssl`, `auth`,
+`ssl_options` or `password` is not something minato knows stops it with
+`{invalid_option, Key}`, as `minato_conn:validate/1` answers, so a pool that
+could not be secured as asked does not start and retry. None of these reasons
+carries the options.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
 prints its child specs: in its progress report when the pool starts, when a
@@ -595,7 +599,8 @@ call(Name, Message, Timeout) ->
     | {invalid_min_size, term()}
     | {invalid_max_idle, term()}
     | {invalid_max_age, term()}
-    | {invalid_disconnected, term()}.
+    | {invalid_disconnected, term()}
+    | {invalid_option, atom()}.
 
 -type settings() :: {pos_integer(), non_neg_integer(), timeout(), timeout(), fail | wait}.
 
@@ -603,9 +608,10 @@ call(Name, Message, Timeout) ->
 %% carries the options themselves: they hold the password.
 -spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, refused()}.
 init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
-    case checked(Opts) of
-        {ok, Settings} -> started(Name, Connection, Settings);
-        {refused, Reason} -> {stop, Reason}
+    case {checked(Opts), minato_conn:validate(Connection)} of
+        {{ok, Settings}, ok} -> started(Name, Connection, Settings);
+        {{refused, Reason}, _Connection} -> {stop, Reason};
+        {_Settings, {error, Reason}} -> {stop, Reason}
     end;
 init({_Name, Opts}) when is_map(Opts) ->
     {stop, invalid_connection};

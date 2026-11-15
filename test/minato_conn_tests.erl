@@ -29,6 +29,91 @@ messages the server received and require the password not to be among them.
     {ready_for_query, idle}
 ]).
 
+an_option_that_decides_how_a_connection_is_secured_is_checked_before_a_socket_opens_test_() ->
+    {setup, fun() -> gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]) end,
+        fun({ok, Listen}) -> gen_tcp:close(Listen) end, fun({ok, Listen}) ->
+            {ok, Port} = inet:port(Listen),
+            [
+                {lists:flatten(io_lib:format("~p as ~p", [Key, Value])), fun() ->
+                    ?assertError(
+                        {minato_conn, #{
+                            message := options, reason := {invalid_option, Key}, data := Key
+                        }},
+                        minato_conn:connect(asking(Port, #{Key => Value}))
+                    ),
+                    ?assertEqual({error, timeout}, gen_tcp:accept(Listen, 0))
+                end}
+             || {Key, Value} <- unknown_options()
+            ]
+        end}.
+
+%% Options the type may forbid, because what is checked is that they are
+%% refused at run time too.
+-spec asking(inet:port_number(), #{atom() => term()}) -> dynamic().
+asking(Port, Options) ->
+    maps:merge(opts(Port, #{}), Options).
+
+%% A list that does not end in one, which a list's type cannot say.
+-spec ending_in(term(), dynamic()) -> dynamic().
+ending_in(Head, Tail) ->
+    [Head | Tail].
+
+unknown_options() ->
+    [
+        {channel_binding, required},
+        {channel_binding, ~"require"},
+        {channel_binding, "require"},
+        {channel_binding, true},
+        {ssl, yes},
+        {ssl, ~"true"},
+        {ssl, verify_peer},
+        {auth, scram_sha_256},
+        {auth, []},
+        {auth, [scram]},
+        {auth, [scram_sha_256, ~"md5"]},
+        {auth, ending_in(scram_sha_256, md5)},
+        {ssl_options, #{verify => verify_peer}},
+        {ssl_options, [{verify, verify_pear}]},
+        {ssl_options, [{verify, true}]},
+        {ssl_options, [{handshake, hello}]},
+        {ssl_options, [~"verify"]},
+        {ssl_options, ending_in({verify, verify_peer}, cacerts)},
+        {password, 42},
+        {password, undefined}
+    ].
+
+every_value_an_option_can_have_is_accepted_test_() ->
+    [
+        ?_assertEqual(ok, minato_conn:validate(asking(5432, #{Key => Value})))
+     || {Key, Value} <- [
+            {channel_binding, prefer},
+            {channel_binding, require},
+            {channel_binding, disable},
+            {ssl, true},
+            {ssl, false},
+            {auth, [scram_sha_256]},
+            {auth, [scram_sha_256, md5, cleartext, none]},
+            {ssl_options, []},
+            {ssl_options, [{verify, verify_none}]},
+            {ssl_options, [{verify, verify_peer}, {cacertfile, "ca.pem"}, {handshake, full}]},
+            {ssl_options, fun() -> [{verify, verify_peer}] end},
+            {password, ~"secret"},
+            {password, "secret"},
+            {password, fun() -> ~"secret" end},
+            {host, "db"}
+        ]
+    ] ++ [?_assertEqual(ok, minato_conn:validate(#{user => ~"minato"}))].
+
+the_first_option_that_is_wrong_is_the_one_named_test() ->
+    ?assertEqual(
+        {error, {invalid_option, channel_binding}},
+        minato_conn:validate(asking(5432, #{channel_binding => required, ssl => yes}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, ssl_options}},
+        minato_conn:validate(asking(5432, #{ssl_options => secure, password => 42}))
+    ).
+
 startup_carries_the_configured_parameters_test() ->
     {Server, {ok, Conn}} = connects([?READY], #{
         database => ~"minato_test", parameters => #{~"application_name" => ~"tests"}

@@ -104,6 +104,40 @@ zero_and_infinity_timeouts_are_accepted_test() ->
     {ok, _Pid2} = minato:start_pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
     ok = minato:stop_pool(?POOL).
 
+a_pool_whose_connection_could_not_be_secured_as_asked_does_not_start_test_() ->
+    [
+        ?_assertEqual(
+            {error, {invalid_option, Key}},
+            linked(#{size => 2, connection => asking(Key, Value)})
+        )
+     || {Key, Value} <- [
+            {channel_binding, required},
+            {ssl, yes},
+            {auth, [scram]},
+            {ssl_options, [{verify, verify_pear}]},
+            {password, 42}
+        ]
+    ].
+
+a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() ->
+    ok = ready(),
+    ?assertEqual(
+        {error, {invalid_option, channel_binding}},
+        minato:start_listener(minato_pool_opts_tests_listener, #{
+            connection => asking(channel_binding, required)
+        })
+    ),
+    ?assertEqual(
+        {error, {invalid_option, auth}},
+        minato:start_pool(?POOL, #{connection => asking(auth, md5)})
+    ).
+
+%% A connection that asks for something the type forbids, because what is
+%% checked is that it is refused at run time too.
+-spec asking(atom(), term()) -> dynamic().
+asking(Key, Value) ->
+    (connection())#{Key => Value}.
+
 linked(Opts) ->
     Trapping = process_flag(trap_exit, true),
     try

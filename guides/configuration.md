@@ -27,6 +27,15 @@ directly.
 | `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
 | `frame_opts` | `#{max_message_length => 67108864}` | raise it only for a single value near PostgreSQL's 1 GB limit |
 
+`channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
+before a socket is opened, because a value minato does not know cannot be read
+as the default: the default is the weaker setting. `channel_binding =>
+required`, `ssl => ~"true"` or `auth => scram_sha_256` makes
+`minato_conn:connect/1` raise `{minato_conn, #{message := options, reason :=
+{invalid_option, Key}}}`, and a pool or a listener given one does not start:
+`{error, {invalid_option, Key}}`. `minato_conn:validate/1` answers the same
+question for a configuration that has not been used yet.
+
 Two startup parameters are sent unless `parameters` overrides them:
 `client_encoding` is `UTF8`, because the codecs decode text as UTF-8 and a
 server sending LATIN1 would put mojibake in a binary rather than raise;
