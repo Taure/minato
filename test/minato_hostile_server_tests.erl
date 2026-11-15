@@ -447,6 +447,62 @@ handshake({error, {tls, _Reason}}) -> refused;
 handshake({error, Reason}) -> Reason.
 
 %%----------------------------------------------------------------------
+%% A session somebody else opened
+%%----------------------------------------------------------------------
+
+%% `m:ssl` keeps the sessions of a node's clients in one place and offers a
+%% later connection to the same address the one it finds there, which the
+%% server resumes without presenting a certificate. The server here resumes
+%% whatever it is offered, and its certificate is for `localhost`.
+a_certificate_that_was_refused_is_refused_the_next_time_too_test() ->
+    Server = tls_server([?READY]),
+    Trusted = proplists:lookup_all(cacerts, minato_backend_server:client_tls(Server)),
+    Resumable = [{versions, ['tlsv1.2']}],
+    Connecting = fun(Given) ->
+        minato_conn:connect(
+            opts(minato_backend_server:port(Server), #{
+                transport => inet,
+                socket_options => [inet],
+                ssl => true,
+                ssl_options => Trusted ++ Given
+            })
+        )
+    end,
+    Unnamed = Connecting([{server_name_indication, disable} | Resumable]),
+    Named = Connecting(Resumable),
+    _ = [minato_conn:close(Conn) || {ok, Conn} <- [Unnamed, Named]],
+    minato_backend_server:stop(Server),
+    ?assertEqual({error, {tls, {bad_cert, hostname_check_failed}}}, Unnamed),
+    ?assertMatch({error, {tls, _Reason}}, Named).
+
+a_session_another_client_on_the_node_opened_is_not_resumed_test() ->
+    Server = tls_server([?READY]),
+    Port = minato_backend_server:port(Server),
+    Trusted = proplists:lookup_all(cacerts, minato_backend_server:client_tls(Server)),
+    Resumable = [{versions, ['tlsv1.2']}],
+    ok = another_client(Port, Trusted ++ [{server_name_indication, disable} | Resumable]),
+    Result = minato_conn:connect(
+        opts(Port, #{
+            transport => inet,
+            socket_options => [inet],
+            ssl => true,
+            ssl_options => Trusted ++ Resumable
+        })
+    ),
+    _ = [minato_conn:close(Conn) || {ok, Conn} <- [Result]],
+    minato_backend_server:stop(Server),
+    ?assertMatch({error, {tls, _Reason}}, Result).
+
+%% Any other application's TLS client, which checks the chain and, with the
+%% name left out, not who the certificate is for.
+another_client(Port, Options) ->
+    {ok, Socket} = gen_tcp:connect("127.0.0.1", Port, [binary, {active, false}]),
+    ok = gen_tcp:send(Socket, minato_protocol:encode(ssl_request)),
+    {ok, ~"S"} = gen_tcp:recv(Socket, 1, 5000),
+    {ok, Session} = ssl:connect(Socket, [{verify, verify_peer} | Options], 5000),
+    ssl:close(Session).
+
+%%----------------------------------------------------------------------
 %% Channel binding that was required
 %%----------------------------------------------------------------------
 

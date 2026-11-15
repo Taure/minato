@@ -55,6 +55,16 @@ over and before anything is sent in the session, and one that fails is
 `{error, {tls, {bad_cert, hostname_check_failed}}}`. `{verify, verify_none}`, a
 `verify_fun` or a `customize_hostname_check` is what changes the check.
 
+Every handshake is a full one. `m:ssl` keeps the TLS 1.2 sessions of all the
+clients on a node in one place and resumes one for a later connection to the
+same address without the server presenting a certificate again, so what a
+resumed connection trusts is whatever the connection that opened the session
+was willing to accept. minato neither leaves a session there nor takes one
+from there: `{reuse_sessions, false}` and `{session_tickets, disabled}` are
+defaults, and `ssl_options` that ask for anything else are refused as
+`{invalid_option, ssl_options}`. A connection is opened once and kept, so
+there is nothing a resumed handshake would have saved.
+
 Under TLS the SCRAM exchange is bound to the session by default:
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, which puts the hash of the
 server's certificate inside the material the client proof covers. A man in the
@@ -418,7 +428,10 @@ minato knows.
 `auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
 `none`; `password` is a binary, a string or a fun that answers one; and
 `ssl_options` is a list of options, in which `verify` is `verify_peer` or
-`verify_none` and the handshake is not paused with `{handshake, hello}`.
+`verify_none`, the handshake is not paused with `{handshake, hello}`, and no
+session is kept for another connection or resumed from one: `reuse_sessions`
+is `false`, `session_tickets` is `disabled`, and there is no `reuse_session`
+or `use_ticket`.
 
 Anything else answers `{error, {invalid_option, Key}}` for the first of those
 keys that is wrong, without the value. A value minato did not know used to be
@@ -467,12 +480,20 @@ methods([]) -> true;
 methods(_Improper) -> false.
 
 %% A handshake paused at the server's hello answers with a session that has
-%% verified nothing yet, and nothing here would go on to finish it.
+%% verified nothing yet, and nothing here would go on to finish it. A session
+%% that is resumed, by its id or from a ticket, is one whose certificate was
+%% looked at by whichever connection opened it and not by this one.
 -spec tls_shaped(term()) -> boolean().
 tls_shaped([{handshake, hello} | _Rest]) ->
     false;
 tls_shaped([{verify, Verify} | Rest]) ->
     (Verify =:= verify_peer orelse Verify =:= verify_none) andalso tls_shaped(Rest);
+tls_shaped([{reuse_sessions, Reuse} | Rest]) ->
+    Reuse =:= false andalso tls_shaped(Rest);
+tls_shaped([{session_tickets, Tickets} | Rest]) ->
+    Tickets =:= disabled andalso tls_shaped(Rest);
+tls_shaped([{Resumes, _Session} | _Rest]) when Resumes =:= reuse_session; Resumes =:= use_ticket ->
+    false;
 tls_shaped([{Name, _Value} | Rest]) when is_atom(Name) ->
     tls_shaped(Rest);
 tls_shaped([Name | Rest]) when is_atom(Name) ->
@@ -1882,6 +1903,8 @@ tls_defaults(Host) ->
         {cacerts, public_key:cacerts_get()},
         {depth, ?DEFAULT_TLS_DEPTH},
         {server_name_indication, Name},
+        {reuse_sessions, false},
+        {session_tickets, disabled},
         {customize_hostname_check, [
             {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
         ]}

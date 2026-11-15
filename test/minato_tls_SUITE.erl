@@ -35,6 +35,7 @@ Skips when no TLS server answers.
     an_untrusted_certificate_is_refused/1,
     a_hostname_the_certificate_does_not_cover_is_refused/1,
     the_hostname_is_still_checked_with_no_server_name_sent/1,
+    a_refused_certificate_is_refused_on_the_next_connection_too/1,
     a_hostname_check_of_the_callers_own_is_the_one_that_decides/1,
     verification_can_be_turned_off_deliberately/1,
     a_query_of_any_size_survives_the_tls_record_layer/1,
@@ -75,6 +76,7 @@ all() ->
         an_untrusted_certificate_is_refused,
         a_hostname_the_certificate_does_not_cover_is_refused,
         the_hostname_is_still_checked_with_no_server_name_sent,
+        a_refused_certificate_is_refused_on_the_next_connection_too,
         a_hostname_check_of_the_callers_own_is_the_one_that_decides,
         verification_can_be_turned_off_deliberately,
         a_query_of_any_size_survives_the_tls_record_layer,
@@ -224,6 +226,26 @@ the_hostname_is_still_checked_with_no_server_name_sent(_Config) ->
     Unverified = [{verify, verify_none}, {server_name_indication, disable}],
     {ok, Open} = minato_conn:connect((verified())#{host => "127.0.0.1", ssl_options => Unverified}),
     ok = minato_conn:close(Open).
+
+%% Under TLS 1.2 a server may resume a session and present no certificate, and
+%% `m:ssl` offers a later connection the sessions earlier ones to the address
+%% left behind. The one refused here must not be what lets the next one in.
+-spec a_refused_certificate_is_refused_on_the_next_connection_too([{atom(), term()}]) -> ok.
+a_refused_certificate_is_refused_on_the_next_connection_too(_Config) ->
+    Resumable = [{cacerts, cacerts()}, {versions, ['tlsv1.2']}],
+    Elsewhere = (verified())#{host => "127.0.0.1"},
+    Unnamed = Elsewhere#{ssl_options => [{server_name_indication, disable} | Resumable]},
+    ?assertEqual(
+        {error, {tls, {bad_cert, hostname_check_failed}}}, minato_conn:connect(Unnamed)
+    ),
+    ?assertMatch(
+        {error, {tls, _Reason}}, minato_conn:connect(Elsewhere#{ssl_options => Resumable})
+    ),
+    {ok, Conn} = minato_conn:connect((verified())#{ssl_options => Resumable}),
+    ok = minato_conn:close(Conn),
+    ?assertMatch(
+        {error, {tls, _Reason}}, minato_conn:connect(Elsewhere#{ssl_options => Resumable})
+    ).
 
 -spec a_hostname_check_of_the_callers_own_is_the_one_that_decides([{atom(), term()}]) -> ok.
 a_hostname_check_of_the_callers_own_is_the_one_that_decides(_Config) ->

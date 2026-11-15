@@ -69,6 +69,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   hostname check off with it. `{verify, verify_none}` is how to say that. The
   certificate is checked for `host` once the handshake is over, and one that
   does not carry it is `{error, {tls, {bad_cert, hostname_check_failed}}}`.
+- A TLS session is never resumed and never kept for another connection to
+  resume: `{reuse_sessions, false}` and `{session_tickets, disabled}` are
+  defaults. `ssl_options` with `{reuse_sessions, true | save}`,
+  `{reuse_session, _}`, `{session_tickets, manual | auto}` or `{use_ticket, _}`
+  are `{invalid_option, ssl_options}`.
 - A pool started without `ssl` for a host that is not this machine logs one
   warning, `unencrypted_connection`. `ssl => false` written out says it was
   meant and logs nothing.

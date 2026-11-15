@@ -54,6 +54,17 @@ turn hostname verification off by accident. The ways to turn it off
 are the ones that say so: `{verify, verify_none}`, a `verify_fun` of your own,
 or a `customize_hostname_check` whose `match_fun` accepts what you mean it to.
 
+Every handshake is a full one. `m:ssl` keeps the TLS 1.2 sessions of every
+client on the node in one table and offers a later connection to the same
+address one of them, and a server that resumes a session presents no
+certificate. What a resumed connection trusts is then whatever the connection
+that opened the session accepted, which may be another pool with other
+`ssl_options`, or another application. minato leaves no session behind and
+takes none: `{reuse_sessions, false}` and `{session_tickets, disabled}` are
+defaults, and `ssl_options` asking for `reuse_sessions`, `reuse_session`,
+`session_tickets` or `use_ticket` to be anything else are refused before a
+socket opens. A connection is opened once and kept, so resuming saves nothing.
+
 ## Channel binding
 
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, on by default under TLS.
@@ -115,8 +126,9 @@ default would be reading it as the weaker setting, so it is not read at all:
 before a socket is opened, `minato_conn:connect/1` raises
 `{minato_conn, #{message := options, reason := {invalid_option, Key}}}`, and a
 pool or a listener does not start. In `ssl_options`, `verify` has to be
-`verify_peer` or `verify_none`, and `{handshake, hello}` is refused because it
-answers with a session that has verified nothing yet.
+`verify_peer` or `verify_none`, `{handshake, hello}` is refused because it
+answers with a session that has verified nothing yet, and so is anything that
+resumes a TLS session or keeps one for another connection to resume.
 
 ## What a server cannot make the client do
 
