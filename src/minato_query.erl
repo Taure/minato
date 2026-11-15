@@ -258,6 +258,12 @@ Never twice, and never inside a transaction the error has aborted, where
 parsing again could only fail: there the statement is dropped and closed, and
 the server's error is returned as it came.
 
+A value that will not encode is raised at once inside any transaction, open or
+aborted, and nothing is sent: the question would be a `Parse` in the caller's
+transaction, and a statement that no longer parses would abort it over what is
+usually a mistake in the call. A statement that has gone stale there is found
+by the server at the next bind.
+
 Only a refusal that arrives before `BindComplete` counts, which is where the
 server checks the plan and before anything has run. A statement that fails
 once it is running has failed, whatever code it fails with: it is returned and
@@ -347,11 +353,11 @@ reused(Conn, Sql, Statement, Parameters, Opts) ->
     catch
         error:{minato_codec, _Report} = Reason:Stacktrace ->
             case minato_conn:transaction_status(Conn) of
-                failed ->
-                    reraise(error, Reason, Stacktrace);
-                _Parses ->
+                idle ->
                     Unchanged = {raise, Reason, Stacktrace},
-                    described_again(Conn, Sql, Statement, Parameters, Opts, Unchanged)
+                    described_again(Conn, Sql, Statement, Parameters, Opts, Unchanged);
+                _InATransaction ->
+                    reraise(error, Reason, Stacktrace)
             end
     end.
 

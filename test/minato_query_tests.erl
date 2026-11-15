@@ -377,6 +377,22 @@ a_value_that_does_not_fit_in_a_failed_transaction_asks_nothing_test() ->
     ?assertError({minato_codec, _Report}, minato_query:cached(Aborted, ?SQL, [~"seven"])),
     ?assertEqual([], at_rest(Server)).
 
+%% Asking the server what it makes of the statement now is a `Parse` inside
+%% the caller's transaction, and one the server refuses aborts it.
+a_value_that_does_not_fit_in_an_open_transaction_asks_nothing_test() ->
+    Open = [
+        [bind_complete],
+        [{data_row, [<<1:32>>]}, {command_complete, ~"SELECT 1"}],
+        [{ready_for_query, transaction}]
+    ],
+    {Server, Conn} = connected(parsed([?INT4], [?INT4]) ++ Open),
+    {_Name, Kept} = keep(Server, Conn),
+    ?assertEqual(transaction, minato_conn:transaction_status(Kept)),
+    ?assertError(
+        {minato_codec, #{reason := not_an_integer}}, minato_query:cached(Kept, ?SQL, [~"seven"])
+    ),
+    ?assertEqual([], at_rest(Server)).
+
 a_statement_that_no_longer_parses_is_returned_as_the_server_put_it_test() ->
     Script = kept() ++ [[refused(~"42P01")], [], ?IDLE],
     {Server, Conn} = connected(Script),
