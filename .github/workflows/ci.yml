@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:
@@ -55,6 +55,16 @@ jobs:
   release:
     needs: ci
     if: ${{ github.event_name == 'push' }}
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.4
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.3.2
     permissions:
       contents: write
+
+  hex-publish:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    uses: Taure/erlang-ci/.github/workflows/hex-publish.yml@v2.3.2
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      tag: ${{ needs.release.outputs.tag }}
