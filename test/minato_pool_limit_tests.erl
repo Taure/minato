@@ -54,7 +54,7 @@ a_pool_outlives_whatever_answers_its_question_test_() ->
                 ok = ready(),
                 Server = minato_backend_server:start([?READY, Answer]),
                 Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
-                {ok, Pool} = minato:start_pool(?POOL, #{
+                {ok, Pool} = minato_owned:pool(?POOL, #{
                     size => 1, min_size => 1, connection => Connection
                 }),
                 try
@@ -86,7 +86,7 @@ a_pool_still_answers_while_its_question_goes_unanswered_test_() ->
         ok = ready(),
         Server = minato_backend_server:start([?READY]),
         Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
-        {ok, _Pool} = minato:start_pool(?POOL, #{
+        {ok, _Pool} = minato_owned:pool(?POOL, #{
             size => 1, min_size => 1, connection => Connection
         }),
         try
@@ -211,6 +211,7 @@ the_question_is_an_event_that_names_the_pool_test_() ->
     {timeout, 30, fun() ->
         Server = minato_backend_server:start([?READY, shown(~"100")]),
         Handler = {?MODULE, asked},
+        _ = telemetry:detach(Handler),
         ok = telemetry:attach(Handler, [minato, query, stop], fun ?MODULE:asked/4, self()),
         try
             ok = pooled(Server, #{size => 1, min_size => 1}),
@@ -337,7 +338,7 @@ a_pool_on_this_machine_or_one_that_said_how_says_nothing_test_() ->
 unencrypted(Connection) ->
     Warnings = warnings(fun() ->
         ok = ready(),
-        {ok, _Pool} = minato:start_pool(?POOL, #{
+        {ok, _Pool} = minato_owned:pool(?POOL, #{
             size => 1, min_size => 0, connection => Connection#{user => ~"minato"}
         }),
         ok = minato:stop_pool(?POOL)
@@ -397,7 +398,7 @@ pooled(Server, Sizes) ->
 pooled(Server, Sizes, Opts) ->
     ok = ready(),
     Connection = opts(minato_backend_server:port(Server), Opts),
-    {ok, _Pool} = minato:start_pool(?POOL, Sizes#{connection => Connection}),
+    {ok, _Pool} = minato_owned:pool(?POOL, Sizes#{connection => Connection}),
     ok.
 
 opts(Port, Opts) ->
@@ -434,9 +435,11 @@ resets(Read) ->
 failures(Fun) ->
     [Warning || #{event := connect_failed} = Warning <- warnings(Fun)].
 
-%% What this pool warned of while `Fun` ran.
+%% What this pool warned of while `Fun` ran. A run that was killed in here
+%% never took its handler away, and the name would be taken.
 warnings(Fun) ->
     Handler = minato_pool_limit_tests_capture,
+    _ = logger:remove_handler(Handler),
     ok = logger:add_handler(Handler, ?MODULE, #{config => self()}),
     try
         _ = Fun(),

@@ -307,7 +307,7 @@ a_reset_answered_without_end_does_not_keep_a_checkout_test_() ->
         _ = minato:stop_pool(?POOL),
         Server = minato_backend_server:start([?READY, {reply, {?MODULE, unending_reset}}]),
         Port = minato_backend_server:port(Server),
-        {ok, _Pid} = minato:start_pool(?POOL, #{
+        {ok, _Pid} = minato_owned:pool(?POOL, #{
             size => 1,
             min_size => 1,
             connection => opts(Port, #{timeout => 300, cancel_timeout => 200})
@@ -781,7 +781,8 @@ a_listener_reconnects_after_a_statement_that_lost_its_connection_test_() ->
                 {ok, _Started} = application:ensure_all_started(minato),
                 Server = minato_backend_server:start([?READY | Answers]),
                 Connection = opts(minato_backend_server:port(Server), #{timeout => 300}),
-                {ok, Listener} = minato:start_listener(?LISTENER, #{connection => Connection}),
+                _ = minato:stop_listener(?LISTENER),
+                {ok, Listener} = minato_owned:listener(?LISTENER, #{connection => Connection}),
                 try
                     ?assertEqual({error, Expected}, minato:listen(?LISTENER, ~"events")),
                     ?assertEqual(2, startups(Server, 2, 50)),
@@ -807,7 +808,8 @@ a_listener_outlives_bytes_that_are_not_a_message_test_() ->
         Unasked = [{unsupported, $Z, ~"not a status"}],
         Server = minato_backend_server:start([?READY, {then, Listening, 300, Unasked}, Listening]),
         Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
-        {ok, Listener} = minato:start_listener(?LISTENER, #{connection => Connection}),
+        _ = minato:stop_listener(?LISTENER),
+        {ok, Listener} = minato_owned:listener(?LISTENER, #{connection => Connection}),
         try
             ?assertEqual(ok, minato:listen(?LISTENER, ~"events")),
             receive

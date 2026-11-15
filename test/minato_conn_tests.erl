@@ -727,6 +727,7 @@ ended(Conn) ->
     Session.
 
 an_overdue_closer_is_killed_and_logged_test() ->
+    _ = logger:remove_handler(overdue_capture),
     ok = logger:add_handler(overdue_capture, ?MODULE, #{config => self()}),
     Closer = spawn(fun() ->
         receive

@@ -216,5 +216,5 @@ pooled(Server, Sizes) ->
         user => ~"minato",
         timeout => 1000
     },
-    {ok, _Pool} = minato:start_pool(?POOL, Sizes#{connection => Connection}),
+    {ok, _Pool} = minato_owned:pool(?POOL, Sizes#{connection => Connection}),
     ok.

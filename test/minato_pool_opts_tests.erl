@@ -45,13 +45,13 @@ options_that_are_not_a_map_are_refused_without_echoing_them_test() ->
 
 a_refused_pool_under_the_supervisor_returns_only_the_reason_test() ->
     ok = ready(),
-    Result = minato:start_pool(?POOL, sized(0.5)),
+    Result = minato_owned:pool(?POOL, sized(0.5)),
     ?assertEqual({error, {invalid_size, 0.5}}, Result),
     ?assertEqual(undefined, whereis(?POOL)).
 
 a_running_pool_reports_its_status_without_the_password_test() ->
     ok = ready(),
-    {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{min_size => 0}),
+    {ok, _Pid} = minato_owned:pool(?POOL, (sized(1))#{min_size => 0}),
     try
         Status = sys:get_status(?POOL),
         ?assertEqual(nomatch, string:find(io_lib:format("~0p", [Status]), "s3cret"))
@@ -61,7 +61,7 @@ a_running_pool_reports_its_status_without_the_password_test() ->
 
 a_running_listener_reports_its_status_without_the_password_test() ->
     ok = ready(),
-    {ok, _Pid} = minato:start_listener(minato_pool_opts_tests_listener, #{
+    {ok, _Pid} = minato_owned:listener(minato_pool_opts_tests_listener, #{
         connection => connection()
     }),
     try
@@ -92,16 +92,16 @@ a_listener_without_a_connection_returns_no_password_test() ->
     ok = ready(),
     ?assertEqual(
         {error, invalid_connection},
-        minato:start_listener(minato_pool_opts_tests_listener, unnested())
+        minato_owned:listener(minato_pool_opts_tests_listener, unnested())
     ).
 
 zero_and_infinity_timeouts_are_accepted_test() ->
     ok = ready(),
-    {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{
+    {ok, _Pid} = minato_owned:pool(?POOL, (sized(1))#{
         min_size => 0, max_idle => 0, max_age => 0
     }),
     ok = minato:stop_pool(?POOL),
-    {ok, _Pid2} = minato:start_pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
+    {ok, _Pid2} = minato_owned:pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
     ok = minato:stop_pool(?POOL).
 
 a_pool_whose_connection_could_not_be_secured_as_asked_does_not_start_test_() ->
@@ -124,19 +124,19 @@ a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() 
     ok = ready(),
     ?assertEqual(
         {error, {invalid_option, channel_binding}},
-        minato:start_listener(minato_pool_opts_tests_listener, #{
+        minato_owned:listener(minato_pool_opts_tests_listener, #{
             connection => asking(channel_binding, required)
         })
     ),
     ?assertEqual(
         {error, {invalid_option, host}},
-        minato:start_listener(minato_pool_opts_tests_listener, #{
+        minato_owned:listener(minato_pool_opts_tests_listener, #{
             connection => asking(host, ~"db.example.invalid")
         })
     ),
     ?assertEqual(
         {error, {invalid_option, auth}},
-        minato:start_pool(?POOL, #{connection => asking(auth, md5)})
+        minato_owned:pool(?POOL, #{connection => asking(auth, md5)})
     ).
 
 %% A connection that asks for something the type forbids, because what is
@@ -167,7 +167,7 @@ an_option_a_listener_has_no_name_for_is_refused_test_() ->
             ok = ready(),
             ?assertEqual(
                 {error, {invalid_option, Key}},
-                minato:start_listener(minato_pool_opts_tests_listener, Opts)
+                minato_owned:listener(minato_pool_opts_tests_listener, Opts)
             )
         end
      || {Key, Opts} <- [

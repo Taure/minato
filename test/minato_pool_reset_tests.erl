@@ -37,7 +37,7 @@ a_checkout_gives_up_after_the_pool_and_one_more() ->
     Server = minato_backend_server:start([
         ?READY, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET
     ]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 2, min_size => 2, connection => connection(Server)
     }),
     try
@@ -57,7 +57,7 @@ a_refused_reset_reports_only_its_sqlstate_test_() ->
 a_refused_reset_reports_only_its_sqlstate() ->
     ok = ready(),
     Server = minato_backend_server:start([?READY, ?REFUSED, ?REFUSED]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
     }),
     try
@@ -78,7 +78,7 @@ a_connection_with_no_transaction_is_reset_without_a_rollback_test_() ->
 a_connection_with_no_transaction_is_reset_without_a_rollback() ->
     ok = ready(),
     Server = minato_backend_server:start([?READY, ?SHOWN]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
     }),
     try
@@ -95,7 +95,7 @@ a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slo
     {timeout, 30, fun() ->
         ok = ready(),
         Server = minato_backend_server:start(script({?MODULE, unreadable})),
-        {ok, _Pid} = minato:start_pool(?POOL, #{
+        {ok, _Pid} = minato_owned:pool(?POOL, #{
             size => 1, min_size => 1, connection => connection(Server)
         }),
         try
