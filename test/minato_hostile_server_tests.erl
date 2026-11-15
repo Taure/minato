@@ -10,7 +10,10 @@ client must still have afterwards.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([unending_reset/1]).
+
 -define(LISTENER, minato_hostile_server_tests_listener).
+-define(POOL, minato_hostile_server_tests_pool).
 
 -define(READY, [
     authentication_ok,
@@ -158,6 +161,163 @@ dripping(Before, Message, Count) ->
 
 notice() ->
     {notice_response, #{severity => ~"NOTICE", code => ~"00000", message => ~"still here"}}.
+
+%%----------------------------------------------------------------------
+%% An answer that does not end
+%%----------------------------------------------------------------------
+
+%% Rows with no gap between them: every read finds bytes waiting, so a read
+%% that timed out is not what ends this. The statement runs in a process whose
+%% heap is capped, so rows kept for as long as the server cares to send them
+%% end the process and not the node.
+rows_that_never_stop_arriving_end_at_the_deadline_test_() ->
+    [
+        {timeout, 60,
+            {atom_to_list(Path), fun() ->
+                Server = minato_backend_server:start([?READY | unending(Path)]),
+                Port = minato_backend_server:port(Server),
+                Started = erlang:monotonic_time(millisecond),
+                Answer = capped(fun() ->
+                    {ok, Conn} = minato_conn:connect(
+                        opts(Port, #{timeout => 300, cancel_timeout => 200})
+                    ),
+                    Result = statement(Path, Conn),
+                    ok = minato_conn:close(Conn),
+                    Result
+                end),
+                Elapsed = erlang:monotonic_time(millisecond) - Started,
+                minato_backend_server:stop(Server),
+                ?assertEqual({error, {socket, timeout}}, Answer),
+                ?assert(Elapsed < 2500)
+            end}}
+     || Path <- [simple, extended]
+    ].
+
+unending(simple) ->
+    [{then, [{row_description, [column(~"id")]}], 0, {stream, rows()}}];
+unending(extended) ->
+    [
+        [parse_complete],
+        [{parameter_description, []}, {row_description, [column(~"id")]}],
+        [],
+        [bind_complete],
+        {stream, rows()}
+    ].
+
+rows() ->
+    [{data_row, [~"7"]} || _Row <- lists:seq(1, 5000)].
+
+statement(simple, Conn) -> minato_query:simple(Conn, ~"q");
+statement(extended, Conn) -> minato_query:query(Conn, ~"q", []).
+
+%% 512 megabytes on a 64 bit machine, counting the binaries the rows point at.
+capped(Fun) ->
+    Limit = #{
+        size => 64 * 1024 * 1024,
+        kill => true,
+        error_logger => false,
+        include_shared_binaries => true
+    },
+    {Pid, Monitor} = spawn_opt(fun() -> exit({answered, Fun()}) end, [
+        monitor, {max_heap_size, Limit}
+    ]),
+    receive
+        {'DOWN', Monitor, process, Pid, {answered, Answer}} -> Answer;
+        {'DOWN', Monitor, process, Pid, Reason} -> {died, Reason}
+    end.
+
+%% Notices are read and dropped, so these cost time and no memory: an answer
+%% the client is only waiting to see the end of.
+an_answer_that_is_only_waited_out_ends_at_the_deadline_test_() ->
+    Prepared = [
+        [parse_complete], [{parameter_description, []}, no_data], [{ready_for_query, idle}]
+    ],
+    Begun = [{command_complete, ~"BEGIN"}, {ready_for_query, transaction}],
+    [
+        {timeout, 60,
+            {Label, fun() ->
+                Server = minato_backend_server:start([?READY | Script]),
+                Port = minato_backend_server:port(Server),
+                Answer = given(5000, fun() ->
+                    {ok, Conn} = minato_conn:connect(
+                        opts(Port, #{timeout => 300, cancel_timeout => 200})
+                    ),
+                    Result = waited_out(Asks, Conn),
+                    ok = minato_conn:close(Conn),
+                    Result
+                end),
+                minato_backend_server:stop(Server),
+                ?assertMatch({Took, Expected} when Took < 2500, Answer)
+            end}}
+     || {Label, Asks, Script, Expected} <- [
+            {"closing a statement", close, Prepared ++ [{stream, [notice()]}],
+                {error, {socket, timeout}}},
+            {"rolling back for a function that raised", raise, [Begun, {stream, [notice()]}],
+                {error, stopped}}
+        ]
+    ].
+
+waited_out(close, Conn) ->
+    {ok, Statement, Prepared} = minato_query:prepare(Conn, ~"s", ~"q"),
+    minato_query:close(Prepared, Statement);
+waited_out(raise, Conn) ->
+    try
+        minato_txn:transaction(Conn, fun(_Open) -> error(stopped) end)
+    catch
+        error:stopped -> {error, stopped}
+    end.
+
+a_reset_answered_without_end_does_not_keep_a_checkout_test_() ->
+    {timeout, 60, fun() ->
+        {ok, _Started} = application:ensure_all_started(minato),
+        _ = minato:stop_pool(?POOL),
+        Server = minato_backend_server:start([?READY, {reply, {?MODULE, unending_reset}}]),
+        Port = minato_backend_server:port(Server),
+        {ok, _Pid} = minato:start_pool(?POOL, #{
+            size => 1,
+            min_size => 1,
+            connection => opts(Port, #{timeout => 300, cancel_timeout => 200})
+        }),
+        try
+            Answer = given(8000, fun() -> minato_pool:checkout(?POOL, 1000) end),
+            ?assertMatch({Took, {error, _Reason}} when Took < 4000, Answer)
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+unending_reset({query, ~"SHOW max_connections"}) ->
+    [{command_complete, ~"SHOW"}, {ready_for_query, idle}];
+unending_reset({query, _Reset}) ->
+    {stream, [notice()]}.
+
+on_windows_a_tls_close_ends_under_a_server_that_keeps_writing_test_() ->
+    {timeout, 60, fun() ->
+        {ok, _Started} = application:ensure_all_started(ssl),
+        Server = minato_backend_server:start([?READY], #{tls => true, after_terminate => flood}),
+        Answer = given(5000, fun() ->
+            {ok, Conn} = minato_conn:connect(tls_opts(Server, #{cancel_timeout => 300})),
+            minato_conn:close(Conn, {win32, nt})
+        end),
+        minato_backend_server:stop(Server),
+        ?assertMatch({Took, ok} when Took < 2500, Answer)
+    end}.
+
+%% In a process of its own, which is what owns the socket, and which is ended
+%% when it is still going after `Longest`.
+given(Longest, Fun) ->
+    Started = erlang:monotonic_time(millisecond),
+    {Pid, Monitor} = spawn_monitor(fun() -> exit({answered, Fun()}) end),
+    receive
+        {'DOWN', Monitor, process, Pid, {answered, Answer}} ->
+            {erlang:monotonic_time(millisecond) - Started, Answer};
+        {'DOWN', Monitor, process, Pid, Reason} ->
+            {died, Reason}
+    after Longest ->
+        exit(Pid, kill),
+        still_going
+    end.
 
 an_opening_exchange_with_no_timeout_is_not_given_up_on_test() ->
     Slow = {then, [authentication_ok], 300, tl(?READY)},

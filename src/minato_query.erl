@@ -520,8 +520,9 @@ statements on it is a connection leaking server memory for the rest of its life.
 """.
 -spec close(conn(), statement()) -> {ok, conn()} | {error, error(), conn()} | {error, error()}.
 close(Conn, #statement{name = Name}) ->
-    case minato_conn:send(Conn, [{close, statement, Name}, sync]) of
-        ok -> closed(Conn);
+    Bounded = bounded(Conn, #{}),
+    case minato_conn:send(Bounded, [{close, statement, Name}, sync]) of
+        ok -> cleared(closed(Bounded));
         {error, Reason} -> {error, Reason}
     end.
 

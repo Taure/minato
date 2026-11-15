@@ -179,7 +179,8 @@ guarded(Conn, Fun) ->
 abandoned(Conn) ->
     Mark = binary:encode_hex(crypto:strong_rand_bytes(8)),
     Plain = minato_conn:decoding_opts(Conn, undefined),
-    try rolled_back_to(Plain, Mark) of
+    Bounded = minato_conn:giving_up_after(Plain, minato_conn:timeout(Plain)),
+    try rolled_back_to(Bounded, Mark) of
         true -> ok;
         false -> minato_conn:close(Conn)
     catch

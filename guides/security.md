@@ -154,6 +154,16 @@ that was chosen. For each of these there is a test with a server that tries.
   TLS handshake together, and `timeout` the whole exchange from the startup
   message to `ReadyForQuery`, not each read of it. What the server reports
   about itself on the way is kept up to 64 parameters.
+- **Keep a statement running past its deadline.** A statement's `timeout` is
+  looked at before every read, not only when a read comes back empty, so rows
+  that arrive without a pause are read until the deadline and no further. The
+  statement is cancelled then, and the connection given up `cancel_timeout`
+  later when the rows are still coming: `{error, {socket, timeout}}`. What a
+  server can make a caller hold is what it can send in `timeout` and
+  `cancel_timeout` together, so `cancel_timeout => infinity` is a bound taken
+  away. The answer to a pool's reset, to a statement being closed and to the
+  rollback after a function that raised are held to one `timeout` as a whole
+  in the same way.
 - **Keep a write waiting.** A write gets the connection's `timeout` and the
   connection is closed when it runs out, on both transports, with TLS and
   without.

@@ -96,6 +96,15 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   running the deadline still holds, at the cost of a process per write.
   `minato_overdue` and `minato_sup` cannot be the name of a pool or a
   listener: `{error, {reserved_name, Name}}`.
+- A statement's `timeout` ends a result that is still arriving. It was only
+  looked at when a read found nothing waiting, so rows sent without a pause
+  were read for as long as the server sent them. The statement is cancelled at
+  the deadline and the connection given up `cancel_timeout` after that:
+  `{error, {socket, timeout}}`. A result that takes longer than `timeout` to
+  arrive, and used to arrive, needs `timeout` raised for that call.
+- `minato_query:close/2`, the reset a pool reads at checkout and the rollback
+  after a function that raised in `minato_txn:transaction/2` get one `timeout`
+  for the whole answer, where each read of it got one.
 - `minato_conn:close/1` does not raise and does not wait on a server that has
   stopped reading: `Terminate` gets the shorter of `send_timeout` and one
   second, and is not written at all behind bytes the server has not taken. TLS

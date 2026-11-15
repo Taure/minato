@@ -350,8 +350,9 @@ checked_out(Name, Deadline, Left) ->
 %% lived. Bytes that are not a message are a connection that is gone.
 -spec answered(minato_conn:conn(), timeout(), [expected()]) -> cleared().
 answered(Conn, Timeout, Expected) ->
-    try
-        cleared(Conn, Timeout, Expected, false)
+    try cleared(minato_conn:giving_up_after(Conn, Timeout), Timeout, Expected, false) of
+        {ok, Reset} -> {ok, minato_conn:deadline(Reset, infinity)};
+        Unusable -> Unusable
     catch
         error:{minato_protocol, #{reason := Why}} -> {lost, {minato_protocol, Why}}
     end.
@@ -450,7 +451,8 @@ narrowed(Reported) ->
     {pgsql_error, maps:with([code], Reported)}.
 
 %% The reset answers in one round trip, so it gets no longer than any other read
-%% on the connection, whatever the checkout allows.
+%% on the connection, whatever the checkout allows, and gets it once: for the
+%% whole answer, not for each read of one that does not end.
 -spec read_timeout(minato_conn:conn(), integer() | infinity) -> timeout().
 read_timeout(Conn, Deadline) ->
     case {remaining(Deadline), minato_conn:timeout(Conn)} of

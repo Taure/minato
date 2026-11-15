@@ -43,6 +43,7 @@ to observe.
     [minato_backend_writer:message()]
     | {raw, iodata()}
     | {then, answer(), Milliseconds :: non_neg_integer(), answer()}
+    | {stream, [minato_backend_writer:message()] | {raw, iodata()}}
     | {reply, {module(), atom()}}.
 
 -doc """
@@ -54,15 +55,18 @@ made for the server, which `client_tls/1` hands the client the trust for.
 signed with SHA-384 where everything else is signed with SHA-256.
 `after_terminate` is what happens once `Terminate` or `CancelRequest` is read:
 `close` is what PostgreSQL does, `hold` keeps the session open and silent
-until the client closes it, and `chatter` keeps writing to it, so a client waiting for the close
-never waits on a quiet socket. `after_script` is what happens once the script
+until the client closes it, `chatter` keeps writing to it, so a client waiting for the close
+never waits on a quiet socket, and `flood` writes to it without a pause, so
+that client never finds the socket empty either. A `{stream, Answer}` step
+writes its answer over and over in the same way, for as long as the client
+keeps the connection. `after_script` is what happens once the script
 has run out: `read` goes on reading and answering nothing, and `stall` stops
 reading, with a small receive buffer, so that a client which goes on writing
 fills it.
 """.
 -type opts() :: #{
     tls => boolean() | chained,
-    after_terminate => close | hold | chatter,
+    after_terminate => close | hold | chatter | flood,
     after_script => read | stall
 }.
 
@@ -313,7 +317,10 @@ terminated(#{after_terminate := chatter, transport := Transport, socket := Socke
             terminated(Peer);
         {error, _Closed} ->
             gone(Peer)
-    end.
+    end;
+terminated(#{after_terminate := flood, transport := Transport, socket := Socket} = Peer) ->
+    ok = streamed(Transport, Socket, binary:copy(~"x", 16384)),
+    gone(Peer).
 
 -spec gone(peer()) -> peer().
 gone(Peer) ->
@@ -334,10 +341,19 @@ sent(Transport, Socket, Message, {then, First, Milliseconds, Second}) ->
     ok = sent(Transport, Socket, Message, First),
     ok = timer:sleep(Milliseconds),
     sent(Transport, Socket, Message, Second);
+sent(Transport, Socket, _Message, {stream, Answer}) ->
+    streamed(Transport, Socket, iolist_to_binary(bytes(Answer)));
 sent(Transport, Socket, Message, {reply, {Module, Function}}) ->
     sent(Transport, Socket, Message, Module:Function(Message));
 sent(Transport, Socket, _Message, Answer) ->
     Transport:send(Socket, bytes(Answer)).
+
+-spec streamed(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), binary()) -> ok.
+streamed(Transport, Socket, Bytes) ->
+    case Transport:send(Socket, Bytes) of
+        ok -> streamed(Transport, Socket, Bytes);
+        {error, _Closed} -> ok
+    end.
 
 -spec bytes([minato_backend_writer:message()] | {raw, iodata()}) -> iodata().
 bytes({raw, Bytes}) -> Bytes;

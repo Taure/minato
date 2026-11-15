@@ -140,6 +140,7 @@ the server issued is the whole of the authorisation.
     timeout/1,
     with_timeout/2,
     deadline/2,
+    giving_up_after/2,
     origin/1,
     pooled/2
 ]).
@@ -733,10 +734,14 @@ drain_cap(Grace) -> min(Grace, ?CLOSE_DRAIN_CAP).
 
 -spec drained(ssl:sslsocket(), integer()) -> ok.
 drained(Socket, Deadline) ->
-    case ssl:recv(Socket, 0, remaining(Deadline - erlang:monotonic_time(millisecond), infinity)) of
-        {ok, _Unread} -> drained(Socket, Deadline);
-        {error, _Closed_or_timeout} -> ok
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> ok;
+        Left -> drained(Socket, Deadline, ssl:recv(Socket, 0, Left))
     end.
+
+-spec drained(ssl:sslsocket(), integer(), {ok, term()} | {error, term()}) -> ok.
+drained(Socket, Deadline, {ok, _Unread}) -> drained(Socket, Deadline);
+drained(_Socket, _Deadline, {error, _Closed_or_timeout}) -> ok.
 
 -spec terminated(conn()) -> ok | {error, error()}.
 terminated(Conn) ->
@@ -890,10 +895,9 @@ next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
 next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
     try minato_protocol:frame(Buffer, FrameOpts) of
         {[], _Rest} ->
-            case fill(Conn, budget(Conn, Timeout)) of
-                {ok, Filled} -> next(Filled, Timeout);
-                {error, {socket, timeout}} -> expired(Conn, Timeout);
-                {error, Reason} -> {error, Reason}
+            case budget(Conn, Timeout) of
+                overdue -> expired(Conn, Timeout);
+                Budget -> read(Conn, Budget, Timeout)
             end;
         {[Message | Rest], Remainder} ->
             Read = Conn#conn{buffer = Remainder, pending = Rest},
@@ -902,6 +906,15 @@ next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
         error:{minato_codec, _Report} = Reason:Stacktrace ->
             ok = skipped(decoding_opts(Conn, undefined), Timeout),
             reraise(error, Reason, Stacktrace)
+    end.
+
+-spec read(conn(), timeout(), timeout()) ->
+    {ok, minato_protocol:backend(), conn()} | {error, error()}.
+read(Conn, Budget, Timeout) ->
+    case fill(Conn, Budget) of
+        {ok, Filled} -> next(Filled, Timeout);
+        {error, {socket, timeout}} -> expired(Conn, Timeout);
+        {error, Reason} -> {error, Reason}
     end.
 
 %% A decoder is only ever set for a statement whose answer ends in
@@ -998,11 +1011,26 @@ described(_Fields, undefined, Conn) ->
 described(Fields, DecodeOpts, #conn{frame_opts = Opts} = Conn) ->
     Conn#conn{frame_opts = Opts#{decoder => minato_protocol:decoder(Fields, DecodeOpts)}}.
 
--spec budget(conn(), timeout()) -> timeout().
+%% A deadline that has passed is not a read with no time left: that read
+%% hands back whatever is waiting, and a server that never lets the socket run
+%% empty would be read for as long as it went on writing.
+-doc false.
+%% A deadline with nothing behind it to cancel: for an answer the connection
+%% is given up over when it does not come, such as the one to a pool's reset.
+-spec giving_up_after(conn(), timeout()) -> conn().
+giving_up_after(Conn, infinity) ->
+    deadline(Conn, infinity);
+giving_up_after(Conn, Timeout) ->
+    Conn#conn{deadline = erlang:monotonic_time(millisecond) + Timeout, cancelled = true}.
+
+-spec budget(conn(), timeout()) -> timeout() | overdue.
 budget(#conn{deadline = infinity}, Timeout) ->
     Timeout;
 budget(#conn{deadline = Deadline}, Timeout) ->
-    remaining(Deadline - erlang:monotonic_time(millisecond), Timeout).
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> overdue;
+        Left -> remaining(Left, Timeout)
+    end.
 
 -spec remaining(integer(), timeout()) -> timeout().
 remaining(Left, _Timeout) when Left =< 0 -> 0;
@@ -1377,6 +1405,10 @@ costing one query and costing a connection.
 The cancelled statement gets `cancel_timeout` to acknowledge it. A server that
 does not answer even that has stopped talking, and the connection really is
 finished: `{error, {socket, timeout}}`, with no connection handed back.
+
+The deadline is looked at before every read, so it ends an answer that is still
+arriving as well as one that has stopped: rows a server sends without a pause
+are read until the deadline, then for `cancel_timeout` more, and no longer.
 
 It lasts until it is cleared with `infinity`, which the query layer does before
 handing a connection back, so a deadline belongs to one call rather than to the
