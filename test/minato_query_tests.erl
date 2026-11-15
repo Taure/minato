@@ -312,12 +312,27 @@ a_statement_that_failed_once_it_was_running_is_not_run_again_test_() ->
      || Code <- [~"0A000", ~"08P01", ~"26000", ~"42883"]
     ].
 
-a_server_that_says_ready_and_nothing_else_has_run_nothing_test() ->
-    {_Server, Conn} = connected(kept() ++ [[], [], ?IDLE]),
-    {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
-    ?assertMatch(
-        {ok, #{command := unknown, rows := []}, _Read}, minato_query:cached(Kept, ?SQL, [7])
-    ).
+%% A statement that ran says so with BindComplete first. An answer without it
+%% is not one to this statement, whatever it goes on to claim was done. The
+%% raise names what arrived and does not quote it, since it can be a row.
+an_answer_that_was_never_bound_is_not_a_result_test_() ->
+    [
+        {atom_to_list(Kind), fun() ->
+            {_Server, Conn} = connected(kept() ++ [Unbound ++ ?IDLE]),
+            {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+            ?assertError(
+                {minato_query, #{message := execute, reason := unexpected_message, data := Kind}},
+                minato_query:cached(Kept, ?SQL, [7])
+            )
+        end}
+     || {Kind, Unbound} <- [
+            {ready_for_query, []},
+            {command_complete, [{command_complete, ~"INSERT 0 1"}]},
+            {rows, [{data_row, [<<9:32>>]}, {command_complete, ~"SELECT 1"}]},
+            {row_description, [{row_description, []}]},
+            {empty_query_response, [empty_query_response]}
+        ]
+    ].
 
 what_the_server_says_unasked_before_the_bind_is_answered_is_passed_over_test_() ->
     [

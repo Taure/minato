@@ -747,16 +747,20 @@ executed(Conn, Decoder, Runs, unbound) ->
             executed(Read, Decoder, Runs, {unknown, undefined});
         {ok, {error_response, Reported}, Read} ->
             unbound(failed(plain(Read), {pgsql_error, Reported}));
-        {ok, {ready_for_query, _Status}, Read} ->
-            {ok, minato_protocol:result({unknown, undefined}, []), plain(Read)};
         {ok, Message, _Read} when
             Message =:= parse_complete;
             Message =:= no_data;
             element(1, Message) =:= parameter_description
         ->
             unexpected(Message, execute);
-        {ok, _Message, Read} ->
+        {ok, Unasked, Read} when
+            element(1, Unasked) =:= notice_response;
+            element(1, Unasked) =:= parameter_status;
+            element(1, Unasked) =:= notification_response
+        ->
             executed(Read, Decoder, Runs, unbound);
+        {ok, Message, _Read} ->
+            unbound_answer(Message);
         {error, Reason} ->
             {error, Reason}
     end;
@@ -906,6 +910,13 @@ drain(Conn) ->
         {ok, _Message, Read} -> drain(Read);
         {error, Reason} -> {error, Reason}
     end.
+
+%% Named and not quoted: what arrived can be a row.
+-spec unbound_answer(minato_protocol:backend()) -> no_return().
+unbound_answer(Message) when is_atom(Message) ->
+    bad(execute, unexpected_message, Message);
+unbound_answer(Message) ->
+    bad(execute, unexpected_message, element(1, Message)).
 
 -spec unexpected(minato_protocol:backend(), atom()) -> no_return().
 unexpected(Message, Stage) ->

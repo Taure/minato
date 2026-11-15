@@ -154,6 +154,10 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - A notification or a `ParameterStatus` that arrives while a statement is
   being described is passed over, where it raised `unexpected_message` on a
   session that had run `LISTEN`.
+- An answer to a statement that does not begin with `BindComplete` raises
+  `{minato_query, #{message := execute, reason := unexpected_message}}`, with
+  the kind of message that came first as `data`. A notice, a notification
+  and a `ParameterStatus` ahead of it are still passed over.
 
 **Telemetry and logs**
 
