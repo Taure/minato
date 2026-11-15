@@ -109,7 +109,7 @@ lower_bounds_other_than_one_are_read(_Config) ->
     ?assertEqual([{[[1, 2], [3, 4]], [~"a", null]}], Rows),
     ?assertMatch(
         {ok, #{rows := [{[], 0}]}},
-        minato:query(?POOL, ~"SELECT $1::int4[], cardinality($1::int4[])", [[[], []]])
+        minato:query(?POOL, ~"SELECT $1::int4[], cardinality($1::int4[])", [{array, [[], []]}])
     ).
 
 %%----------------------------------------------------------------------
