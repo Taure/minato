@@ -27,6 +27,30 @@ directly.
 | `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
 | `frame_opts` | `#{max_message_length => 67108864}` | raise it only for a single value near PostgreSQL's 1 GB limit |
 
+The defaults connect to any PostgreSQL there is. The setting for a network
+anybody else is on is this, in every connection's options:
+
+```erlang
+#{ssl => true,
+  auth => [scram_sha_256],
+  channel_binding => require}
+```
+
+Without `ssl => true` nothing is encrypted and an MD5 or SCRAM exchange can be
+relayed by anybody on the path. With it and the default `auth`, whoever holds a
+certificate the client accepts can ask for the password and is given it, and
+`channel_binding => prefer` binds only when the server offers to. The three
+together close all of that; the
+[security guide](security.md) has the reasoning. They are not the defaults
+because a client cannot know how a server it has not met is configured, and
+changing them would stop 1.x deployments from connecting.
+
+A pool whose options leave `ssl` out, towards a `host` that is not this
+machine, logs one warning when it starts: `#{event => unencrypted_connection,
+pool => Name, host => Host}`. `localhost`, a loopback address and a Unix socket
+are this machine; a name is not resolved to find out. `ssl => false` written
+out is taken as a decision and logs nothing.
+
 `channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
 before a socket is opened, because a value minato does not know cannot be read
 as the default: the default is the weaker setting. `channel_binding =>

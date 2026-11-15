@@ -47,5 +47,38 @@ These are not: an application that builds SQL by pasting values into the text
 it gives `minato:simple/2`; a caller that turns verification off in
 `ssl_options`; anybody who can already run code on the node.
 
+## The setting for production
+
+The defaults connect to any PostgreSQL there is, and that is what they are for.
+They are not the setting for a network anybody else is on. In a connection's
+options, that is:
+
+```erlang
+#{ssl => true,
+  auth => [scram_sha_256],
+  channel_binding => require}
+```
+
+`ssl => true` verifies the server's certificate against the OS trust store and
+checks its name, `auth` stops a server from choosing a weaker method than
+SCRAM, and `channel_binding => require` ties the SCRAM exchange to that
+certificate so it cannot be relayed.
+
+What the defaults leave open, to somebody on the path between the client and
+the server:
+
+- Without `ssl => true` nothing is encrypted: every statement, parameter and
+  row can be read and changed, and an MD5 or SCRAM exchange can be relayed to
+  the real server, which gives the relay a session as that user without the
+  password.
+- With `ssl => true` and the default `auth`, whoever holds a certificate the
+  client accepts can ask for the password itself and is given it.
+- `channel_binding` is `prefer` under TLS: it binds when the server offers to,
+  and somebody answering in the server's place does not offer.
+
+A pool started without `ssl` in its options, towards a host that is not this
+machine, logs one warning saying so. `ssl => false` written out is taken as a
+decision and logs nothing.
+
 [The security guide](guides/security.md) says what minato does about each of
 these and how to check it.

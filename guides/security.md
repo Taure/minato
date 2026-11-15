@@ -3,6 +3,23 @@
 What minato does about the network, the credentials and the log, and which of
 those you have to ask for.
 
+## The setting for production
+
+```erlang
+#{ssl => true,
+  auth => [scram_sha_256],
+  channel_binding => require}
+```
+
+The defaults connect to any PostgreSQL there is, and leave three things open to
+somebody on the path: without `ssl => true` nothing is encrypted and an MD5 or
+SCRAM exchange can be relayed; with it and the default `auth`, whoever holds a
+certificate the client accepts can ask for the password itself; and
+`channel_binding => prefer` binds only when the server offers to. The three
+options above close all of it, and the sections below say why each is needed.
+A pool that leaves `ssl` out towards a host that is not this machine logs one
+warning at start, and `ssl => false` written out silences it.
+
 ## Parameters are parameters
 
 There is no string interpolation anywhere in this client. Values travel as bound
