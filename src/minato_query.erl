@@ -331,14 +331,8 @@ left_ready({minato_codec, _Report}) -> true;
 left_ready({minato_query, #{reason := parameter_count_mismatch}}) -> true;
 left_ready(_Reason) -> false.
 
-%% A kept statement is only as good as what the server made of the SQL when it
-%% was parsed. Four things say it may have gone stale, and each is answered by
-%% parsing again and running once more, never twice and never in a transaction
-%% the error has already aborted: `0A000`; `26000`; `08P01`, which is a pooler
-%% having parsed the statement afresh on another backend, where it has another
-%% number of columns; and parameters the server would now give other types.
-%% The last shows as a refusal in class 42 from the server, or as a value that
-%% will not encode as the type kept here.
+%% What says a kept statement has gone stale, and why it is run again once and
+%% no more, is in the documentation of `cached/4`.
 -spec reused(conn(), binary(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 reused(Conn, Sql, Statement, Parameters, Opts) ->

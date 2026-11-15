@@ -79,7 +79,6 @@ ran_out({Timer, Alone}) ->
 ran_out(Timer) ->
     erlang:cancel_timer(Timer) =:= false.
 
-%% The one write a process started outside the application is watching.
 -spec alone(reference()) -> ok.
 alone(Writer) ->
     receive
