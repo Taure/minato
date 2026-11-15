@@ -553,7 +553,7 @@ observed(Conn, Path, Sql, Fun) ->
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    bad(Class, Reason, Stacktrace).
+    error(badarg).
 
 -spec cleared(dynamic()) -> dynamic().
 cleared({ok, Answer, Conn}) -> {ok, Answer, minato_conn:deadline(Conn, infinity)};

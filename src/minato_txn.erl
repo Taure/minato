@@ -205,7 +205,7 @@ marked(Conn, Row, Seen) ->
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    error({minato_txn, #{message => Class, reason => Reason, data => Stacktrace}}).
+    error(badarg).
 
 -spec committed(conn(), term()) ->
     {ok, term(), conn()} | {error, error(), conn()} | {error, error()}.

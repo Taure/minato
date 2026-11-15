@@ -328,4 +328,4 @@ concluded({error, Reason}) -> {discard, {error, Reason}}.
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    error({minato, #{message => Class, reason => Reason, data => Stacktrace}}).
+    error(badarg).

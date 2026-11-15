@@ -1615,7 +1615,7 @@ guarded(Conn, Credentials) ->
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    bad(Class, Reason, Stacktrace).
+    error(badarg).
 
 -spec authenticate(conn(), minato_auth:state(), boolean()) -> {ok, conn()} | {error, error()}.
 authenticate(Conn, State, Asked) ->
