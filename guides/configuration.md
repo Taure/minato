@@ -217,14 +217,15 @@ Options to `minato:query/4`, `minato:simple/3` and the `minato_query` functions:
 | --- | --- | --- |
 | `timeout` | the connection's `timeout` | deadline for the statement; on expiry it is cancelled on the server, not abandoned |
 | `return_rows_as_maps` | `false` | a map per row instead of a tuple |
-| `column_name_as_atom` | `false` | atom keys in those maps |
+| `column_name_as_atom` | `false` | atom keys in those maps, for names that are atoms already |
 | `uuid_format` | `string` | `binary` for the raw 16 bytes |
 | `datetime_format` | `datetime` | `microseconds` for lossless integers |
 
-`column_name_as_atom` is off because a column name is not always something you
-wrote: a query built at run time can alias a column after a value, and every
-distinct alias would make an atom that is never collected. Turn it on for
-queries whose column names you chose.
+`column_name_as_atom` never makes an atom: the server chooses the names of the
+columns it describes, and an atom is never collected. A key is an atom when the
+name is one already on this node, which the names your code matches on are, and
+the binary the server sent otherwise. A column aliased at run time, or one no
+loaded module mentions, comes back under a binary key.
 
 ## The application environment
 

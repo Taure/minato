@@ -105,8 +105,9 @@ that was chosen. For each of these there is a test with a server that tries.
 - **Make atoms.** A command tag is read against the words PostgreSQL uses. One
   it does not use comes back as a binary: `command` and `num_rows` in a result
   are atoms and integers for every statement there is, and binaries for one a
-  server invented. Column names are binaries unless `column_name_as_atom` asks
-  otherwise.
+  server invented. Column names are binaries, and under
+  `column_name_as_atom` a name is looked up among the atoms that exist and
+  left a binary when it is not one of them.
 - **Keep a connect waiting.** `connect_timeout` covers the TCP connect and the
   TLS handshake together, and `timeout` the whole exchange from the startup
   message to `ReadyForQuery`, not each read of it. What the server reports

@@ -134,10 +134,12 @@ them without decoding.
 a map keyed by column name. `column_name_as_atom` defaults to `false` and only
 affects those map keys.
 
-`column_name_as_atom` is off by default because a column name is not always
-something the application wrote. A query built at run time can alias a column
-after a value, and every distinct alias would then make an atom that is never
-collected. Turn it on for queries whose column names you chose.
+`column_name_as_atom` never makes an atom. The server chooses the names in a
+row description, and an atom is never collected, so a key is an atom only for
+a name that is one already on this node, and the binary the server sent for
+any other. The names a caller matches on are atoms because the calling module
+mentions them. A column aliased at run time, or one the code never names, comes
+back under a binary key.
 
 `uuid_format`, `datetime_format` and `numeric_format` are passed through to
 `m:minato_codec` unchanged.
@@ -786,10 +788,18 @@ remainder(Rest, BufferSize) when
 remainder(Rest, _BufferSize) ->
     Rest.
 
+%% The server chooses the names in a `RowDescription`, so none of them is made
+%% an atom here: a name that is one already is found, and any other stays the
+%% binary it arrived as.
 -spec key(field(), boolean()) -> atom() | binary().
-% elp:ignore W0023 - opt in, and the caller is told what it costs
-key(#{name := Name}, true) -> binary_to_atom(Name, utf8);
-key(#{name := Name}, false) -> Name.
+key(#{name := Name}, true) ->
+    try
+        binary_to_existing_atom(Name, utf8)
+    catch
+        error:badarg -> Name
+    end;
+key(#{name := Name}, false) ->
+    Name.
 
 -spec codec_opts(opts()) -> minato_codec:opts().
 codec_opts(Opts) ->

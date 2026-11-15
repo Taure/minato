@@ -43,6 +43,91 @@ invented_tags(Count) ->
     ] ++ [{ready_for_query, idle}].
 
 %%----------------------------------------------------------------------
+%% Column names
+%%----------------------------------------------------------------------
+
+%% The server picks the names of the columns it describes, and
+%% `column_name_as_atom` used to make an atom of each.
+column_names_a_server_invents_make_no_atoms_test_() ->
+    [
+        {atom_to_list(Path), fun() ->
+            Invented = [
+                column(<<"invented_", (integer_to_binary(N))/binary>>)
+             || N <- lists:seq(1, 2000)
+            ],
+            Described = [column(~"id") | Invented],
+            {Server, {ok, Conn}} = connects([?READY | described(Path, Described)], #{}),
+            Opts = #{return_rows_as_maps => true, column_name_as_atom => true},
+            Before = erlang:system_info(atom_count),
+            {Row, Read} = asked(Path, Conn, Opts),
+            After = erlang:system_info(atom_count),
+            ok = minato_conn:close(Read),
+            minato_backend_server:stop(Server),
+            ?assertEqual(Before, After),
+            ?assertEqual(2001, map_size(Row)),
+            ?assertEqual([id], [Name || Name := _Value <- Row, is_atom(Name)]),
+            ?assertMatch(#{id := ~"7", ~"invented_1" := ~"x", ~"invented_2000" := ~"x"}, Row)
+        end}
+     || Path <- [simple, extended]
+    ].
+
+column_names_that_are_atoms_already_come_back_as_atoms_test() ->
+    Row = [{data_row, [~"7", ~"x"]}],
+    Described = [column(~"id"), column(~"never_an_atom_before_this_row")],
+    Script = [
+        ?READY,
+        [{row_description, Described}] ++ Row ++
+            [{command_complete, ~"SELECT 1"}, {ready_for_query, idle}]
+    ],
+    {Server, {ok, Conn}} = connects(Script, #{}),
+    {ok, [#{rows := Rows}], Read} = minato_query:simple(
+        Conn, ~"q", #{return_rows_as_maps => true, column_name_as_atom => true}
+    ),
+    ok = minato_conn:close(Read),
+    minato_backend_server:stop(Server),
+    ?assertEqual([#{id => ~"7", ~"never_an_atom_before_this_row" => ~"x"}], Rows).
+
+described(simple, Columns) ->
+    [
+        [
+            {row_description, Columns},
+            {data_row, one_row(Columns)},
+            {command_complete, ~"SELECT 1"},
+            {ready_for_query, idle}
+        ]
+    ];
+described(extended, Columns) ->
+    [
+        [parse_complete],
+        [{parameter_description, []}, {row_description, Columns}],
+        [],
+        [bind_complete],
+        [{data_row, one_row(Columns)}, {command_complete, ~"SELECT 1"}],
+        [{ready_for_query, idle}]
+    ].
+
+one_row([_Id | Invented]) ->
+    [~"7" | [~"x" || _Column <- Invented]].
+
+asked(simple, Conn, Opts) ->
+    {ok, [#{rows := [Row]}], Read} = minato_query:simple(Conn, ~"q", Opts),
+    {Row, Read};
+asked(extended, Conn, Opts) ->
+    {ok, #{rows := [Row]}, Read} = minato_query:query(Conn, ~"q", [], Opts),
+    {Row, Read}.
+
+column(Name) ->
+    #{
+        name => Name,
+        table_oid => 0,
+        column => 0,
+        type_oid => 25,
+        type_size => -1,
+        type_modifier => -1,
+        format => text
+    }.
+
+%%----------------------------------------------------------------------
 %% An opening exchange that does not end
 %%----------------------------------------------------------------------
 

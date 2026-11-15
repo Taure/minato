@@ -20,6 +20,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - `command` in a result is an atom for every tag PostgreSQL has, as before,
   and the binary the server sent for a word that is not one of them. No atom
   is made from bytes off the socket any more.
+- `column_name_as_atom => true` gives an atom key only for a column whose
+  name is an atom already, and the binary the server sent for any other. It
+  made an atom of every name, and the server chooses the names. A caller that
+  matches `#{id := _}` is unaffected, since its own code made `id` an atom;
+  one that turns a row's keys into atoms it never mentions now gets binaries.
 - A message longer than 1,073,741,823 bytes, and a statement with more than
   65,535 parameters, raise `{minato_protocol, _}` before anything is sent.
 - A row with more columns than its description raises
@@ -134,6 +139,7 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 
 ### Bug Fixes
 
+- *(protocol)* Make no atom of a column name the server chose
 - *(codec)* Bound numeric to the range PostgreSQL stores and decode it in one pass
 - *(codec)* Bound array dimensions, nesting and element counts on decode
 - *(protocol)* Read command tags against a closed vocabulary
