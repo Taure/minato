@@ -42,7 +42,8 @@ start_pool(Name, Opts) ->
 start_listener(Name, Opts) ->
     started(minato_listener, Name, Opts).
 
--spec started(module(), atom(), dynamic()) -> supervisor:startchild_ret().
+-spec started(module(), atom(), minato_pool:opts() | minato_listener:opts()) ->
+    supervisor:startchild_ret().
 started(Module, Name, Opts) ->
     case reserved(Name) of
         true -> {error, {reserved_name, Name}};
