@@ -57,8 +57,8 @@ ask for a cleartext password, for MD5, or for nothing, and none of those can
 carry a binding. Under `require` each of them is refused before a byte of the
 password is read: `{error, {channel_binding_required, Method}}`. A server that
 offers SCRAM without `-PLUS`, and `require` on a connection with no TLS under
-it, raise `{minato_auth, #{reason := {channel_binding_not_offered,
-Mechanisms}}}` with nothing sent, which a pool reports as a failed connect.
+it, are refused the same way with nothing sent, `Method` being
+`scram_sha_256`, which a pool reports as a failed connect.
 
 A client that can bind but is offered no `-PLUS` mechanism sends `y,,` in the
 gs2 header, which is how a server that *does* support binding learns its

@@ -278,11 +278,12 @@ a_raise_during_connect_is_returned_by_attempt_test() ->
     minato_backend_server:stop(Server).
 
 an_authentication_raise_is_returned_by_attempt_test() ->
-    Server = minato_backend_server:start([[{authentication_sasl, [~"SCRAM-SHA-256"]}]]),
-    Opts = opts(minato_backend_server:port(Server), #{
-        password => ~"pencil", channel_binding => require
-    }),
-    ?assertMatch({error, {minato_auth, _Reason}}, minato_conn:attempt(Opts)),
+    Server = minato_backend_server:start([[{authentication_sasl, [~"SCRAM-SHA-512"]}]]),
+    Opts = opts(minato_backend_server:port(Server), #{password => ~"pencil"}),
+    ?assertEqual(
+        {error, {minato_auth, {no_supported_mechanism, [~"SCRAM-SHA-512"]}}},
+        minato_conn:attempt(Opts)
+    ),
     minato_backend_server:stop(Server).
 
 a_scram_raise_is_returned_by_attempt_test() ->

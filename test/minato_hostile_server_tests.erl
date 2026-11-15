@@ -428,20 +428,11 @@ a_required_binding_is_not_talked_down_to_another_method_test_() ->
      || {Label, Method, Asks} <- [
             {"cleartext over TLS", cleartext, [authentication_cleartext_password]},
             {"md5", md5, [{authentication_md5_password, ~"salt"}]},
-            {"a server that asks for nothing", none, ?READY}
+            {"a server that asks for nothing", none, ?READY},
+            {"scram that is not bound", scram_sha_256, [{authentication_sasl, [~"SCRAM-SHA-256"]}]},
+            {"scram with nothing on offer", scram_sha_256, [{authentication_sasl, []}]}
         ]
     ].
-
-a_required_binding_is_not_talked_down_to_plain_scram_test() ->
-    Server = tls_server([[{authentication_sasl, [~"SCRAM-SHA-256"]}], ?READY]),
-    Opts = tls_opts(Server, #{password => ~"pencil", channel_binding => require}),
-    ?assertError(
-        {minato_auth, #{reason := {channel_binding_not_offered, [~"SCRAM-SHA-256"]}}},
-        minato_conn:connect(Opts)
-    ),
-    Received = minato_backend_server:received(Server),
-    minato_backend_server:stop(Server),
-    ?assertEqual([], [Sent || {password_message, Sent} <- Received]).
 
 a_required_binding_on_a_plain_socket_answers_nothing_test_() ->
     [
@@ -457,6 +448,10 @@ a_required_binding_on_a_plain_socket_answers_nothing_test_() ->
      || {Label, Expected, Asks} <- [
             {"md5", {channel_binding_required, md5}, [{authentication_md5_password, ~"salt"}]},
             {"a server that asks for nothing", {channel_binding_required, none}, ?READY},
+            {"scram, which has nothing to be bound to here",
+                {channel_binding_required, scram_sha_256}, [
+                    {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}
+                ]},
             {"cleartext", cleartext_password_refused, [authentication_cleartext_password]}
         ]
     ].

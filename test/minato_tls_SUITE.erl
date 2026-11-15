@@ -305,9 +305,8 @@ a_required_binding_is_refused_without_tls(_Config) ->
         channel_binding => require,
         timeout => ?TIMEOUT
     },
-    ?assertError(
-        {minato_auth, #{reason := {channel_binding_not_offered, _Mechanisms}}},
-        minato_conn:connect(Plain)
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}}, minato_conn:connect(Plain)
     ).
 
 -spec the_certificate_hash_is_the_one_the_server_computes([{atom(), term()}]) -> ok.
