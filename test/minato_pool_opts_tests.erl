@@ -147,6 +147,11 @@ asking(ssl_options, Value) ->
 asking(Key, Value) ->
     (connection())#{Key => Value}.
 
+%% Options with a key the type has no name for, for the same reason.
+-spec unknown(map()) -> dynamic().
+unknown(Opts) ->
+    Opts.
+
 %% A key nobody reads is a setting somebody believes is in force.
 an_option_a_pool_has_no_name_for_is_refused_test_() ->
     [
@@ -171,8 +176,8 @@ an_option_a_listener_has_no_name_for_is_refused_test_() ->
             )
         end
      || {Key, Opts} <- [
-            {channel, #{channel => ~"jobs", connection => connection()}},
-            {size, #{size => 1, connection => connection()}},
+            {channel, unknown(#{channel => ~"jobs", connection => connection()})},
+            {size, unknown(#{size => 1, connection => connection()})},
             {sslmode, #{connection => asking(sslmode, require)}}
         ]
     ].

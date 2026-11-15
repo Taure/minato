@@ -86,7 +86,7 @@ fills it.
     owner := pid(),
     acceptor := pid(),
     tls := identity() | undefined,
-    after_terminate := close | hold | chatter,
+    after_terminate := close | hold | chatter | flood,
     after_script := read | stall
 }.
 
@@ -218,7 +218,7 @@ private_key([_Other | Rest]) ->
     gen_tcp:socket(),
     pid(),
     [answer()],
-    {identity() | undefined, close | hold | chatter, read | stall}
+    {identity() | undefined, close | hold | chatter | flood, read | stall}
 ) -> no_return().
 accept(Listen, Owner, Script, {Tls, After, Ended} = Opts) ->
     case gen_tcp:accept(Listen, ?ACCEPT_TIMEOUT) of

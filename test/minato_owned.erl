@@ -28,7 +28,7 @@ listener(Name, Opts) ->
 -spec watched({pool | listener, atom()}) -> ok.
 watched(Started) ->
     {ok, _Applications} = application:ensure_all_started(minato),
-    {group_leader, Application} = erlang:process_info(whereis(minato_sup), group_leader),
+    Application = group_leader_of(whereis(minato_sup)),
     Owner = self(),
     _ = spawn(fun() ->
         true = group_leader(Application, self()),
@@ -38,6 +38,11 @@ watched(Started) ->
         end
     end),
     ok.
+
+-spec group_leader_of(pid() | port() | undefined) -> pid().
+group_leader_of(Supervisor) when is_pid(Supervisor) ->
+    {group_leader, Leader} = erlang:process_info(Supervisor, group_leader),
+    Leader.
 
 -spec stopped({pool | listener, atom()}) -> ok | {error, not_found}.
 stopped({pool, Name}) -> minato:stop_pool(Name);

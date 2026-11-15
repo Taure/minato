@@ -630,7 +630,7 @@ the_longest_date_and_time_a_server_writes_is_read_test_() ->
             minato_codec:decode(1114, ~"294276-12-31 23:59:59", text)
         ),
         ?_assertEqual(
-            minato_codec:decode(1184, ~"2024-01-15 00:00:00+00", text, Micros) - 57599000000,
+            minato_codec:decode(1184, ~"2024-01-14 08:00:01+00", text, Micros),
             minato_codec:decode(1184, ~"2024-01-15 00:00:00.000000+15:59:59", text, Micros)
         )
     ].
