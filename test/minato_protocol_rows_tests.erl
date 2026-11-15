@@ -87,6 +87,15 @@ atom_keys_do_nothing_to_a_tuple_row_test() ->
         minato_protocol:row(description(), columns(), #{column_name_as_atom => true})
     ).
 
+a_name_no_atom_exists_for_stays_a_binary_test() ->
+    Unknown = ~"a column name nothing has made an atom of",
+    ?assertEqual(
+        #{Unknown => 42},
+        minato_protocol:row([field(Unknown, 23, binary)], [<<0, 0, 0, 42>>], #{
+            return_rows_as_maps => true, column_name_as_atom => true
+        })
+    ).
+
 an_empty_description_gives_an_empty_map_test() ->
     ?assertEqual(#{}, minato_protocol:row([], [], #{return_rows_as_maps => true})).
 
