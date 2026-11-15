@@ -14,7 +14,7 @@ something has already gone wrong.
 -export([interrupting/1, turning/1]).
 
 -define(LISTENER, minato_listener_tests_listener).
--define(TURNED, {?MODULE, turned}).
+-define(TURNED, minato_listener_tests_turned).
 
 -define(READY, [
     authentication_ok,
@@ -222,12 +222,12 @@ a_connection_lost_while_resubscribing_is_waited_for_once_test_() ->
         ok = minato_listener:listen(?LISTENER, ~"jobs"),
         ok = watched(Listener),
         try
-            persistent_term:put(?TURNED, true),
+            ?TURNED = ets:new(?TURNED, [named_table]),
             ?assertMatch({error, _Reason}, minato_listener:listen(?LISTENER, ~"mail")),
             Waits = waited(Listener, 4),
             ?assert(lists:all(fun(Wait) -> Wait >= 50 andalso Wait =< 100 end, Waits), Waits)
         after
-            _ = persistent_term:erase(?TURNED),
+            true = ets:delete(?TURNED),
             unwatched(Listener)
         end,
         ?assertEqual([resubscribed], announcements(1)),
@@ -348,11 +348,12 @@ interrupting(Message) ->
     served(Message).
 
 %% A server that answers every `LISTEN` with something that is not a message
-%% for as long as it is told to.
+%% for as long as a table of the test's is there, which is no longer than the
+%% test is.
 turning({query, <<"LISTEN ", _/binary>>} = Listen) ->
-    case persistent_term:get(?TURNED, false) of
-        true -> {raw, <<"?", 0, 0, 0, 1>>};
-        false -> served(Listen)
+    case ets:whereis(?TURNED) of
+        undefined -> served(Listen);
+        _Turned -> {raw, <<"?", 0, 0, 0, 1>>}
     end;
 turning(Message) ->
     served(Message).
