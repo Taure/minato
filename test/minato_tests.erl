@@ -83,6 +83,20 @@ a_statement_raised_over_its_values_keeps_its_connection_test_() ->
         ?assertNot(closed(Server))
     end).
 
+a_statement_refused_before_it_is_sent_keeps_its_connection_test_() ->
+    [
+        pooled(fun(Server) ->
+            ?assertError({minato_protocol, #{reason := null_byte}}, Asks()),
+            ?assertMatch({ok, _Result}, minato:query(?POOL, ~"SELECT 1", [])),
+            ?assertMatch(#{disconnects := 0}, minato:stats(?POOL)),
+            ?assertNot(closed(Server))
+        end)
+     || Asks <- [
+            fun() -> minato:query(?POOL, <<"SELECT 1", 0, "2">>, []) end,
+            fun() -> minato:simple(?POOL, <<"SELECT 1", 0, "2">>) end
+        ]
+    ].
+
 a_statement_raised_over_its_values_on_a_connection_it_lost_gives_it_up_test_() ->
     pooled(script({?MODULE, deaf_to_sync}), fun(Server) ->
         ?assertError(

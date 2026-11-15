@@ -156,6 +156,9 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   column that will not decode still raise, but no longer cost the connection:
   it is put back to ready first, `minato:query/4` and `minato:simple/3` return
   it to the pool, and `disconnects` in `minato:stats/1` no longer counts them.
+- A null byte in a statement's text still raises, and no longer costs a
+  pooled connection either: nothing was written, so `minato:query/4` and
+  `minato:simple/3` return the connection to the pool.
 - The rollback after an exception in `minato_txn:transaction/2` is sent
   behind a `Sync` and read up to a mark of its own, so answers the function
   left unread are not taken for it. A connection that cannot be rolled back
