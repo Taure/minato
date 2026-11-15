@@ -79,6 +79,14 @@ arguments_are_taken_out_of_a_stacktrace_test() ->
         ])
     ).
 
+arguments_are_taken_out_of_a_frame_that_names_no_module_test() ->
+    Location = [{file, "minato_codec.erl"}, {line, 1}],
+    Called = fun erlang:display/1,
+    ?assertEqual(
+        [{Called, 1, Location}, {Called, 1, Location}],
+        minato_telemetry:frames([{Called, [?SECRET], Location}, {Called, 1, Location}])
+    ).
+
 values_are_kept_when_asked_for_test_() ->
     {setup, fun() -> application:set_env(minato, log_values, true) end,
         fun(_) -> application:unset_env(minato, log_values) end, fun(_) ->

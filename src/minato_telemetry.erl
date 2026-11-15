@@ -188,15 +188,21 @@ A stacktrace as an event may carry it: where, without the arguments.
 A frame holds the arguments of the call that failed when nothing matched them,
 and on the query path those are the parameters.
 """.
--spec frames([dynamic()]) -> [dynamic()].
+-spec frames(erlang:stacktrace()) -> erlang:stacktrace().
 frames(Stacktrace) ->
     case values() of
         true -> Stacktrace;
-        false -> [frame(Frame) || Frame <- Stacktrace]
+        false -> counted(Stacktrace)
     end.
 
--spec frame(dynamic()) -> dynamic().
-frame({Module, Function, Arguments, Location}) when is_list(Arguments) ->
-    {Module, Function, length(Arguments), Location};
-frame(Frame) ->
-    Frame.
+-spec counted(erlang:stacktrace()) -> erlang:stacktrace().
+counted([{Module, Function, Arguments, Location} | Rest]) ->
+    [{Module, Function, arity(Arguments), Location} | counted(Rest)];
+counted([{Called, Arguments, Location} | Rest]) ->
+    [{Called, arity(Arguments), Location} | counted(Rest)];
+counted([]) ->
+    [].
+
+-spec arity(arity() | [term()]) -> arity().
+arity(Arguments) when is_list(Arguments) -> length(Arguments);
+arity(Count) -> Count.
