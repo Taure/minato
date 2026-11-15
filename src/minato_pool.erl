@@ -29,6 +29,11 @@ the upper half of what the backoff allows, so the pools of many nodes do not
 return to a restarted database at the same instant. `checkout/2` waits for that
 exactly as it waits for a busy connection.
 
+Nothing is opened during a wait, whoever asks: a caller that arrives then is
+queued and served by the connect the wait ends in. While connects are failing
+there is one in flight at a time, so a database that is down, or coming back,
+is asked as often as the backoff says and not as often as callers arrive.
+
 A borrower that dies takes the socket with it, because the socket belongs to the
 process that holds it: the pool notices through its monitor and starts a
 replacement.
@@ -160,6 +165,7 @@ connection's `timeout` unless `socket_options` says otherwise.
     connecting = 0 :: non_neg_integer(),
     connectors = #{} :: #{reference() => pid()},
     backoff = ?MINIMUM_BACKOFF :: pos_integer(),
+    retry = undefined :: reference() | undefined,
     counters :: counters:counters_ref()
 }).
 
@@ -749,7 +755,7 @@ handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },
-    {noreply, grown(hand_out(Ready, Conn))};
+    {noreply, replenished(hand_out(Ready, Conn))};
 handle_info({server_limit, unknown}, State) ->
     {noreply, State#state{measured = true}};
 handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) when
@@ -760,24 +766,11 @@ handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = 
 handle_info({server_limit, _Limit}, State) ->
     {noreply, State};
 handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
-    State = State0#state{failures = State0#state.failures + 1},
+    State = State0#state{failures = State0#state.failures + 1, connecting = fewer(Connecting)},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
-    Delay = minato_backoff:spread(State#state.backoff),
-    ?LOG_WARNING(
-        #{
-            event => connect_failed,
-            pool => State#state.name,
-            reason => Reason,
-            retry_in_ms => Delay
-        },
-        #{domain => [minato]}
-    ),
-    _ = erlang:send_after(Delay, self(), retry),
-    {noreply, State#state{
-        connecting = fewer(Connecting), backoff = longer(State#state.backoff)
-    }};
+    {noreply, backed_off(State, Reason)};
 handle_info(retry, State) ->
-    {noreply, replenished(State)};
+    {noreply, replenished(State#state{retry = undefined})};
 handle_info(sweep, State) ->
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, swept(State)};
@@ -793,6 +786,32 @@ handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, lost(State, Pid)};
 handle_info(_Message, State) ->
     {noreply, State}.
+
+%% One wait at a time, and nothing is opened until it is over: not for a
+%% caller that arrives, and not for a connection that is given up meanwhile.
+%% A connect that fails during the wait was started before it and changes
+%% nothing about when the next one is.
+-spec backed_off(#state{}, term()) -> #state{}.
+backed_off(#state{retry = undefined, backoff = Backoff} = State, Reason) ->
+    Delay = minato_backoff:spread(Backoff),
+    ok = failed(State, Reason, Delay),
+    Timer = erlang:send_after(Delay, self(), retry),
+    State#state{backoff = longer(Backoff), retry = Timer};
+backed_off(#state{retry = Timer} = State, Reason) ->
+    ok = failed(State, Reason, left(erlang:read_timer(Timer))),
+    State.
+
+-spec left(non_neg_integer() | false) -> non_neg_integer().
+left(false) -> 0;
+left(Milliseconds) -> Milliseconds.
+
+-spec failed(#state{}, term(), non_neg_integer()) -> ok.
+failed(#state{name = Name}, Reason, Delay) ->
+    ?LOG_WARNING(
+        #{event => connect_failed, pool => Name, reason => Reason, retry_in_ms => Delay},
+        #{domain => [minato]}
+    ),
+    ok.
 
 %% A crash reason can carry a stacktrace, and its frames the options, so only an
 %% atom such as `killed` is kept.
@@ -884,8 +903,11 @@ unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
 %% Everybody waiting has a connection on its way, as far as the size allows: a
 %% caller that arrives behind a connect already in flight is not served by it,
 %% because whoever arrived first is. A server that refused the last connect is
-%% asked one at a time until it stops refusing, however many are waiting.
+%% asked one at a time until it stops refusing, however many are waiting, and
+%% not at all until the wait after that refusal is over.
 -spec grown(#state{}) -> #state{}.
+grown(#state{retry = Timer} = State) when is_reference(Timer) ->
+    State;
 grown(#state{size = Size, connecting = Connecting, waiting = Waiting} = State) ->
     Room = Size - held(State),
     case wanted(queue:len(Waiting), State#state.failures) - Connecting of
@@ -893,7 +915,7 @@ grown(#state{size = Size, connecting = Connecting, waiting = Waiting} = State) -
         _Covered -> State
     end.
 
--spec wanted(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+-spec wanted(integer(), non_neg_integer()) -> integer().
 wanted(Waiting, 0) -> Waiting;
 wanted(Waiting, _Failures) -> min(Waiting, 1).
 
@@ -1097,8 +1119,10 @@ replenished(State) ->
 
 -doc false.
 -spec fill(#state{}) -> #state{}.
-fill(#state{min_size = Floor} = State) ->
-    case Floor - held(State) of
+fill(#state{retry = Timer} = State) when is_reference(Timer) ->
+    State;
+fill(#state{min_size = Floor, connecting = Connecting, failures = Failures} = State) ->
+    case wanted(Floor - held(State) + Connecting, Failures) - Connecting of
         Missing when Missing > 0 -> connects(State, Missing);
         _Enough -> State
     end.

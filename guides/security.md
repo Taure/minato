@@ -176,6 +176,11 @@ that was chosen. For each of these there is a test with a server that tries.
   holding it stays up, a listener's subscribers are told they were
   disconnected, and a pool's borrowers are not kept waiting on a server that
   has stopped answering the pool's own questions.
+- **Be connected to as often as callers arrive.** A pool that could not
+  connect waits before it tries again, twice as long each time up to a limit,
+  and opens nothing during the wait whoever asks. A database that is down or
+  restarting is asked a few times a second at most by each pool, however many
+  callers are queued.
 - **Choose a weaker authentication.** See the two sections above: the methods
   in `auth` are the only ones answered, and `channel_binding => require` is
   answered with a bound SCRAM exchange or not at all.

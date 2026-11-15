@@ -174,6 +174,11 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   the checkout tries the next one and answers
   `{error, {session_reset, {minato_protocol, Reason}}}` if none is left, where
   it raised in the caller and left the connection counted as borrowed.
+- A pool that could not connect opens nothing until its wait is over. A
+  caller that arrived during the wait, or a connection given up during it,
+  started a connect at once, so a server that was down was asked as often as
+  callers arrived. While connects are failing the pool also fills back up to
+  `min_size` one connection at a time, where it opened all of them together.
 - The wait before a pool or a listener connects again is a random time in the
   upper half of the backoff, so `retry_in_ms` in `connect_failed` is no longer
   exactly 100, 200, 400 and so on.

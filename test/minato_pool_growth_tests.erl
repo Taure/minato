@@ -104,6 +104,38 @@ a_server_that_is_refusing_is_asked_one_at_a_time_test_() ->
         end
     end}.
 
+%% Two seconds of a server that refuses at once, with a caller arriving every
+%% five milliseconds. The waits between connects are 100, 200, 400 and 800
+%% milliseconds at their longest, so a pool that keeps to them asks a handful
+%% of times, and one that connects for each caller asks hundreds.
+callers_that_arrive_do_not_shorten_the_wait_before_the_next_connect_test_() ->
+    [
+        {timeout, 30, fun() ->
+            Server = minato_backend_server:start([?REFUSED]),
+            try
+                ok = pooled(Server, #{size => 3, min_size => Floor, disconnected => wait}),
+                ok = arriving(erlang:monotonic_time(millisecond) + 2000),
+                Asked = startups(minato_backend_server:received(Server)),
+                ?assert(Asked >= 3),
+                ?assert(Asked =< 9)
+            after
+                _ = minato:stop_pool(?POOL),
+                minato_backend_server:stop(Server)
+            end
+        end}
+     || Floor <- [0, 3]
+    ].
+
+arriving(Until) ->
+    case erlang:monotonic_time(millisecond) < Until of
+        true ->
+            {error, checkout_timeout} = minato_pool:checkout(?POOL, 10),
+            ok = timer:sleep(5),
+            arriving(Until);
+        false ->
+            ok
+    end.
+
 %%----------------------------------------------------------------------
 %% The server
 %%----------------------------------------------------------------------
