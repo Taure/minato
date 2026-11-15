@@ -337,10 +337,21 @@ checked_out(Name, Deadline) ->
 checked_out(Name, Deadline, Left) ->
     case waited(Name, Deadline) of
         {ok, Conn, Expected, Size} ->
-            Answer = cleared(Conn, read_timeout(Conn, Deadline), Expected, false),
+            Answer = answered(Conn, read_timeout(Conn, Deadline), Expected),
             ready(Name, Deadline, attempts(Left, Size), Conn, Answer);
         {error, Reason} ->
             {error, Reason}
+    end.
+
+%% The pool has lent the connection by now and is watching the caller, so a
+%% raise here would leave it lent for as long as a caller that caught the raise
+%% lived. Bytes that are not a message are a connection that is gone.
+-spec answered(minato_conn:conn(), timeout(), [expected()]) -> cleared().
+answered(Conn, Timeout, Expected) ->
+    try
+        cleared(Conn, Timeout, Expected, false)
+    catch
+        error:{minato_protocol, #{reason := Why}} -> {lost, {minato_protocol, Why}}
     end.
 
 %% Every connection in the pool may have been left dirty or have died while it

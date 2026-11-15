@@ -87,6 +87,28 @@ a_connection_with_no_transaction_is_reset_without_a_rollback() ->
         minato_backend_server:stop(Server)
     end.
 
+%% The borrower is still alive when the checkout has answered, which is when a
+%% connection lent and never given back would show.
+a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slot_test_() ->
+    {timeout, 30, fun() ->
+        ok = ready(),
+        NotOne = {raw, <<$Z, 5:32, $X>>},
+        Server = minato_backend_server:start([?READY, ?SHOWN, NotOne]),
+        {ok, _Pid} = minato:start_pool(?POOL, #{
+            size => 1, min_size => 1, connection => connection(Server)
+        }),
+        try
+            ?assertMatch(
+                {error, {session_reset, {minato_protocol, _Why}}},
+                minato_pool:checkout(?POOL, 1000)
+            ),
+            ?assertMatch(#{borrowed := 0}, minato:stats(?POOL))
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
 %% A run that was cut short leaves what it started under the supervisor, and
 %% the next run would find the name taken.
 ready() ->
