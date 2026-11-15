@@ -258,6 +258,12 @@ Never twice, and never inside a transaction the error has aborted, where
 parsing again could only fail: there the statement is dropped and closed, and
 the server's error is returned as it came.
 
+Only a refusal that arrives before `BindComplete` counts, which is where the
+server checks the plan and before anything has run. A statement that fails
+once it is running has failed, whatever code it fails with: it is returned and
+not run a second time, since what it did outside its transaction, a `nextval`
+or a `dblink` call, would be done twice.
+
 What this cannot see is a statement that still runs and now answers with
 other types in the same number of columns, which happens behind a pooler that
 prepares statements itself. See "PgBouncer and connection poolers" in the
@@ -331,12 +337,12 @@ reused(Conn, Sql, Statement, Parameters, Opts) ->
     try encoded(Statement, Parameters, Opts) of
         Encoded ->
             case bound(Conn, Statement, Encoded, Opts) of
-                {error, {pgsql_error, #{code := Code}} = Reason, Read} ->
+                {unbound, {pgsql_error, #{code := Code}} = Reason, Read} ->
                     Doubt = doubt(Code, Statement),
                     Status = minato_conn:transaction_status(Read),
                     refused(Doubt, Status, Read, Sql, Statement, Parameters, Opts, Reason);
                 Answer ->
-                    Answer
+                    begun(Answer)
             end
     catch
         error:{minato_codec, _Report} = Reason:Stacktrace ->
@@ -644,10 +650,22 @@ closed(Conn) ->
 -spec run(conn(), statement(), [term()], minato_protocol:opts()) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 run(Conn, Statement, Parameters, Opts) ->
-    bound(Conn, Statement, encode(Conn, Statement, Parameters, Opts), Opts).
+    begun(bound(Conn, Statement, encode(Conn, Statement, Parameters, Opts), Opts)).
 
--spec bound(conn(), statement(), [iodata() | null], minato_protocol:opts()) ->
-    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+%% A refusal that arrived before `BindComplete` is about the statement as the
+%% server holds it and nothing has run. One that arrived after it is the
+%% statement failing, and whatever it did outside its transaction is done.
+-type ran() ::
+    {ok, result(), conn()}
+    | {error, error(), conn()}
+    | {error, error()}
+    | {unbound, error(), conn()}.
+
+-spec begun(ran()) -> {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+begun({unbound, Reason, Conn}) -> {error, Reason, Conn};
+begun(Answer) -> Answer.
+
+-spec bound(conn(), statement(), [iodata() | null], minato_protocol:opts()) -> ran().
 bound(Conn, #statement{} = Statement, Encoded, Opts) ->
     #statement{
         name = Name,
@@ -705,10 +723,9 @@ codec_opts(#{uuid_format := string, datetime_format := datetime, numeric_format 
 codec_opts(Opts) ->
     maps:with([uuid_format, datetime_format, numeric_format], Opts).
 
--spec executed(conn(), minato_protocol:decoder(), minato_protocol:opts()) ->
-    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+-spec executed(conn(), minato_protocol:decoder(), minato_protocol:opts()) -> ran().
 executed(Conn, Decoder, _Opts) ->
-    executed(Conn, Decoder, [], {unknown, undefined}).
+    executed(Conn, Decoder, [], unbound).
 
 -spec decoding(conn(), [minato_protocol:field()], minato_protocol:decoder()) -> conn().
 decoding(Conn, [], _Decoder) ->
@@ -717,9 +734,27 @@ decoding(Conn, _Fields, Decoder) ->
     minato_conn:decoding(Conn, Decoder).
 
 -spec executed(
-    conn(), minato_protocol:decoder(), [[minato_protocol:row()]], minato_protocol:tag()
-) ->
-    {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
+    conn(), minato_protocol:decoder(), [[minato_protocol:row()]], unbound | minato_protocol:tag()
+) -> ran().
+executed(Conn, Decoder, Runs, unbound) ->
+    case minato_conn:next(Conn) of
+        {ok, bind_complete, Read} ->
+            executed(Read, Decoder, Runs, {unknown, undefined});
+        {ok, {error_response, Reported}, Read} ->
+            unbound(failed(plain(Read), {pgsql_error, Reported}));
+        {ok, {ready_for_query, _Status}, Read} ->
+            {ok, minato_protocol:result({unknown, undefined}, []), plain(Read)};
+        {ok, Message, _Read} when
+            Message =:= parse_complete;
+            Message =:= no_data;
+            element(1, Message) =:= parameter_description
+        ->
+            unexpected(Message, execute);
+        {ok, _Message, Read} ->
+            executed(Read, Decoder, Runs, unbound);
+        {error, Reason} ->
+            {error, Reason}
+    end;
 executed(Conn, Decoder, Runs, Tag) ->
     case minato_conn:next(Conn) of
         {ok, {rows, Run}, Read} ->
@@ -746,6 +781,11 @@ executed(Conn, Decoder, Runs, Tag) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+-spec unbound({error, error(), conn()} | {error, error()}) ->
+    {unbound, error(), conn()} | {error, error()}.
+unbound({error, Reason, Conn}) -> {unbound, Reason, Conn};
+unbound({error, Reason}) -> {error, Reason}.
 
 %%----------------------------------------------------------------------
 %% The simple protocol

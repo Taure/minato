@@ -277,6 +277,34 @@ a_plan_that_changed_inside_a_transaction_is_not_run_again_test() ->
         [named(Message) || Message <- asked(Server)]
     ).
 
+%% A statement that has been bound has started, and one that does something
+%% outside its transaction before it fails has done it. `nextval` is the plain
+%% case. Whatever the code, such a failure is the statement's own.
+a_statement_that_failed_once_it_was_running_is_not_run_again_test_() ->
+    Counting = ~"SELECT nextval('issued') FROM t WHERE a = $1",
+    [
+        {binary_to_list(Code), fun() ->
+            Script = kept() ++ [[bind_complete], [refused(Code)], ?IDLE] ++ ran([<<9:32>>]),
+            {Server, Conn} = connected(Script),
+            {ok, _First, Kept} = minato_query:cached(Conn, Counting, [1]),
+            _ = asked(Server),
+            {error, {pgsql_error, #{code := Returned}}, Read} =
+                minato_query:cached(Kept, Counting, [7]),
+            ?assertEqual(Code, Returned),
+            ?assertEqual([bind, execute, sync], kinds(at_rest(Server))),
+            ?assertEqual({1, 64}, minato_conn:statements(Read)),
+            ?assertEqual(idle, minato_conn:transaction_status(Read))
+        end}
+     || Code <- [~"0A000", ~"08P01", ~"26000", ~"42883"]
+    ].
+
+a_server_that_says_ready_and_nothing_else_has_run_nothing_test() ->
+    {_Server, Conn} = connected(kept() ++ [[], [], ?IDLE]),
+    {ok, _First, Kept} = minato_query:cached(Conn, ?SQL, [1]),
+    ?assertMatch(
+        {ok, #{command := unknown, rows := []}, _Read}, minato_query:cached(Kept, ?SQL, [7])
+    ).
+
 a_statement_the_server_no_longer_has_is_parsed_again_test() ->
     Script = kept() ++ stale(~"26000", idle) ++ parsed([?INT4], [?INT4]) ++ ran([<<9:32>>]),
     {Server, Conn} = connected(Script),
