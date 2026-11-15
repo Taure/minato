@@ -29,7 +29,11 @@ as being for statements that have no values in them.
 
 Identifiers that minato itself has to put in a statement, which is channel names
 in `LISTEN` and savepoint names, are quoted rather than interpolated. There is a
-test that subscribes to a channel called `minato; DROP TABLE nothing`.
+test that subscribes to a channel called `minato; DROP TABLE nothing`. A name
+that cannot be a channel at all, one with a null byte in it or one that is not
+a binary, is answered `{error, {invalid_channel, Why}}` without the listener
+being asked, so a name taken from a request costs the listener's other
+subscribers nothing.
 
 ## TLS
 

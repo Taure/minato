@@ -122,6 +122,9 @@ notifications were missed, because `NOTIFY` has no replay. See
 error or `{error, {minato_protocol, Reason}}` when the connection was lost
 asking. After any of them the subscription is not held, so ask again, at the
 latest when `resubscribed` arrives.
+
+`{error, {invalid_channel, not_a_binary | null_byte}}` for a name that cannot
+be a channel, which the listener is not asked about.
 """.
 -spec listen(minato_listener:name(), binary()) -> ok | {error, term()}.
 listen(Listener, Channel) ->

@@ -178,6 +178,10 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   sent bytes that are not a message, reconnects and tells its subscribers
   instead of stopping. `minato:listen/2` on a connection lost that way answers
   `{error, {minato_protocol, Reason}}` or the socket's error.
+- `minato:listen/2` and `minato:unlisten/2` refuse a channel that is not a
+  binary, `{error, {invalid_channel, not_a_binary}}`, or that holds a null
+  byte, `{error, {invalid_channel, null_byte}}`, without asking the listener.
+  The first stopped the listener and the second cost it its connection.
 - The channel and the payload of a notification are copies, so a subscriber
   that keeps one keeps nothing else.
 

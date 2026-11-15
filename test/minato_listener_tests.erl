@@ -76,6 +76,40 @@ a_channel_name_is_quoted_test_() ->
         ?assertEqual([~"LISTEN \"a \"\"b\"\"; DROP TABLE t\""], statements(Server))
     end).
 
+%% A name from outside can be anything. One that cannot be a channel is the
+%% caller's to hear about, and nobody else's notifications to pay for.
+a_name_that_cannot_be_a_channel_is_refused_and_costs_the_listener_nothing_test_() ->
+    [
+        listening({?MODULE, served}, fun(Server) ->
+            Other = subscriber(~"jobs"),
+            ?assertEqual({error, {invalid_channel, Why}}, Asks(Name)),
+            ?assertEqual(ok, minato_listener:listen(?LISTENER, ~"mail")),
+            ?assertEqual(#{~"jobs" => 1, ~"mail" => 1}, minato_listener:channels(?LISTENER)),
+            Read = minato_backend_server:received(Server, 20),
+            ?assertEqual(
+                [~"LISTEN \"jobs\"", ~"LISTEN \"mail\""], [Sql || {query, Sql} <- Read]
+            ),
+            ?assertEqual(1, length([Startup || {startup, _} = Startup <- Read])),
+            ok = stopped(Other)
+        end)
+     || {Name, Why} <- [
+            {<<"jo", 0, "bs">>, null_byte},
+            {"jobs", not_a_binary},
+            {jobs, not_a_binary},
+            {undefined, not_a_binary}
+        ],
+        Asks <- [
+            fun(Channel) -> minato_listener:listen(?LISTENER, unchecked(Channel)) end,
+            fun(Channel) -> minato_listener:unlisten(?LISTENER, unchecked(Channel)) end
+        ]
+    ].
+
+%% A name the type forbids, because what is checked is that it is refused at
+%% run time too.
+-spec unchecked(term()) -> dynamic().
+unchecked(Name) ->
+    Name.
+
 a_listen_the_server_refuses_is_an_error_and_no_subscription_test_() ->
     listening({?MODULE, refusing}, fun(_Server) ->
         ?assertMatch(

@@ -118,19 +118,40 @@ The name is quoted rather than interpolated, so a channel name from outside is
 a channel name and not a statement. The server cuts a name off at 63 bytes and
 publishes under what is left, so a longer one is subscribed to and never heard
 from.
+
+A name that is not a binary, or that holds a null byte, cannot be a channel:
+`{error, {invalid_channel, not_a_binary}}` and `{error, {invalid_channel,
+null_byte}}`. The listener is not asked, so neither costs it its connection or
+another subscriber a notification.
 """.
 -spec listen(name(), binary()) -> ok | {error, term()}.
 listen(Name, Channel) ->
-    call(Name, {listen, Channel, self()}).
+    case channel(Channel) of
+        ok -> call(Name, {listen, Channel, self()});
+        {error, Reason} -> {error, Reason}
+    end.
 
 -doc """
 Stop the calling process's subscription.
 
-The channel is `UNLISTEN`ed when the last subscriber to it goes.
+The channel is `UNLISTEN`ed when the last subscriber to it goes. A name that
+cannot be a channel is refused as `listen/2` refuses it.
 """.
 -spec unlisten(name(), binary()) -> ok | {error, term()}.
 unlisten(Name, Channel) ->
-    call(Name, {unlisten, Channel, self()}).
+    case channel(Channel) of
+        ok -> call(Name, {unlisten, Channel, self()});
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec channel(term()) -> ok | {error, {invalid_channel, not_a_binary | null_byte}}.
+channel(Channel) when is_binary(Channel) ->
+    case binary:match(Channel, <<0>>) of
+        nomatch -> ok;
+        _Found -> {error, {invalid_channel, null_byte}}
+    end;
+channel(_NotText) ->
+    {error, {invalid_channel, not_a_binary}}.
 
 -doc "Every channel with a subscriber, and how many each has.".
 -spec channels(name()) -> #{binary() => non_neg_integer()}.
