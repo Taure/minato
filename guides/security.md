@@ -175,7 +175,7 @@ module that has been reloaded twice raises `badfun`.
 
 **Parameters never do.** Not in a log and not in a telemetry event, unless
 `log_values` below was turned on and one came back inside a failure. They are
-the values themselves - the email address, the token, the amount.
+the values themselves: the email address, the token, the amount.
 
 **Values inside a failure only if you ask.** A server error quotes what it
 refused: `detail` holds the row that broke a constraint and `message` the input

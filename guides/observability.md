@@ -41,9 +41,9 @@ with completely different fixes that look identical in a query latency graph.
   themselves: the email address, the token, the amount. The one way to see one
   is `log_values` below, and then only one that came back inside a failure.
 - **Values inside a failure, unless you ask.** A failed statement's `reason`
-  keeps the fields of the server's error that name things - `code`,
+  keeps the fields of the server's error that name things (`code`,
   `severity`, `severity_non_localised`, `constraint`, `schema`, `table`,
-  `column`, `data_type`, `routine` - and drops `message`, `detail`, `hint` and
+  `column`, `data_type`, `routine`) and drops `message`, `detail`, `hint` and
   the rest, which quote the row that broke a constraint or the input that would
   not parse. A parameter that would not encode raises `{minato_codec, #{type :=
   _, reason := _, value := redacted}}`, in the event and to the caller alike,

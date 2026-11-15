@@ -113,9 +113,15 @@ stop_listener(Name) ->
 Subscribe the calling process to a channel.
 
 Notifications arrive as `{minato_notification, Channel, Payload, From}`, and a
-reconnect arrives as `{minato_listener, Name, resubscribed}` - which means
+reconnect arrives as `{minato_listener, Name, resubscribed}`, which means
 notifications were missed, because `NOTIFY` has no replay. See
 `m:minato_listener`.
+
+`{error, not_connected}` while the listener has no connection, `{error,
+{pgsql_error, Fields}}` when the server refuses the `LISTEN`, and the socket's
+error or `{error, {minato_protocol, Reason}}` when the connection was lost
+asking. After any of them the subscription is not held, so ask again, at the
+latest when `resubscribed` arrives.
 """.
 -spec listen(minato_listener:name(), binary()) -> ok | {error, term()}.
 listen(Listener, Channel) ->

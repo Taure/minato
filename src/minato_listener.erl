@@ -38,7 +38,8 @@ that still has a subscriber, and then tells each subscriber
 A connection is dropped by more than the socket closing. A `LISTEN` or
 `UNLISTEN` that gets no answer, and bytes from the server that are not a
 message, end it the same way: closed, reconnected, resubscribed and announced.
-`listen/2` on a connection lost that way answers `{error, Reason}` and the
+`listen/2` on a connection lost that way answers `{error, Reason}`, the
+socket's own or `{minato_protocol, Why}`, and the
 caller subscribes again once it is back, as it would after `{error,
 not_connected}`.
 

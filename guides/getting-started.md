@@ -60,6 +60,10 @@ A result is a map:
 #{command => select, num_rows => 1, rows => [{42}]}
 ```
 
+`command` is an atom for every command tag PostgreSQL has. A server that
+answers with a word of its own gets that word back as the binary it sent, so
+match on the atoms you expect and let anything else through as a binary.
+
 Rows are tuples by default and maps under `return_rows_as_maps`:
 
 ```erlang
@@ -77,8 +81,8 @@ Rows are tuples by default and maps under `return_rows_as_maps`:
 
 A statement that fails is a normal outcome, not an exception: `code` is the
 SQLSTATE, and the connection goes back to the pool ready for the next caller.
-What raises is a bug - the wrong number of parameters, a value that does not fit
-the type the server asked for - and those raise where they happen. The raise
+What raises is a bug, such as the wrong number of parameters or a value that
+does not fit the type the server asked for, and those raise where they happen. The raise
 names the type and the reason and says `redacted` where the value was, because
 an uncaught raise is printed by whatever supervises the caller;
 `{minato, [{log_values, true}]}` on a development node puts the value back.

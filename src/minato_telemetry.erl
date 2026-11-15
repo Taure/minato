@@ -40,8 +40,8 @@ an event, in any configuration, for the same reason - they are the values
 themselves.
 
 The same holds for a value that arrives inside a failure. A server error keeps
-the fields that name things - `code`, `severity`, `severity_non_localised`,
-`constraint`, `schema`, `table`, `column`, `data_type`, `routine` - and loses
+the fields that name things (`code`, `severity`, `severity_non_localised`,
+`constraint`, `schema`, `table`, `column`, `data_type`, `routine`) and loses
 `message`, `detail`, `hint` and the rest, because those quote the row that
 violated the constraint or the input that would not parse. A parameter that
 would not encode is reported as its type and why, with `redacted` where the
