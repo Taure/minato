@@ -461,6 +461,62 @@ a_refused_statement_without_parameters_is_not_asked_about_test() ->
     ?assertEqual([bind, execute, sync], kinds(asked(Server))).
 
 %%----------------------------------------------------------------------
+%% Room that a statement no longer kept gives back
+%%----------------------------------------------------------------------
+
+a_parse_the_server_refused_takes_no_room_test() ->
+    Script = [[refused(~"42P01")], [], [], ?IDLE] ++ parsed([?INT4], [?INT4]) ++ ran([<<7:32>>]),
+    {Server, Conn} = connected(Script, #{prepared_statements => 1}),
+    {error, {pgsql_error, #{code := ~"42P01"}}, Read} = minato_query:cached(Conn, ?SQL, [7]),
+    [{parse, Refused, _Sql, _Oids} | _Rest] = asked(Server),
+    {ok, _Result, Kept} = minato_query:cached(Read, ?SQL, [7]),
+    [{parse, Name, _Again, _Types} | _Run] = asked(Server),
+    ?assertNotEqual(~"", Name),
+    ?assertNotEqual(Refused, Name),
+    ?assertEqual({1, 1}, minato_conn:statements(Kept)).
+
+a_statement_parsed_again_is_kept_again_test() ->
+    Script =
+        kept() ++ stale(~"0A000", idle) ++ [[close_complete], ?IDLE] ++
+            parsed([?INT4], [?INT4]) ++ ran([<<9:32>>]) ++ ran([<<9:32>>]),
+    {Server, Conn} = connected(Script, #{prepared_statements => 1}),
+    {Name, Kept} = keep(Server, Conn),
+    {ok, _Result, Renewed} = minato_query:cached(Kept, ?SQL, [7]),
+    ?assertEqual({1, 1}, minato_conn:statements(Renewed)),
+    [Again] = [Parsed || {parse, Parsed, _Sql, _Oids} <- asked(Server)],
+    ?assertNotEqual(~"", Again),
+    ?assertNotEqual(Name, Again),
+    ?assertMatch({ok, #{rows := [{9}]}, _Read}, minato_query:cached(Renewed, ?SQL, [7])),
+    ?assertEqual([bind, execute, sync], kinds(asked(Server))).
+
+a_statement_dropped_in_a_failed_transaction_gives_its_room_back_test() ->
+    Other = ~"SELECT b FROM t WHERE b = $1",
+    Script =
+        kept() ++ stale(~"42883", failed) ++ [[close_complete], ?FAILED] ++
+            parsed([?INT4], [?INT4]) ++ ran([<<5:32>>]),
+    {Server, Conn} = connected(Script, #{prepared_statements => 1}),
+    {_Name, Kept} = keep(Server, Conn),
+    {error, {pgsql_error, #{code := ~"42883"}}, Aborted} = minato_query:cached(Kept, ?SQL, [7]),
+    _ = asked(Server),
+    {ok, _Result, Read} = minato_query:cached(Aborted, Other, [5]),
+    [{parse, Name, _Sql, _Oids} | _Run] = asked(Server),
+    ?assertNotEqual(~"", Name),
+    ?assertEqual({1, 1}, minato_conn:statements(Read)).
+
+a_name_is_never_handed_out_twice_test() ->
+    {_Server, Conn} = connected([], #{prepared_statements => 2}),
+    {First, Claimed} = minato_conn:claim(Conn),
+    Kept = minato_conn:remember(Claimed, ~"a", kept),
+    {Second, Again} = minato_conn:claim(minato_conn:forget(Kept, ~"a")),
+    {Third, Full} = minato_conn:claim(minato_conn:remember(Again, ~"b", kept)),
+    ?assert(lists:all(fun is_binary/1, [First, Second, Third])),
+    ?assertEqual(3, length(lists:usort([First, Second, Third]))),
+    ?assertEqual(
+        {undefined, minato_conn:remember(Full, ~"c", kept)},
+        minato_conn:claim(minato_conn:remember(Full, ~"c", kept))
+    ).
+
+%%----------------------------------------------------------------------
 %% A connection with no room to keep a statement
 %%----------------------------------------------------------------------
 

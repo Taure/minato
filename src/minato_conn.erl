@@ -1221,10 +1221,10 @@ recall(#conn{statements = Statements}, Sql) ->
 -doc """
 Keep a parsed statement under its SQL, if there is room.
 
-Room is `claim/1`'s to give: a connection that has handed out every name it is
-allowed answers `undefined` there, and the caller runs the statement unnamed. An
-unbounded workload therefore gets the uncached path rather than an unbounded
-pile of parsed statements in the backend.
+Room is `claim/1`'s to give: a connection that is keeping as many statements
+as it is allowed answers `undefined` there, and the caller runs the statement
+unnamed. An unbounded workload therefore gets the uncached path rather than an
+unbounded pile of parsed statements in the backend.
 """.
 -spec remember(conn(), binary(), term()) -> conn().
 remember(#conn{statements = Statements} = Conn, Sql, Statement) ->
@@ -1232,6 +1232,11 @@ remember(#conn{statements = Statements} = Conn, Sql, Statement) ->
 
 -doc """
 Take the next statement name this connection has room for, or `undefined`.
+
+Room is counted in statements kept, so a name whose statement was never kept,
+because the server refused to parse it, or is kept no longer, after
+`forget/2`, takes none. A connection that has renewed or dropped statements
+any number of times still keeps as many as `prepared_statements` allows.
 
 Names never repeat, even after `forget/2`, because the statement a forgotten
 name refers to may still be parsed on the server, and parsing a second one under
@@ -1253,7 +1258,7 @@ random bytes make it impossible instead of unlikely - a counter that only has
 to be unique per connection stays a counter, and the prefix does the rest.
 """.
 -spec claim(conn()) -> {binary() | undefined, conn()}.
-claim(#conn{prepared = Prepared, limit = Limit} = Conn) when Prepared >= Limit ->
+claim(#conn{statements = Statements, limit = Limit} = Conn) when map_size(Statements) >= Limit ->
     {undefined, Conn};
 claim(#conn{prefix = Prefix, prepared = Prepared} = Conn) ->
     Name = <<"minato_", Prefix/binary, "_", (integer_to_binary(Prepared))/binary>>,
@@ -1269,7 +1274,7 @@ under a cached plan looks like.
 forget(#conn{statements = Statements} = Conn, Sql) ->
     Conn#conn{statements = maps:remove(Sql, Statements)}.
 
--doc "How many statements this connection is keeping, and how many names it may claim.".
+-doc "How many statements this connection is keeping, and how many it may keep.".
 -spec statements(conn()) -> {non_neg_integer(), non_neg_integer()}.
 statements(#conn{statements = Statements, limit = Limit}) ->
     {map_size(Statements), Limit}.
