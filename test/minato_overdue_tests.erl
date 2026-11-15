@@ -109,16 +109,19 @@ without_the_application_a_writer_that_died_is_not_waited_for_test_() ->
     stopped(fun() ->
         {Socket, Peer} = connected(),
         Self = self(),
-        Writer = spawn(fun() ->
+        {Writer, Gone} = spawn_monitor(fun() ->
             Self ! {watching, minato_overdue:watch(Socket, 60000)}
         end),
         Alone =
             receive
                 {watching, {_Timer, Pid}} -> Pid
-            after 5000 -> error(not_watching)
+            after 1000 -> error(not_watching)
             end,
         Monitor = erlang:monitor(process, Alone),
-        ?assertNot(is_process_alive(Writer)),
+        receive
+            {'DOWN', Gone, process, Writer, _Why} -> ok
+        after 1000 -> error(still_writing)
+        end,
         receive
             {'DOWN', Monitor, process, Alone, Reason} -> ?assertEqual(normal, Reason)
         after 5000 -> error(still_watching)
