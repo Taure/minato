@@ -37,9 +37,11 @@ jobs:
       MINATO_TLS_HOST: localhost
       MINATO_TLS_PORT: '55433'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@0a75ccf1c18916f948584bdc83392d72e26f58f7 # v1
         with:
           otp-version: '28'
           rebar3-version: '3'
@@ -124,7 +126,7 @@ jobs:
       # suite that hung is known and the case inside it is not.
       - name: The Common Test logs, which say which case
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ct-logs-${{ github.run_attempt }}
           path: _build/test/logs
@@ -154,7 +156,7 @@ jobs:
 
       - name: The servers' logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-log-${{ github.run_attempt }}
           path: |
