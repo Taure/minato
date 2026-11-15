@@ -79,6 +79,9 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   minato did not know used to be passed over, so `sslmode => require` or a
   misspelt `channel_binding` connected with the default. The options are the
   ones in the configuration guide; remove anything else from what is passed.
+- A `host` that is not a string, an atom, an address or `{local, Path}`, a
+  binary above all, is `{invalid_option, host}`. `minato_conn:connect/1` raised
+  `function_clause` for one, and a pool did not start, with that as the reason.
 - `ssl_options` without `ssl => true` are `{invalid_option, ssl_options}`.
   They used to be ignored and the connection opened in the clear. Add
   `ssl => true`, or take them out.

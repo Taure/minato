@@ -115,7 +115,8 @@ a_pool_whose_connection_could_not_be_secured_as_asked_does_not_start_test_() ->
             {ssl, yes},
             {auth, [scram]},
             {ssl_options, [{verify, verify_pear}]},
-            {password, 42}
+            {password, 42},
+            {host, ~"db.example.invalid"}
         ]
     ].
 
@@ -125,6 +126,12 @@ a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() 
         {error, {invalid_option, channel_binding}},
         minato:start_listener(minato_pool_opts_tests_listener, #{
             connection => asking(channel_binding, required)
+        })
+    ),
+    ?assertEqual(
+        {error, {invalid_option, host}},
+        minato:start_listener(minato_pool_opts_tests_listener, #{
+            connection => asking(host, ~"db.example.invalid")
         })
     ),
     ?assertEqual(

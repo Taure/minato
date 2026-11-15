@@ -12,7 +12,7 @@ directly.
 | `user` | required | the role to authenticate as |
 | `password` | none | a binary or a string, or a fun of no arguments returning one, called once per attempt and never stored; prefer a named `fun my_app:db_password/0` |
 | `database` | the user | as PostgreSQL itself defaults |
-| `host` | `"localhost"` | |
+| `host` | `"localhost"` | a name as a string or an atom, an address as a tuple, or `{local, Path}` for a Unix socket; a binary is refused |
 | `port` | `5432` | |
 | `parameters` | see below | added to the `StartupMessage` |
 | `ssl` | `false` | |

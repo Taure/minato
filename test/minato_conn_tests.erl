@@ -166,7 +166,12 @@ unknown_options() ->
         {ssl_options, [~"verify"]},
         {ssl_options, ending_in({verify, verify_peer}, cacerts)},
         {password, 42},
-        {password, undefined}
+        {password, undefined},
+        {host, ~"db.example.invalid"},
+        {host, 5432},
+        {host, {127, 0, 1}},
+        {host, {127, 0, 0, 256}},
+        {host, {local, socket}}
     ].
 
 every_value_an_option_can_have_is_accepted_test_() ->
@@ -188,7 +193,13 @@ every_value_an_option_can_have_is_accepted_test_() ->
             {password, ~"secret"},
             {password, "secret"},
             {password, fun() -> ~"secret" end},
-            {host, "db"}
+            {host, "db"},
+            {host, db},
+            {host, loopback},
+            {host, {127, 0, 0, 1}},
+            {host, {0, 0, 0, 0, 0, 0, 0, 1}},
+            {host, {local, "/var/run/postgresql/.s.PGSQL.5432"}},
+            {host, {local, ~"/var/run/postgresql/.s.PGSQL.5432"}}
         ]
     ] ++ [?_assertEqual(ok, minato_conn:validate(#{user => ~"minato"}))].
 

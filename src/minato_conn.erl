@@ -452,7 +452,9 @@ connection opened with the default the caller meant to change. `ssl_options`
 are refused without `ssl => true`, because options for a TLS session nobody
 asked for are a session the caller believes it has.
 
-`channel_binding` is `prefer`, `require` or `disable`; `ssl` is a boolean;
+`host` is a name as a string or an atom, an address as a tuple, or
+`{local, Path}`, and not a binary; `channel_binding` is `prefer`, `require` or
+`disable`; `ssl` is a boolean;
 `auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
 `none`; `password` is a binary, a string or a fun that answers one; and
 `ssl_options` is a list of options, in which `verify` is `verify_peer` or
@@ -474,7 +476,7 @@ does not start: `{error, {invalid_option, Key}}`.
 -spec validate(opts()) -> ok | {error, {invalid_option, term()}}.
 validate(Opts) ->
     case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
-        [] -> validate([channel_binding, ssl, auth, ssl_options, password], Opts);
+        [] -> validate([host, channel_binding, ssl, auth, ssl_options, password], Opts);
         [Key | _Others] -> {error, {invalid_option, Key}}
     end.
 
@@ -493,6 +495,12 @@ validate([], _Opts) ->
     ok.
 
 -spec valid(atom(), term(), opts()) -> boolean().
+valid(host, {local, Path}, _Opts) ->
+    is_binary(Path) orelse is_list(Path);
+valid(host, Address, _Opts) when is_tuple(Address) ->
+    inet:is_ip_address(Address);
+valid(host, Name, _Opts) ->
+    is_atom(Name) orelse is_list(Name);
 valid(channel_binding, Binding, _Opts) ->
     Binding =:= prefer orelse Binding =:= require orelse Binding =:= disable;
 valid(ssl, Wanted, _Opts) ->
@@ -568,7 +576,9 @@ here(Name) when is_list(Name) ->
     case inet:parse_address(Name) of
         {ok, Address} -> here(Address);
         {error, _NotAnAddress} -> false
-    end.
+    end;
+here(_NotAHost) ->
+    false.
 
 -spec known(ok | {error, {invalid_option, term()}}) -> ok.
 known(ok) -> ok;
