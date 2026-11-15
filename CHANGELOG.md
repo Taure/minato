@@ -168,6 +168,10 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   including the frame of a fun. `log_values` restores both.
 - Query events carry `host`, `port`, `database` and, on a pooled connection,
   `pool`.
+- The `reason` of a pool's `connect_failed` warning is narrowed the same way:
+  a server's error keeps the fields that name things, and an authentication
+  failure is its kind alone, `{minato_auth, no_supported_mechanism}` where it
+  carried the list the server offered. The warning is written on every try.
 
 **Pools, listeners and transactions**
 

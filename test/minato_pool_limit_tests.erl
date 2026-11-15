@@ -345,6 +345,42 @@ unencrypted(Connection) ->
     [Warning || #{event := unencrypted_connection} = Warning <- Warnings].
 
 %%----------------------------------------------------------------------
+%% What a failed connect is logged with
+%%----------------------------------------------------------------------
+
+%% The warning is written once for every try, and what the server refused with
+%% is the server's to make as long as it likes.
+a_refusal_is_logged_by_its_name_and_not_in_the_servers_words_test_() ->
+    Long = binary:copy(~"x", 100000),
+    Refused =
+        {error_response, #{severity => ~"FATAL", code => ~"28P01", message => Long}},
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                Server = minato_backend_server:start([Answer]),
+                try
+                    [#{reason := Reason} | _Later] = failures(fun() ->
+                        ok = pooled(Server, #{size => 1, min_size => 1}, #{password => ~"pencil"}),
+                        read(Server, fun(Seen) -> startups(Seen) >= 1 end)
+                    end),
+                    ?assertEqual(Expected, Reason)
+                after
+                    _ = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Expected, Answer} <- [
+            {"an error", {pgsql_error, #{severity => ~"FATAL", code => ~"28P01"}}, [Refused]},
+            {"mechanisms it made up", {minato_auth, no_supported_mechanism}, [
+                {authentication_sasl, [Long]}
+            ]},
+            {"a second request in one exchange", {minato_auth, method_changed_mid_exchange}, [
+                {authentication_sasl, [~"SCRAM-SHA-256"]}, {authentication_sasl, [Long]}
+            ]}
+        ]
+    ].
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 

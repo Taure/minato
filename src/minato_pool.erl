@@ -817,10 +817,26 @@ left(Milliseconds) -> Milliseconds.
 -spec failed(#state{}, term(), non_neg_integer()) -> ok.
 failed(#state{name = Name}, Reason, Delay) ->
     ?LOG_WARNING(
-        #{event => connect_failed, pool => Name, reason => Reason, retry_in_ms => Delay},
+        #{event => connect_failed, pool => Name, reason => named(Reason), retry_in_ms => Delay},
         #{domain => [minato]}
     ),
     ok.
+
+%% Written once for every try, and what a server refuses with is the server's
+%% to make as long as it likes: a refusal is logged by what it was, without
+%% the list or the text that came with it.
+-spec named(term()) -> term().
+named({Module, Why}) when
+    Module =:= minato_auth; Module =:= minato_scram; Module =:= minato_conn
+->
+    {Module, kind(Why)};
+named(Reason) ->
+    minato_telemetry:reason(Reason).
+
+-spec kind(term()) -> atom().
+kind(Why) when is_atom(Why) -> Why;
+kind(Why) when is_tuple(Why), is_atom(element(1, Why)) -> element(1, Why);
+kind(_Why) -> unnamed.
 
 %% A crash reason can carry a stacktrace, and its frames the options, so only an
 %% atom such as `killed` is kept.

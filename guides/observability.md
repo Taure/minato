@@ -96,7 +96,7 @@ otherwise see:
 
 | level | event | why it is worth a line |
 | --- | --- | --- |
-| warning | `connect_failed` | a pool could not open a connection; carries `reason` and `retry_in_ms` |
+| warning | `connect_failed` | a pool could not open a connection; carries `retry_in_ms` and a `reason` that names the refusal: a server's error by the fields that name things, as in `[minato, query, stop]`, and an authentication failure by its kind, without the text or the list the server sent with it |
 | warning | `session_reset_failed` | a checkout closed a connection whose reset did not answer as sent: `reason` is `unread_answer` when the last borrower gave it back with answers unread, `sql_prepared_statement` when it left a statement prepared with SQL `PREPARE`, `in_transaction` or `failed` when the reset ended inside a transaction, otherwise the server's refusal by SQLSTATE `code` |
 | warning | `listener_resubscribed` | a listener reconnected, which means notifications were missed - `NOTIFY` has no replay |
 | info | `cached_plan_invalidated` | a schema change left a cached statement with a result or parameters the table no longer has; minato parsed it again, but somebody ran a migration |
