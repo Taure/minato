@@ -394,10 +394,8 @@ statement(#state{conn = Conn} = State, Sql) ->
         {error, Reason, Ran} -> {error, Reason, State#state{conn = Ran}};
         {error, Reason} -> {error, Reason, dropped(State)}
     catch
-        error:{Module, #{reason := Reason}} when
-            Module =:= minato_protocol; Module =:= minato_query
-        ->
-            {error, {Module, Reason}, dropped(State)}
+        error:{minato_protocol, #{reason := Reason}} ->
+            {error, {minato_protocol, Reason}, dropped(State)}
     end.
 
 -spec reading(minato_conn:conn(), binary()) ->
