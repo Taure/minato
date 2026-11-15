@@ -15,23 +15,6 @@ order, whatever sizes the buffers arrive in.
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: the PropEr macros expand to term(), so the functions that use them
-%% cannot be given a useful type.
--eqwalizer({nowarn_function, prop_password_roundtrip/0}).
--eqwalizer({nowarn_function, prop_frame_roundtrip/0}).
--eqwalizer({nowarn_function, prop_every_split_frames_the_same/0}).
--eqwalizer({nowarn_function, prop_arbitrary_bytes_are_total/0}).
--eqwalizer({nowarn_function, prop_every_prefix_is_incomplete/0}).
--eqwalizer({nowarn_function, gen_stream/0}).
--eqwalizer({nowarn_function, gen_corrupted_stream/0}).
--eqwalizer({nowarn_function, prop_data_row_roundtrip/0}).
--eqwalizer({nowarn_function, prop_data_row_map_roundtrip/0}).
--eqwalizer({nowarn_function, gen_error_fields/0}).
--eqwalizer({nowarn_function, gen_parameters/0}).
--eqwalizer({nowarn_function, gen_bytes/1}).
--eqwalizer({nowarn_function, gen_cstring/0}).
--eqwalizer({nowarn_function, gen_binary/0}).
-
 -define(NUMTESTS, 300).
 
 frontend_property_test_() ->
@@ -77,109 +60,77 @@ check(Prop) ->
 %%----------------------------------------------------------------------
 
 prop_frontend_roundtrip() ->
-    ?FORALL(
-        Message,
-        gen_frontend(),
+    forall(gen_frontend(), fun(Message) ->
         Message =:= minato_frontend_reader:read(encode(Message))
-    ).
+    end).
 
 prop_password_roundtrip() ->
-    ?FORALL(
-        Message,
-        gen_password(),
-        begin
-            {password_message, Payload} = minato_frontend_reader:read(encode(Message)),
-            Message =:= minato_frontend_reader:password(element(1, Message), Payload)
-        end
-    ).
+    forall(gen_password(), fun(Message) ->
+        {password_message, Payload} = minato_frontend_reader:read(encode(Message)),
+        Message =:= minato_frontend_reader:password(element(1, Message), Payload)
+    end).
 
 prop_frontend_declares_its_length() ->
-    ?FORALL(
-        Message,
-        oneof([gen_frontend(), gen_password()]),
-        begin
-            Bytes = encode(Message),
-            Offset = type_byte_size(Message),
-            <<_:Offset/binary, Length:32, _/binary>> = Bytes,
-            Length =:= byte_size(Bytes) - Offset
-        end
-    ).
+    forall(oneof([gen_frontend(), gen_password()]), fun(Message) ->
+        Bytes = encode(Message),
+        Offset = type_byte_size(Message),
+        <<_:Offset/binary, Length:32, _/binary>> = Bytes,
+        Length =:= byte_size(Bytes) - Offset
+    end).
 
 prop_frame_roundtrip() ->
-    ?FORALL(
-        {Messages, Sizes},
-        {list(gen_backend()), list(integer(1, 32))},
-        begin
-            Bytes = minato_backend_writer:write_all(Messages),
-            {Decoded, Rest} = feed(chunks(Bytes, Sizes)),
-            Decoded =:= [decoded(Message) || Message <- Messages] andalso Rest =:= ~""
-        end
-    ).
+    forall({list(gen_backend()), list(integer(1, 32))}, fun({Messages, Sizes}) ->
+        Bytes = minato_backend_writer:write_all(Messages),
+        {Decoded, Rest} = feed(chunks(Bytes, Sizes)),
+        Decoded =:= [decoded(Message) || Message <- Messages] andalso Rest =:= ~""
+    end).
 
 prop_every_split_frames_the_same() ->
-    ?FORALL(
-        Messages,
-        gen_stream(),
-        begin
-            Bytes = minato_backend_writer:write_all(Messages),
-            Expected = {[decoded(Message) || Message <- Messages], ~""},
-            lists:all(
-                fun(At) -> feed_two(Bytes, At) =:= Expected end,
-                lists:seq(0, byte_size(Bytes))
-            )
-        end
-    ).
+    forall(gen_stream(), fun(Messages) ->
+        Bytes = minato_backend_writer:write_all(Messages),
+        Expected = {[decoded(Message) || Message <- Messages], ~""},
+        lists:all(
+            fun(At) -> feed_two(Bytes, At) =:= Expected end,
+            lists:seq(0, byte_size(Bytes))
+        )
+    end).
 
 prop_arbitrary_bytes_are_total() ->
-    ?FORALL(
-        Bytes,
-        oneof([gen_binary(), gen_corrupted_stream()]),
+    forall(oneof([gen_binary(), gen_corrupted_stream()]), fun(Bytes) ->
         try minato_protocol:frame(Bytes) of
             {Messages, Rest} -> is_list(Messages) andalso is_binary(Rest)
         catch
             error:{minato_protocol, #{message := _, reason := _, data := _}} -> true;
             _Class:_Reason -> false
         end
-    ).
+    end).
 
 prop_every_prefix_is_incomplete() ->
-    ?FORALL(
-        Message,
-        gen_backend(),
-        begin
-            Bytes = minato_backend_writer:write(Message),
-            lists:all(
-                fun(Size) ->
-                    minato_protocol:decode(binary:part(Bytes, 0, Size)) =:= incomplete
-                end,
-                lists:seq(0, byte_size(Bytes) - 1)
-            )
-        end
-    ).
+    forall(gen_backend(), fun(Message) ->
+        Bytes = minato_backend_writer:write(Message),
+        [] =:=
+            [
+                Size
+             || Size <- lists:seq(0, byte_size(Bytes) - 1),
+                minato_protocol:decode(binary:part(Bytes, 0, Size)) =/= incomplete
+            ]
+    end).
 
 prop_data_row_roundtrip() ->
-    ?FORALL(
-        Values,
-        list(oneof([null, integer(-2147483648, 2147483647)])),
-        begin
-            {Fields, Columns} = int4_row(Values),
-            Bytes = minato_backend_writer:write({data_row, Columns}),
-            {[{data_row, Raw}], ~""} = minato_protocol:frame(Bytes),
-            Decoder = minato_protocol:decoder(Fields, #{}),
-            list_to_tuple(Values) =:= minato_protocol:decode_row(Decoder, Raw)
-        end
-    ).
+    forall(list(oneof([null, integer(-2147483648, 2147483647)])), fun(Values) ->
+        {Fields, Columns} = int4_row(Values),
+        Bytes = minato_backend_writer:write({data_row, Columns}),
+        {[{data_row, Raw}], ~""} = minato_protocol:frame(Bytes),
+        Decoder = minato_protocol:decoder(Fields, #{}),
+        list_to_tuple(Values) =:= minato_protocol:decode_row(Decoder, Raw)
+    end).
 
 prop_data_row_map_roundtrip() ->
-    ?FORALL(
-        Values,
-        list(oneof([null, integer(-2147483648, 2147483647)])),
-        begin
-            {Fields, Columns} = int4_row(Values),
-            Expected = maps:from_list(lists:zip(column_names(length(Values)), Values)),
-            Expected =:= minato_protocol:row(Fields, Columns, #{return_rows_as_maps => true})
-        end
-    ).
+    forall(list(oneof([null, integer(-2147483648, 2147483647)])), fun(Values) ->
+        {Fields, Columns} = int4_row(Values),
+        Expected = maps:from_list(lists:zip(column_names(length(Values)), Values)),
+        Expected =:= minato_protocol:row(Fields, Columns, #{return_rows_as_maps => true})
+    end).
 
 %%----------------------------------------------------------------------
 %% Helpers
@@ -285,42 +236,35 @@ parsed_tag(Tag) ->
 
 gen_frontend() ->
     oneof([
-        ?LET(Parameters, gen_parameters(), {startup, Parameters}),
+        from(gen_parameters(), fun(Parameters) -> {startup, Parameters} end),
         ssl_request,
-        ?LET({Pid, Secret}, {gen_int32(), gen_int32()}, {cancel_request, Pid, Secret}),
-        ?LET(Query, gen_cstring(), {query, Query}),
-        ?LET(
-            {Name, Query, Oids},
-            {gen_cstring(), gen_cstring(), list(gen_oid())},
+        from({gen_int32(), gen_int32()}, fun({Pid, Secret}) -> {cancel_request, Pid, Secret} end),
+        from(gen_cstring(), fun(Query) -> {query, Query} end),
+        from({gen_cstring(), gen_cstring(), list(gen_oid())}, fun({Name, Query, Oids}) ->
             {parse, Name, Query, Oids}
-        ),
+        end),
         gen_bind(),
-        ?LET({Target, Name}, {gen_target(), gen_cstring()}, {describe, Target, Name}),
-        ?LET(
-            {Portal, MaxRows},
-            {gen_cstring(), integer(0, 2147483647)},
+        from({gen_target(), gen_cstring()}, fun({Target, Name}) -> {describe, Target, Name} end),
+        from({gen_cstring(), integer(0, 2147483647)}, fun({Portal, MaxRows}) ->
             {execute, Portal, MaxRows}
-        ),
+        end),
         sync,
         flush,
-        ?LET({Target, Name}, {gen_target(), gen_cstring()}, {close, Target, Name}),
+        from({gen_target(), gen_cstring()}, fun({Target, Name}) -> {close, Target, Name} end),
         terminate
     ]).
 
 gen_password() ->
     oneof([
-        ?LET(Password, gen_cstring(), {password, Password}),
-        ?LET(
-            {Mechanism, Data},
-            {gen_cstring(), oneof([null, gen_binary()])},
+        from(gen_cstring(), fun(Password) -> {password, Password} end),
+        from({gen_cstring(), oneof([null, gen_binary()])}, fun({Mechanism, Data}) ->
             {sasl_initial_response, Mechanism, Data}
-        ),
-        ?LET(Data, gen_binary(), {sasl_response, Data})
+        end),
+        from(gen_binary(), fun(Data) -> {sasl_response, Data} end)
     ]).
 
 gen_bind() ->
-    ?LET(
-        {Portal, Statement, ParameterFormats, Parameters, ResultFormats},
+    from(
         {
             gen_cstring(),
             gen_cstring(),
@@ -328,37 +272,39 @@ gen_bind() ->
             list(oneof([null, gen_binary()])),
             list(gen_format())
         },
-        {bind, Portal, Statement, ParameterFormats, Parameters, ResultFormats}
+        fun({Portal, Statement, ParameterFormats, Parameters, ResultFormats}) ->
+            {bind, Portal, Statement, ParameterFormats, Parameters, ResultFormats}
+        end
     ).
 
 gen_backend() ->
     oneof([
         authentication_ok,
         authentication_cleartext_password,
-        ?LET(Salt, gen_bytes(4), {authentication_md5_password, Salt}),
-        ?LET(Mechanisms, list(gen_cstring()), {authentication_sasl, Mechanisms}),
-        ?LET(Data, gen_binary(), {authentication_sasl_continue, Data}),
-        ?LET(Data, gen_binary(), {authentication_sasl_final, Data}),
-        ?LET({Pid, Secret}, {gen_int32(), gen_int32()}, {backend_key_data, Pid, Secret}),
-        ?LET({Name, Value}, {gen_cstring(), gen_cstring()}, {parameter_status, Name, Value}),
-        ?LET(Status, oneof([idle, transaction, failed]), {ready_for_query, Status}),
-        ?LET(Fields, list(gen_described_field()), {row_description, Fields}),
-        ?LET(Columns, list(oneof([null, gen_binary()])), {data_row, Columns}),
-        ?LET(Tag, oneof([Tag || {Tag, _} <- command_tags()]), {command_complete, Tag}),
+        from(gen_bytes(4), fun(Salt) -> {authentication_md5_password, Salt} end),
+        from(list(gen_cstring()), fun(Mechanisms) -> {authentication_sasl, Mechanisms} end),
+        from(gen_binary(), fun(Data) -> {authentication_sasl_continue, Data} end),
+        from(gen_binary(), fun(Data) -> {authentication_sasl_final, Data} end),
+        from({gen_int32(), gen_int32()}, fun({Pid, Secret}) -> {backend_key_data, Pid, Secret} end),
+        from({gen_cstring(), gen_cstring()}, fun({Name, Value}) ->
+            {parameter_status, Name, Value}
+        end),
+        from(oneof([idle, transaction, failed]), fun(Status) -> {ready_for_query, Status} end),
+        from(list(gen_described_field()), fun(Fields) -> {row_description, Fields} end),
+        from(list(oneof([null, gen_binary()])), fun(Columns) -> {data_row, Columns} end),
+        from(oneof([Tag || {Tag, _} <- command_tags()]), fun(Tag) -> {command_complete, Tag} end),
         empty_query_response,
-        ?LET(Fields, gen_error_fields(), {error_response, Fields}),
-        ?LET(Fields, gen_error_fields(), {notice_response, Fields}),
+        from(gen_error_fields(), fun(Fields) -> {error_response, Fields} end),
+        from(gen_error_fields(), fun(Fields) -> {notice_response, Fields} end),
         parse_complete,
         bind_complete,
         close_complete,
         no_data,
-        ?LET(Oids, list(gen_oid()), {parameter_description, Oids}),
+        from(list(gen_oid()), fun(Oids) -> {parameter_description, Oids} end),
         portal_suspended,
-        ?LET(
-            {Pid, Channel, Payload},
-            {gen_int32(), gen_cstring(), gen_cstring()},
+        from({gen_int32(), gen_cstring(), gen_cstring()}, fun({Pid, Channel, Payload}) ->
             {notification_response, Pid, Channel, Payload}
-        )
+        end)
     ]).
 
 -doc """
@@ -373,31 +319,24 @@ tests the same boundaries. Long payloads are covered by
 `prop_frame_roundtrip/0`, which frames each stream once at random chunk sizes.
 """.
 gen_stream() ->
-    ?LET(Messages, resize(6, list(resize(6, gen_backend()))), lists:sublist(Messages, 6)).
+    from(resize(6, list(resize(6, gen_backend()))), fun(Messages) -> lists:sublist(Messages, 6) end).
 
 gen_corrupted_stream() ->
-    ?LET(
-        {Messages, Byte},
-        {gen_stream(), integer(0, 255)},
-        begin
-            Bytes = minato_backend_writer:write_all(Messages),
-            ?LET(
-                At,
-                integer(0, max(0, byte_size(Bytes) - 1)),
-                case Bytes of
-                    ~"" ->
-                        ~"";
-                    _ ->
-                        <<Head:At/binary, _, Tail/binary>> = Bytes,
-                        <<Head/binary, Byte, Tail/binary>>
-                end
-            )
-        end
-    ).
+    from({gen_stream(), integer(0, 255)}, fun({Messages, Byte}) ->
+        Bytes = minato_backend_writer:write_all(Messages),
+        from(integer(0, last_offset(Bytes)), fun(At) ->
+            case Bytes of
+                ~"" ->
+                    ~"";
+                _ ->
+                    <<Head:At/binary, _, Tail/binary>> = Bytes,
+                    <<Head/binary, Byte, Tail/binary>>
+            end
+        end)
+    end).
 
 gen_described_field() ->
-    ?LET(
-        {Name, TableOid, Column, TypeOid, TypeSize, TypeModifier, Format},
+    from(
         {
             gen_cstring(),
             gen_oid(),
@@ -407,23 +346,25 @@ gen_described_field() ->
             integer(-2147483648, 2147483647),
             gen_format()
         },
-        #{
-            name => Name,
-            table_oid => TableOid,
-            column => Column,
-            type_oid => TypeOid,
-            type_size => TypeSize,
-            type_modifier => TypeModifier,
-            format => Format
-        }
+        fun({Name, TableOid, Column, TypeOid, TypeSize, TypeModifier, Format}) ->
+            #{
+                name => Name,
+                table_oid => TableOid,
+                column => Column,
+                type_oid => TypeOid,
+                type_size => TypeSize,
+                type_modifier => TypeModifier,
+                format => Format
+            }
+        end
     ).
 
 gen_error_fields() ->
-    ?LET(
-        {Code, Message, Extra},
-        {gen_cstring(), gen_cstring(), list({gen_field_name(), gen_cstring()})},
+    from({gen_cstring(), gen_cstring(), list({gen_field_name(), gen_cstring()})}, fun(
+        {Code, Message, Extra}
+    ) ->
         maps:from_list(Extra ++ [{code, Code}, {message, Message}])
-    ).
+    end).
 
 gen_field_name() ->
     oneof([
@@ -448,7 +389,7 @@ gen_field_name() ->
 %% An empty name is how the packet ends its parameter list, so the encoder
 %% refuses one and the generator leaves it out.
 gen_parameters() ->
-    ?LET(Pairs, list({non_empty(gen_cstring()), gen_cstring()}), maps:from_list(Pairs)).
+    from(list({non_empty(gen_cstring()), gen_cstring()}), fun maps:from_list/1).
 
 gen_target() ->
     oneof([statement, portal]).
@@ -463,10 +404,28 @@ gen_int32() ->
     integer(0, 4294967295).
 
 gen_cstring() ->
-    ?LET(Bytes, list(integer(1, 255)), list_to_binary(Bytes)).
+    from(list(integer(1, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_binary() ->
-    ?LET(Bytes, list(integer(0, 255)), list_to_binary(Bytes)).
+    from(list(integer(0, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_bytes(Count) ->
-    ?LET(Bytes, vector(Count, integer(0, 255)), list_to_binary(Bytes)).
+    from(vector(Count, integer(0, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
+
+-spec last_offset(binary()) -> non_neg_integer().
+last_offset(~"") -> 0;
+last_offset(Bytes) -> byte_size(Bytes) - 1.
+
+%%----------------------------------------------------------------------
+%% What PropEr generates
+%%----------------------------------------------------------------------
+
+%% A generated value has no type until the test runs, so it is `dynamic()`
+%% here and nowhere else.
+-spec forall(proper_types:raw_type(), fun((dynamic()) -> proper:test())) -> proper:test().
+forall(Type, Property) ->
+    ?FORALL(Generated, Type, Property(Generated)).
+
+-spec from(proper_types:raw_type(), fun((dynamic()) -> term())) -> proper_types:type().
+from(Type, Made) ->
+    ?LET(Generated, Type, Made(Generated)).

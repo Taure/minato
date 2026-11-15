@@ -8,13 +8,6 @@ went in.
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: the PropEr macros expand to term(), so the functions that use them
-%% cannot be given a useful type.
--eqwalizer({nowarn_function, prop_days_match_calendar/0}).
--eqwalizer({nowarn_function, prop_days_invert/0}).
--eqwalizer({nowarn_function, gen_float/0}).
--eqwalizer({nowarn_function, gen_digits/2}).
-
 -define(NUMTESTS, 300).
 
 property_test_() ->
@@ -60,55 +53,39 @@ check(Prop) ->
 prop_roundtrip(Name, Format) ->
     Oid = minato_oid:oid(Name),
     Opts = opts(Name),
-    ?FORALL(
-        Value,
-        gen_nullable(gen_for(Name)),
+    forall(gen_nullable(gen_for(Name)), fun(Value) ->
         Value =:= minato_codec:decode(Oid, wire(Oid, Value, Format, Opts), Format, Opts)
-    ).
+    end).
 
 prop_array_roundtrip(Name, Format) ->
     Oid = minato_oid:oid({array, Name}),
     Opts = opts(Name),
-    ?FORALL(
-        Values,
-        list(gen_nullable(gen_for(Name))),
+    forall(list(gen_nullable(gen_for(Name))), fun(Values) ->
         Values =:= minato_codec:decode(Oid, wire(Oid, Values, Format, Opts), Format, Opts)
-    ).
+    end).
 
 prop_days_match_calendar() ->
-    ?FORALL(
-        {Y, M, D},
-        gen_date(),
+    forall(gen_date(), fun({Y, M, D}) ->
         calendar:date_to_gregorian_days({Y, M, D}) - 719528 =:=
             minato_codec_datetime:days_from_civil(Y, M, D)
-    ).
+    end).
 
 prop_days_invert() ->
-    ?FORALL(
-        Days,
-        integer(-3000000, 3000000),
-        begin
-            {Y, M, D} = minato_codec_datetime:civil_from_days(Days),
-            Days =:= minato_codec_datetime:days_from_civil(Y, M, D)
-        end
-    ).
+    forall(integer(-3000000, 3000000), fun(Days) ->
+        {Y, M, D} = minato_codec_datetime:civil_from_days(Days),
+        Days =:= minato_codec_datetime:days_from_civil(Y, M, D)
+    end).
 
 prop_numeric_keeps_scale() ->
-    ?FORALL(
-        Decimal,
-        gen_decimal(),
-        begin
-            Wire = wire(1700, Decimal, binary, #{}),
-            Decimal =:= minato_codec:decode(1700, Wire, binary)
-        end
-    ).
+    forall(gen_decimal(), fun(Decimal) ->
+        Wire = wire(1700, Decimal, binary, #{}),
+        Decimal =:= minato_codec:decode(1700, Wire, binary)
+    end).
 
 prop_unknown_oid_text_passthrough() ->
-    ?FORALL(
-        Bin,
-        binary(),
+    forall(binary(), fun(Bin) ->
         Bin =:= minato_codec:decode(600, wire(600, Bin, text, #{}), text)
-    ).
+    end).
 
 %%----------------------------------------------------------------------
 %% Generators
@@ -152,13 +129,13 @@ gen_datetime() ->
 
 gen_float() ->
     frequency([
-        {8, ?LET(I, integer(-1000000000, 1000000000), I / 1000.0)},
+        {8, from(integer(-1000000000, 1000000000), fun(I) -> I / 1000.0 end)},
         {1, oneof([0.0, 1.0, -1.0])},
         {1, oneof([nan, infinity, neg_infinity])}
     ]).
 
 gen_float4() ->
-    ?LET(Value, gen_float(), narrow(Value)).
+    from(gen_float(), fun narrow/1).
 
 narrow(Value) when is_float(Value) ->
     <<Narrowed:32/float>> = <<Value:32/float>>,
@@ -167,18 +144,14 @@ narrow(Value) ->
     Value.
 
 gen_decimal() ->
-    ?LET(
-        {Negative, Integral, Fractional},
-        {boolean(), gen_digits(1, 20), gen_digits(0, 12)},
+    from({boolean(), gen_digits(1, 20), gen_digits(0, 12)}, fun({Negative, Integral, Fractional}) ->
         canonical(Negative, Integral, Fractional)
-    ).
+    end).
 
 gen_digits(Min, Max) ->
-    ?LET(
-        Digits,
-        ?LET(Count, integer(Min, Max), vector(Count, integer($0, $9))),
+    from(from(integer(Min, Max), fun(Count) -> vector(Count, integer($0, $9)) end), fun(Digits) ->
         list_to_binary(Digits)
-    ).
+    end).
 
 canonical(Negative, Integral, Fractional) ->
     Trimmed = strip_leading_zeros(Integral),
@@ -207,3 +180,17 @@ wire(Oid, Value, Format, Opts) ->
         null -> null;
         IoData -> iolist_to_binary(IoData)
     end.
+
+%%----------------------------------------------------------------------
+%% What PropEr generates
+%%----------------------------------------------------------------------
+
+%% A generated value has no type until the test runs, so it is `dynamic()`
+%% here and nowhere else.
+-spec forall(proper_types:raw_type(), fun((dynamic()) -> proper:test())) -> proper:test().
+forall(Type, Property) ->
+    ?FORALL(Generated, Type, Property(Generated)).
+
+-spec from(proper_types:raw_type(), fun((dynamic()) -> term())) -> proper_types:type().
+from(Type, Made) ->
+    ?LET(Generated, Type, Made(Generated)).

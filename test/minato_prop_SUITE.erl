@@ -21,16 +21,6 @@ Skips when no server answers.
 -include_lib("proper/include/proper.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-%% eqWAlizer: the PropEr macros expand to term(), so these cannot be typed.
--eqwalizer({nowarn_function, prop_result_set_of_any_size/0}).
--eqwalizer({nowarn_function, prop_any_number_of_parameters/0}).
--eqwalizer({nowarn_function, prop_nulls_in_any_position/0}).
--eqwalizer({nowarn_function, prop_a_binary_of_any_size/0}).
--eqwalizer({nowarn_function, prop_maps_and_tuples_agree/0}).
--eqwalizer({nowarn_function, prop_prepared_answers_like_unprepared/0}).
--eqwalizer({nowarn_function, gen_utf8/0}).
--eqwalizer({nowarn_function, gen_parameters/0}).
-
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     a_result_set_of_any_size_arrives_whole/1,
@@ -136,99 +126,67 @@ five_thousand_rows_arrive_in_order(_Config) ->
 %%----------------------------------------------------------------------
 
 prop_result_set_of_any_size() ->
-    ?FORALL(
-        Size,
-        integer(0, 500),
-        begin
-            Sql = ~"SELECT i FROM generate_series(1, $1::int4) i",
-            {ok, #{rows := Rows, num_rows := Count}} = minato:query(?POOL, Sql, [Size]),
-            Count =:= Size andalso [I || {I} <- Rows] =:= lists:seq(1, Size)
-        end
-    ).
+    forall(integer(0, 500), fun(Size) ->
+        Sql = ~"SELECT i FROM generate_series(1, $1::int4) i",
+        {ok, #{rows := Rows, num_rows := Count}} = minato:query(?POOL, Sql, [Size]),
+        Count =:= Size andalso [I || {I} <- Rows] =:= lists:seq(1, Size)
+    end).
 
 prop_any_number_of_parameters() ->
-    ?FORALL(
-        Values,
-        gen_parameters(),
-        begin
-            {ok, #{rows := [Row]}} = minato:query(?POOL, select(length(Values)), Values),
-            tuple_to_list(Row) =:= Values
-        end
-    ).
+    forall(gen_parameters(), fun(Values) ->
+        {ok, #{rows := [Row]}} = minato:query(?POOL, select(length(Values)), Values),
+        is_tuple(Row) andalso tuple_to_list(Row) =:= Values
+    end).
 
 prop_nulls_in_any_position() ->
-    ?FORALL(
-        Values,
-        non_empty(list(oneof([null, integer()]))),
-        begin
-            {ok, #{rows := [Row]}} = minato:query(?POOL, select(length(Values)), Values),
-            tuple_to_list(Row) =:= Values
-        end
-    ).
+    forall(non_empty(list(oneof([null, integer()]))), fun(Values) ->
+        {ok, #{rows := [Row]}} = minato:query(?POOL, select(length(Values)), Values),
+        is_tuple(Row) andalso tuple_to_list(Row) =:= Values
+    end).
 
 prop_utf8_text_round_trips() ->
-    ?FORALL(
-        Text,
-        gen_utf8(),
-        begin
-            {ok, #{rows := [{Back}]}} = minato:query(?POOL, ~"SELECT $1::text", [Text]),
-            Back =:= Text
-        end
-    ).
+    forall(gen_utf8(), fun(Text) ->
+        {ok, #{rows := [{Back}]}} = minato:query(?POOL, ~"SELECT $1::text", [Text]),
+        Back =:= Text
+    end).
 
 prop_a_binary_of_any_size() ->
-    ?FORALL(
-        Size,
-        integer(0, 65536),
-        begin
-            Value = crypto:strong_rand_bytes(Size),
-            {ok, #{rows := [{Back}]}} = minato:query(?POOL, ~"SELECT $1::bytea", [Value]),
-            Back =:= Value
-        end
-    ).
+    forall(integer(0, 65536), fun(Size) ->
+        Value = crypto:strong_rand_bytes(Size),
+        {ok, #{rows := [{Back}]}} = minato:query(?POOL, ~"SELECT $1::bytea", [Value]),
+        Back =:= Value
+    end).
 
 prop_maps_and_tuples_agree() ->
-    ?FORALL(
-        Value,
-        integer(),
-        begin
-            Sql = ~"SELECT $1::int8 AS a, $1::int8 * 2 AS b",
-            {ok, #{rows := [Tuple]}} = minato:query(?POOL, Sql, [Value]),
-            Opts = #{return_rows_as_maps => true, column_name_as_atom => true},
-            {ok, #{rows := [Map]}} = minato:query(?POOL, Sql, [Value], Opts),
-            Map =:= #{a => element(1, Tuple), b => element(2, Tuple)}
-        end
-    ).
+    forall(integer(), fun(Value) ->
+        Sql = ~"SELECT $1::int8 AS a, $1::int8 * 2 AS b",
+        {ok, #{rows := [{A, B}]}} = minato:query(?POOL, Sql, [Value]),
+        Opts = #{return_rows_as_maps => true, column_name_as_atom => true},
+        {ok, #{rows := [Map]}} = minato:query(?POOL, Sql, [Value], Opts),
+        Map =:= #{a => A, b => B}
+    end).
 
 prop_prepared_answers_like_unprepared() ->
-    ?FORALL(
-        Values,
-        gen_parameters(),
-        begin
-            Sql = select(length(Values)),
-            {ok, #{rows := Direct}} = minato:query(?POOL, Sql, Values),
-            Prepared = minato:with(?POOL, fun(Conn) -> prepared(Conn, Sql, Values) end),
-            Prepared =:= {ok, Direct}
-        end
-    ).
+    forall(gen_parameters(), fun(Values) ->
+        Sql = select(length(Values)),
+        {ok, #{rows := Direct}} = minato:query(?POOL, Sql, Values),
+        Prepared = minato:with(?POOL, fun(Conn) -> prepared(Conn, Sql, Values) end),
+        Prepared =:= {ok, Direct}
+    end).
 
 prop_a_refused_statement_is_survivable() ->
-    ?FORALL(
-        Name,
-        gen_utf8(),
-        begin
-            Sql = <<"SELECT * FROM ", (quoted(Name))/binary>>,
-            Refused = minato:query(?POOL, Sql, []),
-            Answered = minato:query(?POOL, ~"SELECT 1", []),
-            refused(Refused) andalso
-                Answered =:=
-                    {ok, #{
-                        command => select,
-                        num_rows => 1,
-                        rows => [{1}]
-                    }}
-        end
-    ).
+    forall(gen_utf8(), fun(Name) ->
+        Sql = <<"SELECT * FROM ", (quoted(Name))/binary>>,
+        Refused = minato:query(?POOL, Sql, []),
+        Answered = minato:query(?POOL, ~"SELECT 1", []),
+        refused(Refused) andalso
+            Answered =:=
+                {ok, #{
+                    command => select,
+                    num_rows => 1,
+                    rows => [{1}]
+                }}
+    end).
 
 refused({error, {pgsql_error, #{code := _Code}}}) -> true;
 refused(_Other) -> false.
@@ -259,10 +217,10 @@ closed(Conn, Statement, Rows) ->
 %%----------------------------------------------------------------------
 
 gen_parameters() ->
-    ?LET(Count, integer(1, 40), vector(Count, integer())).
+    from(integer(1, 40), fun(Count) -> vector(Count, integer()) end).
 
 gen_utf8() ->
-    ?LET(Characters, list(gen_char()), unicode:characters_to_binary(Characters)).
+    from(list(gen_char()), fun unicode:characters_to_binary/1).
 
 gen_char() ->
     oneof([
@@ -315,3 +273,17 @@ env(Name, Default) ->
         "" -> Default;
         Value -> Value
     end.
+
+%%----------------------------------------------------------------------
+%% What PropEr generates
+%%----------------------------------------------------------------------
+
+%% A generated value has no type until the test runs, so it is `dynamic()`
+%% here and nowhere else.
+-spec forall(proper_types:raw_type(), fun((dynamic()) -> proper:test())) -> proper:test().
+forall(Type, Property) ->
+    ?FORALL(Generated, Type, Property(Generated)).
+
+-spec from(proper_types:raw_type(), fun((dynamic()) -> term())) -> proper_types:type().
+from(Type, Made) ->
+    ?LET(Generated, Type, Made(Generated)).

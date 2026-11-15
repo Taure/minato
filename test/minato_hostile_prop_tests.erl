@@ -13,23 +13,6 @@ is asked of the framer, for a stream of messages no server would write.
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: the PropEr macros expand to term(), so the functions that use them
-%% cannot be given a useful type.
--eqwalizer({nowarn_function, prop_numeric_matches_integer_arithmetic/0}).
--eqwalizer({nowarn_function, prop_numeric_encode_is_bounded/0}).
--eqwalizer({nowarn_function, gen_numeric_wire/0}).
--eqwalizer({nowarn_function, gen_valid_numeric/0}).
--eqwalizer({nowarn_function, gen_decimal/0}).
--eqwalizer({nowarn_function, prop_array_text_is_total/0}).
--eqwalizer({nowarn_function, gen_array_wire/0}).
--eqwalizer({nowarn_function, gen_array_text/0}).
--eqwalizer({nowarn_function, prop_frame_is_total/0}).
--eqwalizer({nowarn_function, prop_frame_refuses_a_length_over_its_bound/0}).
--eqwalizer({nowarn_function, prop_rows_are_total/0}).
--eqwalizer({nowarn_function, gen_stream/0}).
--eqwalizer({nowarn_function, gen_message/0}).
--eqwalizer({nowarn_function, gen_row/0}).
-
 -define(NUMTESTS, 500).
 -define(NUMERIC, 1700).
 -define(INT4_ARRAY, 1007).
@@ -83,53 +66,44 @@ check(Prop) ->
 %%----------------------------------------------------------------------
 
 prop_numeric_header_is_total() ->
-    ?FORALL(
-        Wire,
-        gen_numeric_wire(),
+    forall(gen_numeric_wire(), fun(Wire) ->
         case decoded(?NUMERIC, Wire) of
             {ok, Text} when is_binary(Text) -> byte_size(Text) =< ?LARGEST_NUMERIC_TEXT;
             {ok, Special} -> lists:member(Special, [nan, infinity, neg_infinity]);
             refused -> true
         end
-    ).
+    end).
 
 prop_numeric_matches_integer_arithmetic() ->
-    ?FORALL(
-        {Negative, Weight, DScale, Digits},
-        gen_valid_numeric(),
-        begin
-            Wire = <<
-                (length(Digits)):16,
-                Weight:16/signed,
-                (sign(Negative)):16,
-                DScale:16,
-                <<<<D:16>> || D <- Digits>>/binary
-            >>,
-            expected(Negative, Weight, DScale, Digits) =:=
-                minato_codec:decode(?NUMERIC, Wire, binary)
-        end
-    ).
+    forall(gen_valid_numeric(), fun({Negative, Weight, DScale, Digits}) ->
+        Wire = <<
+            (length(Digits)):16,
+            Weight:16/signed,
+            (sign(Negative)):16,
+            DScale:16,
+            <<<<D:16>> || D <- Digits>>/binary
+        >>,
+        expected(Negative, Weight, DScale, Digits) =:=
+            minato_codec:decode(?NUMERIC, Wire, binary)
+    end).
 
 prop_numeric_encode_is_bounded() ->
-    ?FORALL(
-        {Decimal, Format},
-        {gen_decimal(), oneof([binary, text])},
+    forall({gen_decimal(), oneof([binary, text])}, fun({Decimal, Format}) ->
         try minato_codec:encode(?NUMERIC, Decimal, Format) of
+            null -> false;
             Wire when Format =:= binary -> iolist_size(Wire) =< ?LARGEST_NUMERIC_WIRE;
             Text -> iolist_size(Text) =< ?LARGEST_NUMERIC_TEXT
         catch
             error:{minato_codec, #{type := numeric, reason := out_of_range}} -> true
         end
-    ).
+    end).
 
 %%----------------------------------------------------------------------
 %% framing
 %%----------------------------------------------------------------------
 
 prop_frame_is_total() ->
-    ?FORALL(
-        Stream,
-        gen_stream(),
+    forall(gen_stream(), fun(Stream) ->
         try minato_protocol:frame(Stream, #{max_message_length => ?FRAME_BOUND}) of
             {Messages, Rest} ->
                 is_list(Messages) andalso is_binary(Rest) andalso
@@ -137,12 +111,10 @@ prop_frame_is_total() ->
         catch
             error:{minato_protocol, #{reason := _}} -> true
         end
-    ).
+    end).
 
 prop_frame_refuses_a_length_over_its_bound() ->
-    ?FORALL(
-        {Type, Length, Arrived},
-        {byte(), range(?FRAME_BOUND + 1, 2147483647), binary()},
+    forall({byte(), range(?FRAME_BOUND + 1, 2147483647), binary()}, fun({Type, Length, Arrived}) ->
         try
             minato_protocol:frame(<<Type, Length:32, Arrived/binary>>, #{
                 max_message_length => ?FRAME_BOUND
@@ -152,22 +124,20 @@ prop_frame_refuses_a_length_over_its_bound() ->
         catch
             error:{minato_protocol, #{reason := message_too_long}} -> true
         end
-    ).
+    end).
 
 prop_rows_are_total() ->
     Decoder = minato_protocol:decoder(
         [column(~"id", 23), column(~"amount", ?NUMERIC), column(~"tags", ?INT4_ARRAY)], #{}
     ),
-    ?FORALL(
-        Row,
-        gen_row(),
+    forall(gen_row(), fun(Row) ->
         try minato_protocol:frame(Row, #{decoder => Decoder}) of
             {Messages, Rest} -> is_list(Messages) andalso is_binary(Rest)
         catch
             error:{minato_protocol, #{reason := _}} -> true;
             error:{minato_codec, #{reason := _}} -> true
         end
-    ).
+    end).
 
 column(Name, Oid) ->
     #{
@@ -181,29 +151,29 @@ column(Name, Oid) ->
     }.
 
 gen_stream() ->
-    ?LET(Messages, list(gen_message()), iolist_to_binary(Messages)).
+    from(list(gen_message()), fun(Messages) -> iolist_to_binary(Messages) end).
 
 %% A type byte the protocol has and one it may not, a length that is right,
 %% nearly right or anything at all, and a payload that is noise.
 gen_message() ->
-    ?LET(
-        {Type, Payload, Lie},
+    from(
         {
             oneof([elements("RKSZTDCIEN123ntsAGHWdcv"), byte()]),
             oneof([binary(), ~"", <<0>>, <<0, 0, 0, 0>>]),
             frequency([{6, 0}, {2, range(-6, 6)}, {1, range(-2147483648, 2147483647)}])
         },
-        <<Type, (byte_size(Payload) + 4 + Lie):32/signed, Payload/binary>>
+        fun({Type, Payload, Lie}) ->
+            <<Type, (byte_size(Payload) + 4 + Lie):32/signed, Payload/binary>>
+        end
     ).
 
 gen_row() ->
-    ?LET(
-        {Count, Values},
+    from(
         {
             oneof([3, range(-1, 5), range(0, 65535)]),
             list(oneof([null, binary(), range(-2147483648, 2147483647)]))
         },
-        begin
+        fun({Count, Values}) ->
             Payload = <<Count:16, <<<<(element(Value))/binary>> || Value <- Values>>/binary>>,
             <<$D, (byte_size(Payload) + 4):32, Payload/binary>>
         end
@@ -214,46 +184,43 @@ gen_row() ->
 %%----------------------------------------------------------------------
 
 prop_array_header_is_total() ->
-    ?FORALL(
-        Wire,
-        gen_array_wire(),
+    forall(gen_array_wire(), fun(Wire) ->
         case decoded(?INT4_ARRAY, Wire) of
             {ok, List} -> is_list(List) andalso depth(List) =< ?MAX_DIMENSIONS;
             refused -> true
         end
-    ).
+    end).
 
 prop_array_text_is_total() ->
-    ?FORALL(
-        Text,
-        gen_array_text(),
+    forall(gen_array_text(), fun(Text) ->
         try minato_codec:decode(?TEXT_ARRAY, Text, text) of
             List -> is_list(List) andalso depth(List) =< ?MAX_DIMENSIONS
         catch
             error:{minato_codec, #{reason := _}} -> true
         end
-    ).
+    end).
 
 depth([First | _Rest]) when is_list(First) -> 1 + depth(First);
 depth(_Flat) -> 1.
 
 gen_array_wire() ->
-    ?LET(
-        {NDim, Sizes, Elements, Trailing},
+    from(
         {
             oneof([range(-2, 9), range(-2147483648, 2147483647)]),
             list(oneof([range(-1, 3), range(-2147483648, 2147483647)])),
             list(oneof([null, range(-2147483648, 2147483647), binary()])),
             oneof([~"", binary()])
         },
-        <<
-            NDim:32/signed,
-            0:32,
-            23:32,
-            <<<<Size:32/signed, 1:32/signed>> || Size <- Sizes>>/binary,
-            <<<<(element(Element))/binary>> || Element <- Elements>>/binary,
-            Trailing/binary
-        >>
+        fun({NDim, Sizes, Elements, Trailing}) ->
+            <<
+                NDim:32/signed,
+                0:32,
+                23:32,
+                <<<<Size:32/signed, 1:32/signed>> || Size <- Sizes>>/binary,
+                <<<<(element(Element))/binary>> || Element <- Elements>>/binary,
+                Trailing/binary
+            >>
+        end
     ).
 
 element(null) -> <<-1:32/signed>>;
@@ -261,14 +228,13 @@ element(Value) when is_integer(Value) -> <<4:32/signed, Value:32/signed>>;
 element(Bytes) -> <<(byte_size(Bytes)):32/signed, Bytes/binary>>.
 
 gen_array_text() ->
-    ?LET(
-        Characters,
+    from(
         list(
             frequency([
                 {6, ${}, {4, $}}, {3, $,}, {1, $"}, {1, $\\}, {2, $a}, {1, $N}, {1, $\s}
             ])
         ),
-        list_to_binary(Characters)
+        fun(Characters) -> list_to_binary(Characters) end
     ).
 
 decoded(Oid, Wire) ->
@@ -316,8 +282,7 @@ minus(true) -> ~"-";
 minus(false) -> ~"".
 
 gen_numeric_wire() ->
-    ?LET(
-        {Digits, Lie, Weight, Sign, DScale},
+    from(
         {
             list(oneof([range(0, 9999), range(0, 65535)])),
             frequency([{8, 0}, {1, range(-3, 3)}]),
@@ -325,27 +290,28 @@ gen_numeric_wire() ->
             oneof([16#0000, 16#4000, 16#C000, 16#D000, 16#F000, range(0, 65535)]),
             oneof([range(0, 65535), range(0, 40)])
         },
-        <<
-            (max(0, length(Digits) + Lie)):16,
-            Weight:16/signed,
-            Sign:16,
-            DScale:16,
-            <<<<D:16>> || D <- Digits>>/binary
-        >>
+        fun({Digits, Lie, Weight, Sign, DScale}) ->
+            <<
+                (claimed(length(Digits), Lie)):16,
+                Weight:16/signed,
+                Sign:16,
+                DScale:16,
+                <<<<D:16>> || D <- Digits>>/binary
+            >>
+        end
     ).
 
 %% A leading digit of zero is something no server writes, and the decoder
 %% prints it as it finds it, so it is left to the unit tests.
 gen_valid_numeric() ->
-    ?LET(
-        {First, Rest, Weight, DScale},
-        {range(1, 9999), list(range(0, 9999)), range(-40, 40), range(0, 200)},
+    from({range(1, 9999), list(range(0, 9999)), range(-40, 40), range(0, 200)}, fun(
+        {First, Rest, Weight, DScale}
+    ) ->
         {boolean(), Weight, DScale, [First | Rest]}
-    ).
+    end).
 
 gen_decimal() ->
-    ?LET(
-        {Sign, Whole, Fraction, Exponent},
+    from(
         {
             oneof([~"", ~"-", ~"+"]),
             list(range($0, $9)),
@@ -357,7 +323,27 @@ gen_decimal() ->
                 range(-999999999999, 999999999999)
             ])
         },
-        iolist_to_binary([
-            Sign, [$1 | Whole], $., Fraction, $e, integer_to_binary(Exponent)
-        ])
+        fun({Sign, Whole, Fraction, Exponent}) ->
+            iolist_to_binary([
+                Sign, [$1 | Whole], $., Fraction, $e, integer_to_binary(Exponent)
+            ])
+        end
     ).
+
+-spec claimed(non_neg_integer(), integer()) -> non_neg_integer().
+claimed(Held, Lie) when Held + Lie > 0 -> Held + Lie;
+claimed(_Held, _Lie) -> 0.
+
+%%----------------------------------------------------------------------
+%% What PropEr generates
+%%----------------------------------------------------------------------
+
+%% A generated value has no type until the test runs, so it is `dynamic()`
+%% here and nowhere else.
+-spec forall(proper_types:raw_type(), fun((dynamic()) -> proper:test())) -> proper:test().
+forall(Type, Property) ->
+    ?FORALL(Generated, Type, Property(Generated)).
+
+-spec from(proper_types:raw_type(), fun((dynamic()) -> term())) -> proper_types:type().
+from(Type, Made) ->
+    ?LET(Generated, Type, Made(Generated)).

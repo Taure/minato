@@ -22,10 +22,6 @@ known good stream.
 
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: this one test passes a `max_message_length` the type forbids, on
-%% purpose, because what it checks is that the runtime refuses it too.
--eqwalizer({nowarn_function, a_limit_that_is_not_a_length_is_refused_test/0}).
-
 %%----------------------------------------------------------------------
 %% Truncation
 %%----------------------------------------------------------------------
@@ -117,12 +113,18 @@ the_default_limit_is_reported_test() ->
 a_limit_that_is_not_a_length_is_refused_test() ->
     ?assertError(
         {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
-        minato_protocol:frame(~"", #{max_message_length => infinity})
+        minato_protocol:frame(~"", limited_to(infinity))
     ),
     ?assertError(
         {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
-        minato_protocol:frame(~"", #{max_message_length => 3})
+        minato_protocol:frame(~"", limited_to(3))
     ).
+
+%% A limit the type forbids, because what is checked is that the runtime
+%% refuses it too.
+-spec limited_to(term()) -> dynamic().
+limited_to(Limit) ->
+    #{max_message_length => Limit}.
 
 a_message_under_the_limit_still_frames_test() ->
     Bytes = minato_backend_writer:write({parameter_status, ~"a", ~"b"}),

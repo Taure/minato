@@ -28,23 +28,6 @@ from the part that is covered.
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: the PropEr macros expand to term(), so the functions that use them
-%% cannot be given a useful type.
--eqwalizer({nowarn_function, prop_wrong_password_never_authenticates/0}).
--eqwalizer({nowarn_function, prop_tampered_server_first_never_authenticates/0}).
--eqwalizer({nowarn_function, prop_tampered_client_final_never_authenticates/0}).
--eqwalizer({nowarn_function, prop_tampered_server_final_never_verifies/0}).
--eqwalizer({nowarn_function, prop_server_nonce_must_extend_the_client_nonce/0}).
--eqwalizer({nowarn_function, prop_iteration_count_outside_the_bounds_is_rejected/0}).
--eqwalizer({nowarn_function, prop_client_first_is_well_formed/0}).
--eqwalizer({nowarn_function, prop_printable_ascii_is_prepared_unchanged/0}).
--eqwalizer({nowarn_function, prop_prepare_never_raises/0}).
--eqwalizer({nowarn_function, gen_password/0}).
--eqwalizer({nowarn_function, gen_username/0}).
--eqwalizer({nowarn_function, gen_salt/0}).
--eqwalizer({nowarn_function, gen_binary/0}).
--eqwalizer({nowarn_function, gen_printable_ascii/0}).
-
 -define(NUMTESTS, 100).
 -define(CHEAP_NUMTESTS, 500).
 %% Every byte position of the server first message costs one PBKDF2 run.
@@ -106,27 +89,25 @@ check(Prop, Tests) ->
 %%----------------------------------------------------------------------
 
 prop_exchange_authenticates() ->
-    ?FORALL(
-        {Username, Password, Salt, Iterations},
-        {gen_username(), gen_password(), gen_salt(), gen_iterations()},
+    forall({gen_username(), gen_password(), gen_salt(), gen_iterations()}, fun(
+        {Username, Password, Salt, Iterations}
+    ) ->
         ok =:= exchange(Username, Password, Password, Salt, Iterations)
-    ).
+    end).
 
 prop_wrong_password_never_authenticates() ->
-    ?FORALL(
-        {Username, Stored, Offered, Salt, Iterations},
-        {gen_username(), gen_password(), gen_password(), gen_salt(), gen_iterations()},
-        begin
-            Same =
-                hmac_key(minato_saslprep:prepare(Stored)) =:=
-                    hmac_key(minato_saslprep:prepare(Offered)),
-            Result = exchange(Username, Stored, Offered, Salt, Iterations),
-            case Same of
-                true -> Result =:= ok;
-                false -> Result =:= {error, invalid_proof}
-            end
+    forall({gen_username(), gen_password(), gen_password(), gen_salt(), gen_iterations()}, fun(
+        {Username, Stored, Offered, Salt, Iterations}
+    ) ->
+        Same =
+            hmac_key(minato_saslprep:prepare(Stored)) =:=
+                hmac_key(minato_saslprep:prepare(Offered)),
+        Result = exchange(Username, Stored, Offered, Salt, Iterations),
+        case Same of
+            true -> Result =:= ok;
+            false -> Result =:= {error, invalid_proof}
         end
-    ).
+    end).
 
 %% HMAC zero-pads its key to the block size, so passwords that differ only in
 %% trailing zero bytes are the same key.
@@ -134,123 +115,93 @@ hmac_key(Key) when byte_size(Key) > 64 -> hmac_key(crypto:hash(sha256, Key));
 hmac_key(Key) -> <<Key/binary, 0:((64 - byte_size(Key)) * 8)>>.
 
 prop_client_first_is_well_formed() ->
-    ?FORALL(
-        Username,
-        gen_username(),
-        begin
-            {Message, _Client} = minato_scram:client_first(Username, #{}),
-            <<"n,,n=", Rest/binary>> = iolist_to_binary(Message),
-            [Name, Nonce] = binary:split(Rest, ~",r="),
-            binary:match(Name, ~",") =:= nomatch andalso
-                byte_size(Nonce) =:= 32 andalso
-                binary:match(Nonce, ~",") =:= nomatch
-        end
-    ).
+    forall(gen_username(), fun(Username) ->
+        {Message, _Client} = minato_scram:client_first(Username, #{}),
+        <<"n,,n=", Rest/binary>> = iolist_to_binary(Message),
+        [Name, Nonce] = binary:split(Rest, ~",r="),
+        binary:match(Name, ~",") =:= nomatch andalso
+            byte_size(Nonce) =:= 32 andalso
+            binary:match(Nonce, ~",") =:= nomatch
+    end).
 
 %%----------------------------------------------------------------------
 %% Tampering
 %%----------------------------------------------------------------------
 
 prop_tampered_server_first_never_authenticates() ->
-    ?FORALL(
-        {Password, Salt, Iterations},
-        {gen_password(), gen_salt(), gen_iterations()},
-        begin
-            Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
-            {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
-            {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
-            every_flip(ServerFirst, fun(Tampered) ->
-                ok =/= finish(Tampered, Password, Client, Ready)
-            end)
-        end
-    ).
+    forall({gen_password(), gen_salt(), gen_iterations()}, fun({Password, Salt, Iterations}) ->
+        Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
+        {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
+        {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
+        every_flip(ServerFirst, fun(Tampered) ->
+            ok =/= finish(Tampered, Password, Client, Ready)
+        end)
+    end).
 
 prop_tampered_client_final_never_authenticates() ->
-    ?FORALL(
-        {Password, Salt, Iterations},
-        {gen_password(), gen_salt(), gen_iterations()},
-        begin
-            Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
-            {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
-            {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
-            {ClientFinal, _Check} = minato_scram:client_final(ServerFirst, Password, Client),
-            [WithoutProof, Encoded] = binary:split(iolist_to_binary(ClientFinal), ~",p="),
-            every_flip(WithoutProof, fun(Tampered) ->
-                not authenticates(refuses(<<Tampered/binary, ",p=", Encoded/binary>>, Ready))
-            end) andalso
-                every_flip(base64:decode(Encoded), fun(Tampered) ->
-                    Forged = base64:encode(Tampered),
-                    not authenticates(refuses(<<WithoutProof/binary, ",p=", Forged/binary>>, Ready))
-                end)
-        end
-    ).
+    forall({gen_password(), gen_salt(), gen_iterations()}, fun({Password, Salt, Iterations}) ->
+        Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
+        {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
+        {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
+        {ClientFinal, _Check} = minato_scram:client_final(ServerFirst, Password, Client),
+        [WithoutProof, Encoded] = binary:split(iolist_to_binary(ClientFinal), ~",p="),
+        every_flip(WithoutProof, fun(Tampered) ->
+            not authenticates(refuses(<<Tampered/binary, ",p=", Encoded/binary>>, Ready))
+        end) andalso
+            every_flip(base64:decode(Encoded), fun(Tampered) ->
+                Forged = base64:encode(Tampered),
+                not authenticates(refuses(<<WithoutProof/binary, ",p=", Forged/binary>>, Ready))
+            end)
+    end).
 
 prop_tampered_server_final_never_verifies() ->
-    ?FORALL(
-        {Password, Salt, Iterations},
-        {gen_password(), gen_salt(), gen_iterations()},
-        begin
-            Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
-            {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
-            {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
-            {ClientFinal, Check} = minato_scram:client_final(ServerFirst, Password, Client),
-            {ok, ServerFinal} = minato_scram_server:final(iolist_to_binary(ClientFinal), Ready),
-            <<"v=", Encoded/binary>> = ServerFinal,
-            every_flip(base64:decode(Encoded), fun(Tampered) ->
-                ok =/= verifies(<<"v=", (base64:encode(Tampered))/binary>>, Check)
-            end)
-        end
-    ).
+    forall({gen_password(), gen_salt(), gen_iterations()}, fun({Password, Salt, Iterations}) ->
+        Server = minato_scram_server:new(Password, #{salt => Salt, iterations => Iterations}),
+        {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
+        {ServerFirst, Ready} = minato_scram_server:first(iolist_to_binary(ClientFirst), Server),
+        {ClientFinal, Check} = minato_scram:client_final(ServerFirst, Password, Client),
+        {ok, ServerFinal} = minato_scram_server:final(iolist_to_binary(ClientFinal), Ready),
+        <<"v=", Encoded/binary>> = ServerFinal,
+        every_flip(base64:decode(Encoded), fun(Tampered) ->
+            ok =/= verifies(<<"v=", (base64:encode(Tampered))/binary>>, Check)
+        end)
+    end).
 
 prop_server_nonce_must_extend_the_client_nonce() ->
-    ?FORALL(
-        {Nonce, Salt},
-        {gen_binary(), gen_salt()},
-        begin
-            {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
-            ClientNonce = client_nonce(ClientFirst),
-            Offered = base64:encode(Nonce),
-            Challenge = minato_scram_server:challenge(Offered, Salt, 4096),
-            extends(Offered, ClientNonce) orelse
-                {error, server_nonce_does_not_extend_client_nonce} =:=
-                    rejects(Challenge, ~"pencil", Client)
-        end
-    ).
+    forall({gen_binary(), gen_salt()}, fun({Nonce, Salt}) ->
+        {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
+        ClientNonce = client_nonce(ClientFirst),
+        Offered = base64:encode(Nonce),
+        Challenge = minato_scram_server:challenge(Offered, Salt, 4096),
+        extends(Offered, ClientNonce) orelse
+            {error, server_nonce_does_not_extend_client_nonce} =:=
+                rejects(Challenge, ~"pencil", Client)
+    end).
 
 prop_iteration_count_outside_the_bounds_is_rejected() ->
-    ?FORALL(
-        {Iterations, Salt},
-        {integer(-1000, 4095), gen_salt()},
-        begin
-            {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
-            Nonce = <<(client_nonce(ClientFirst))/binary, "server">>,
-            Challenge = minato_scram_server:challenge(Nonce, Salt, Iterations),
-            case rejects(Challenge, ~"pencil", Client) of
-                {error, {iteration_count_below_minimum, _Count, 4096}} -> Iterations >= 0;
-                {error, {iteration_count_not_a_number, _Count}} -> Iterations < 0;
-                _Other -> false
-            end
+    forall({integer(-1000, 4095), gen_salt()}, fun({Iterations, Salt}) ->
+        {ClientFirst, Client} = minato_scram:client_first(~"minato", #{}),
+        Nonce = <<(client_nonce(ClientFirst))/binary, "server">>,
+        Challenge = minato_scram_server:challenge(Nonce, Salt, Iterations),
+        case rejects(Challenge, ~"pencil", Client) of
+            {error, {iteration_count_below_minimum, _Count, 4096}} -> Iterations >= 0;
+            {error, {iteration_count_not_a_number, _Count}} -> Iterations < 0;
+            _Other -> false
         end
-    ).
+    end).
 
 %%----------------------------------------------------------------------
 %% Preparation
 %%----------------------------------------------------------------------
 
 prop_printable_ascii_is_prepared_unchanged() ->
-    ?FORALL(
-        Password,
-        gen_printable_ascii(),
+    forall(gen_printable_ascii(), fun(Password) ->
         minato_saslprep:prepare(Password) =:= Password andalso
             minato_saslprep:normalise(Password) =:= {ok, Password}
-    ).
+    end).
 
 prop_prepare_never_raises() ->
-    ?FORALL(
-        Password,
-        gen_binary(),
-        is_binary(minato_saslprep:prepare(Password))
-    ).
+    forall(gen_binary(), fun(Password) -> is_binary(minato_saslprep:prepare(Password)) end).
 
 %%----------------------------------------------------------------------
 %% Running an exchange
@@ -320,19 +271,33 @@ flip(Binary, Position) ->
 %%----------------------------------------------------------------------
 
 gen_username() ->
-    ?LET(Bytes, list(integer(16#21, 16#7E)), list_to_binary(Bytes)).
+    from(list(integer(16#21, 16#7E)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_password() ->
-    ?LET(Bytes, list(integer(0, 255)), list_to_binary(Bytes)).
+    from(list(integer(0, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_printable_ascii() ->
-    ?LET(Bytes, list(integer(16#20, 16#7E)), list_to_binary(Bytes)).
+    from(list(integer(16#20, 16#7E)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_binary() ->
-    ?LET(Bytes, list(integer(0, 255)), list_to_binary(Bytes)).
+    from(list(integer(0, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_salt() ->
-    ?LET(Bytes, vector(16, integer(0, 255)), list_to_binary(Bytes)).
+    from(vector(16, integer(0, 255)), fun(Bytes) -> list_to_binary(Bytes) end).
 
 gen_iterations() ->
     integer(4096, 5000).
+
+%%----------------------------------------------------------------------
+%% What PropEr generates
+%%----------------------------------------------------------------------
+
+%% A generated value has no type until the test runs, so it is `dynamic()`
+%% here and nowhere else.
+-spec forall(proper_types:raw_type(), fun((dynamic()) -> proper:test())) -> proper:test().
+forall(Type, Property) ->
+    ?FORALL(Generated, Type, Property(Generated)).
+
+-spec from(proper_types:raw_type(), fun((dynamic()) -> term())) -> proper_types:type().
+from(Type, Made) ->
+    ?LET(Generated, Type, Made(Generated)).
