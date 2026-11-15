@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.4
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.3.2
     permissions:
       contents: write
       pull-requests: write
@@ -47,6 +47,9 @@ jobs:
       enable-coverage: true
       enable-elp-lint: true
       enable-elp-eqwalize: true
+      # The release these two jobs have been running. erlang-ci now defaults to
+      # a later one, built against a newer OTP 28 than .tool-versions pins.
+      elp-version: '2026-02-27'
       enable-sbom: false
       enable-sbom-scan: false
       enable-dependency-submission: true
@@ -71,7 +74,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: Taure/erlang-ci@21e63960b4314b411e6dcd5fc1b7bea67d851fcb # v2.1.4
+      - uses: Taure/erlang-ci@f6d2bb3c08104d05721739db874d0467f6296433 # v2.3.2
         with:
           version-file: '.tool-versions'
       - name: Start PostgreSQL ${{ matrix.postgres }} and the poolers
