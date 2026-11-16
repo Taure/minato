@@ -207,6 +207,7 @@ connected() ->
     {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
     {ok, Port} = inet:port(Listen),
     {ok, Socket} = socket:open(inet, stream, tcp),
+    ok = socket:bind(Socket, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
     ok = socket:connect(Socket, #{family => inet, addr => {127, 0, 0, 1}, port => Port}),
     {ok, Peer} = gen_tcp:accept(Listen, 5000),
     ok = gen_tcp:close(Listen),
