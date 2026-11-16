@@ -116,7 +116,7 @@ a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slo
 a_borrowed_connection_is_not_held_to_the_time_its_reset_was_given_test_() ->
     {timeout, 30, fun() ->
         ok = ready(),
-        Server = minato_backend_server:start([?READY | lists:duplicate(3, {reply, {?MODULE, kept}})]),
+        Server = minato_backend_server:start(script({?MODULE, kept})),
         Connection = maps:put(timeout, 300, connection(Server)),
         {ok, _Pid} = minato_owned:pool(?POOL, #{
             size => 1, min_size => 1, connection => Connection
