@@ -301,6 +301,31 @@ a_time_that_is_not_one_is_refused_by_what_retries_a_connect_test_() ->
      || Key <- [connect_timeout, timeout, cancel_timeout]
     ].
 
+%% Whether a session is resumed is up to the `m:ssl` a node runs, and the one
+%% in OTP 29 resumes none in the cases `minato_hostile_server_tests` sets up,
+%% so there those pass with or without the defaults. What `ssl:connect/3` is
+%% handed is the same on every release.
+every_handshake_is_asked_to_be_a_full_one_test_() ->
+    [
+        {Label, fun() ->
+            Calls = handed_to_ssl(fun() ->
+                {Server, {ok, Conn}} = tls_connects(#{}, Opts),
+                ok = minato_conn:close(Conn),
+                minato_backend_server:stop(Server)
+            end),
+            ?assertMatch([_Options], Calls),
+            [Options] = Calls,
+            ?assertEqual([false], proplists:get_all_values(reuse_sessions, Options)),
+            ?assertEqual([disabled], proplists:get_all_values(session_tickets, Options)),
+            ?assertNot(proplists:is_defined(reuse_session, Options)),
+            ?assertNot(proplists:is_defined(use_ticket, Options))
+        end}
+     || {Label, Opts} <- [
+            {"on the socket transport", #{}},
+            {"on the driver", #{transport => inet}}
+        ]
+    ].
+
 startup_carries_the_configured_parameters_test() ->
     {Server, {ok, Conn}} = connects([?READY], #{
         database => ~"minato_test", parameters => #{~"application_name" => ~"tests"}
@@ -920,6 +945,38 @@ opts(Port, Opts) ->
         #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000},
         Opts
     ).
+
+%% What `ssl:connect/3` is called with while the function runs, by the process
+%% that runs it, which is the one a connection is opened in.
+handed_to_ssl(Connecting) ->
+    {ok, _Started} = application:ensure_all_started(ssl),
+    {module, ssl} = code:ensure_loaded(ssl),
+    Test = self(),
+    Collector = spawn_link(fun() -> collecting(Test, []) end),
+    1 = erlang:trace_pattern({ssl, connect, 3}, true, [global]),
+    1 = erlang:trace(Test, true, [call, {tracer, Collector}]),
+    try
+        Connecting()
+    after
+        1 = erlang:trace(Test, false, [call]),
+        1 = erlang:trace_pattern({ssl, connect, 3}, false, [global])
+    end,
+    Delivered = erlang:trace_delivered(Test),
+    receive
+        {trace_delivered, Test, Delivered} -> ok
+    end,
+    Collector ! {handed, Test},
+    receive
+        {handed, Collector, Calls} -> Calls
+    end.
+
+collecting(Test, Calls) ->
+    receive
+        {trace, Test, call, {ssl, connect, [_Socket, Options, _Timeout]}} ->
+            collecting(Test, [Options | Calls]);
+        {handed, Test} ->
+            Test ! {handed, self(), lists:reverse(Calls)}
+    end.
 
 tls_connects(ServerOpts, Opts) ->
     {ok, _Started} = application:ensure_all_started(ssl),
