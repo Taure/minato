@@ -315,7 +315,8 @@ or not the `minato` application is running, and the connection is closed
 whatever `send_timeout_close` says, since a session cut off in the middle of a
 record cannot be written to again. Windows does not end a write `m:ssl` has
 started when the socket under it is shut down, so a TLS write on the socket
-transport has no bound there; with `transport => inet` it has the driver's.
+transport has no bound there, and a `close/1` behind one waits with it; with
+`transport => inet` both have the driver's.
 
 The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
 them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`

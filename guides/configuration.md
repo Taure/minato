@@ -115,8 +115,8 @@ holds, and costs a process per write.
 
 On Windows that shutdown does not end a write `ssl` has already started, so a
 TLS write on the socket transport to a server that stopped reading is not
-bounded there. With `transport => inet` the driver bounds it, on Windows as
-elsewhere.
+bounded there, and a close that finds such a write in its way waits behind it.
+With `transport => inet` the driver bounds both, on Windows as elsewhere.
 
 Closing is bounded as well. `minato_conn:close/1` gives `Terminate` the shorter
 of `send_timeout` and one second, writes nothing behind bytes the server has

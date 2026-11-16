@@ -204,7 +204,8 @@ that was chosen. For each of these there is a test with a server that tries.
 - **Keep a write waiting.** A write gets the connection's `timeout` and the
   connection is closed when it runs out, on both transports, with TLS and
   without. On Windows a TLS write on the socket transport is the exception
-  and has no bound; use `transport => inet` for TLS there.
+  and has no bound, and neither has a close that waits behind one; use
+  `transport => inet` for TLS there.
 - **Take a pool or a listener down.** An answer that is not a message ends the
   connection it arrived on, which is reconnected with backoff. The process
   holding it stays up, a listener's subscribers are told they were
