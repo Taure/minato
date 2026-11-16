@@ -172,7 +172,12 @@ unknown_options() ->
         {host, {127, 0, 1}},
         {host, {127, 0, 0, 256}},
         {host, {local, socket}}
-    ].
+    ] ++
+        [
+            {Key, Value}
+         || Key <- [connect_timeout, timeout, cancel_timeout],
+            Value <- ["5000", ~"5000", -1, 1.5, 5.0e3, never, undefined, {5, seconds}]
+        ].
 
 every_value_an_option_can_have_is_accepted_test_() ->
     [
@@ -203,6 +208,13 @@ every_value_an_option_can_have_is_accepted_test_() ->
         ]
     ] ++ [?_assertEqual(ok, minato_conn:validate(#{user => ~"minato"}))].
 
+every_time_an_option_can_have_is_accepted_test_() ->
+    [
+        ?_assertEqual(ok, minato_conn:validate(asking(5432, #{Key => Value})))
+     || Key <- [connect_timeout, timeout, cancel_timeout],
+        Value <- [0, 1, 5000, infinity]
+    ].
+
 the_first_option_that_is_wrong_is_the_one_named_test() ->
     ?assertEqual(
         {error, {invalid_option, channel_binding}},
@@ -211,7 +223,28 @@ the_first_option_that_is_wrong_is_the_one_named_test() ->
     ?assertEqual(
         {error, {invalid_option, ssl_options}},
         minato_conn:validate(asking(5432, #{ssl_options => secure, password => 42}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, password}},
+        minato_conn:validate(asking(5432, #{password => 42, timeout => "5000"}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, connect_timeout}},
+        minato_conn:validate(asking(5432, #{connect_timeout => -1, cancel_timeout => "5000"}))
     ).
+
+%% A time read from the environment is text, and it was taken as it came: the
+%% connection opened, and the first statement to run out of time raised
+%% `badarith` in the middle of its answer. A pool and a listener connect
+%% through here, and would have tried again for as long as they ran.
+a_time_that_is_not_one_is_refused_by_what_retries_a_connect_test_() ->
+    [
+        ?_assertEqual(
+            {error, {minato_conn, {invalid_option, Key}}},
+            minato_conn:attempt(asking(5432, #{Key => "5000"}))
+        )
+     || Key <- [connect_timeout, timeout, cancel_timeout]
+    ].
 
 startup_carries_the_configured_parameters_test() ->
     {Server, {ok, Conn}} = connects([?READY], #{

@@ -205,7 +205,8 @@ pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `{invalid_disconnected, _}`. A `connection` that is missing, not a map, or has no
 `user` stops it with `invalid_connection`, and options that are not a map with
 `invalid_opts`. A `connection` whose `channel_binding`, `ssl`, `auth`,
-`ssl_options` or `password` is not something minato knows stops it with
+`ssl_options` or `password` is not something minato knows, or whose
+`connect_timeout`, `timeout` or `cancel_timeout` is not a time, stops it with
 `{invalid_option, Key}`, as `minato_conn:validate/1` answers, so a pool that
 could not be secured as asked does not start and retry. So does a key that is
 not an option at all, here or in `connection`. None of these reasons carries

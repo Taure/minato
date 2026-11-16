@@ -60,6 +60,11 @@ required`, `ssl => ~"true"` or `auth => scram_sha_256` makes
 `{error, {invalid_option, Key}}`. `minato_conn:validate/1` answers the same
 question for a configuration that has not been used yet.
 
+`connect_timeout`, `timeout` and `cancel_timeout` are checked with them. Each
+is a number of milliseconds, an integer that is not negative, or `infinity`,
+and anything else is `{invalid_option, Key}`: `"5000"` as an environment
+variable hands it over is not `5000`.
+
 A key that is not in the table above is refused in the same way, whatever its
 value, and so is a key a pool or a listener has no option by: `sslmode`,
 `pool_size` or a misspelt `channel_binding` would otherwise be passed over and

@@ -174,6 +174,17 @@ the server issued is the whole of the authorisation.
     cancel_timeout,
     frame_opts
 ]).
+-define(CHECKED, [
+    host,
+    channel_binding,
+    ssl,
+    auth,
+    ssl_options,
+    password,
+    connect_timeout,
+    timeout,
+    cancel_timeout
+]).
 -define(CLOSE_DRAIN_CAP, 1000).
 -define(CLOSER_LIFETIME, 5000).
 
@@ -456,18 +467,21 @@ asked for are a session the caller believes it has.
 `{local, Path}`, and not a binary; `channel_binding` is `prefer`, `require` or
 `disable`; `ssl` is a boolean;
 `auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
-`none`; `password` is a binary, a string or a fun that answers one; and
+`none`; `password` is a binary, a string or a fun that answers one;
 `ssl_options` is a list of options, in which `verify` is `verify_peer` or
 `verify_none`, the handshake is not paused with `{handshake, hello}`, and no
 session is kept for another connection or resumed from one: `reuse_sessions`
 is `false`, `session_tickets` is `disabled`, and there is no `reuse_session`
-or `use_ticket`.
+or `use_ticket`; and `connect_timeout`, `timeout` and `cancel_timeout` are
+each a number of milliseconds, an integer that is not negative, or `infinity`.
 
 Anything else answers `{error, {invalid_option, Key}}` for the first key that
 is wrong, a key that is not an option before a value that is not one, without
 the value. A value minato did not know used to be
 read as the default, which is the weaker one: `channel_binding => required`, or
-`~"require"` out of a configuration file, was `prefer`.
+`~"require"` out of a configuration file, was `prefer`. A time that was not
+one, `~"5000"` out of the environment, was found by the first statement that
+ran out of it, as a `badarith`.
 
 `connect/1` raises `error({minato_conn, #{message := options, reason :=
 {invalid_option, Key}}})` before it opens a socket, and a pool or a listener
@@ -476,7 +490,7 @@ does not start: `{error, {invalid_option, Key}}`.
 -spec validate(opts()) -> ok | {error, {invalid_option, term()}}.
 validate(Opts) ->
     case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
-        [] -> validate([host, channel_binding, ssl, auth, ssl_options, password], Opts);
+        [] -> validate(?CHECKED, Opts);
         [Key | _Others] -> {error, {invalid_option, Key}}
     end.
 
@@ -512,7 +526,11 @@ valid(auth, _NotMethods, _Opts) ->
 valid(ssl_options, Options, Opts) ->
     maps:get(ssl, Opts, false) andalso tls_shaped(minato_secret:revealed(Options));
 valid(password, Password, _Opts) ->
-    is_binary(Password) orelse is_list(Password) orelse is_function(Password, 0).
+    is_binary(Password) orelse is_list(Password) orelse is_function(Password, 0);
+valid(Time, Timeout, _Opts) when
+    Time =:= connect_timeout; Time =:= timeout; Time =:= cancel_timeout
+->
+    Timeout =:= infinity orelse (is_integer(Timeout) andalso Timeout >= 0).
 
 -spec methods(term()) -> boolean().
 methods([Method | Rest]) -> lists:member(Method, all_methods()) andalso methods(Rest);

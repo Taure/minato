@@ -116,7 +116,12 @@ a_pool_whose_connection_could_not_be_secured_as_asked_does_not_start_test_() ->
             {auth, [scram]},
             {ssl_options, [{verify, verify_pear}]},
             {password, 42},
-            {host, ~"db.example.invalid"}
+            {host, ~"db.example.invalid"},
+            {connect_timeout, "5000"},
+            {timeout, ~"15000"},
+            {timeout, -1},
+            {cancel_timeout, "5000"},
+            {cancel_timeout, 0.5}
         ]
     ].
 
@@ -138,6 +143,20 @@ a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() 
         {error, {invalid_option, auth}},
         minato_owned:pool(?POOL, #{connection => asking(auth, md5)})
     ).
+
+a_listener_whose_connection_has_a_time_that_is_not_one_does_not_start_test_() ->
+    [
+        fun() ->
+            ok = ready(),
+            ?assertEqual(
+                {error, {invalid_option, Key}},
+                minato_owned:listener(minato_pool_opts_tests_listener, #{
+                    connection => asking(Key, "5000")
+                })
+            )
+        end
+     || Key <- [connect_timeout, timeout, cancel_timeout]
+    ].
 
 %% A connection that asks for something the type forbids, because what is
 %% checked is that it is refused at run time too.
