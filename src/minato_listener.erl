@@ -83,7 +83,8 @@ Passed to `minato_conn:connect/1` unchanged. One connection, held for the life
 of the listener. A `connection` that is missing, not a map, or has no `user`
 stops the listener with `invalid_connection`, and one with an option
 `minato_conn:validate/1` refuses stops it with `{invalid_option, Key}`, as does
-any key here other than `connection`.
+any key here other than `connection`: `{invalid_option, not_an_atom}` for one
+that is not an atom.
 """.
 -type opts() :: #{connection := minato_conn:opts()}.
 
@@ -183,14 +184,17 @@ format_status(Status) ->
 %% Options can come from the environment, so anything reaches here. The reason
 %% never carries the options: they hold the password.
 -spec init({name(), dynamic()}) ->
-    {ok, #state{}} | {stop, invalid_connection | {invalid_option, term()}}.
+    {ok, #state{}} | {stop, invalid_connection | {invalid_option, atom()}}.
 init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
-    case {maps:keys(maps:remove(connection, Opts)), minato_conn:validate(Connection)} of
+    Others = lists:sort(maps:keys(maps:remove(connection, Opts))),
+    case {Others, minato_conn:validate(Connection)} of
         {[], ok} ->
             process_flag(trap_exit, true),
             {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
-        {[Key | _Others], _Connection} ->
+        {[Key | _Others], _Connection} when is_atom(Key) ->
             {stop, {invalid_option, Key}};
+        {[_NotAnAtom | _Others], _Connection} ->
+            {stop, {invalid_option, not_an_atom}};
         {[], {error, Reason}} ->
             {stop, Reason}
     end;

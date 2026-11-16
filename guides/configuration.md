@@ -69,6 +69,9 @@ A key that is not in the table above is refused in the same way, whatever its
 value, and so is a key a pool or a listener has no option by: `sslmode`,
 `pool_size` or a misspelt `channel_binding` would otherwise be passed over and
 the default left in force. `ssl_options` are refused without `ssl => true`.
+Such a key is named in the reason when it is an atom. One that is not, a
+binary or a string, is `{invalid_option, not_an_atom}`, so that a map with
+secrets for keys does not put one in an error.
 
 Two startup parameters are sent unless `parameters` overrides them:
 `client_encoding` is `UTF8`, because the codecs decode text as UTF-8 and a

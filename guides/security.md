@@ -146,6 +146,12 @@ listener's has to be one of the options in the
 same way, because options for a TLS session nobody asked for are a session the
 caller believes it has.
 
+The reason names the key and never carries a value. A key is named only when
+it is an atom: a binary or a string that is not an option is
+`{invalid_option, not_an_atom}`, because the reason goes into an exception, a
+telemetry event and whatever a supervisor logs, and a map built the wrong way
+round from a file of secrets has them as its keys.
+
 ## What a server cannot make the client do
 
 The server is not trusted either. It may be compromised, or it may be somebody

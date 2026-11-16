@@ -78,12 +78,67 @@ an_option_minato_has_no_name_for_is_refused_before_a_socket_opens_test_() ->
                     {chanel_binding, require},
                     {channel_bindings, require},
                     {pasword, ~"secret"},
-                    {username, ~"minato"},
-                    {~"ssl", true},
-                    {"ssl", true}
+                    {username, ~"minato"}
                 ]
             ]
         end}.
+
+%% A map made from a file of secrets the wrong way round has them as its keys,
+%% and a key that is refused goes into the reason, the exception and the event.
+a_key_that_is_not_an_atom_is_refused_without_being_repeated_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Key])), fun() ->
+            Opts = asking(5432, #{Key => true}),
+            Handler = {?MODULE, self()},
+            {ok, _Started} = application:ensure_all_started(telemetry),
+            ok = telemetry:attach(
+                Handler, [minato, connect, exception], fun ?MODULE:exception/4, self()
+            ),
+            try
+                ?assertEqual({error, {invalid_option, not_an_atom}}, minato_conn:validate(Opts)),
+                ?assertEqual(
+                    {error, {minato_conn, {invalid_option, not_an_atom}}},
+                    minato_conn:attempt(Opts)
+                ),
+                Raised = raised(Opts),
+                ?assertMatch(
+                    {error,
+                        {minato_conn, #{
+                            message := options,
+                            reason := {invalid_option, not_an_atom},
+                            data := not_an_atom
+                        }},
+                        _Stacktrace},
+                    Raised
+                ),
+                Events = exceptions(),
+                ?assertMatch([_Attempt, _Connect], Events),
+                Printed = io_lib:format("~0tp", [{Raised, Events}]),
+                ?assertEqual(nomatch, string:find(Printed, "s3cret-key"))
+            after
+                ok = telemetry:detach(Handler)
+            end
+        end}
+     || Key <- [
+            ~"postgres://minato:s3cret-key@db.example.invalid/minato",
+            "s3cret-key",
+            {password, ~"s3cret-key"},
+            5432
+        ]
+    ].
+
+raised(Opts) ->
+    try minato_conn:connect(Opts) of
+        Returned -> {returned, Returned, []}
+    catch
+        Class:Reason:Stacktrace -> {Class, Reason, Stacktrace}
+    end.
+
+exceptions() ->
+    receive
+        {exception, Metadata} -> [Metadata | exceptions()]
+    after 100 -> []
+    end.
 
 every_option_there_is_has_a_name_test() ->
     Every = #{

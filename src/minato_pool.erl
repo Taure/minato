@@ -210,7 +210,8 @@ pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `{invalid_option, Key}`, as `minato_conn:validate/1` answers, so a pool that
 could not be secured as asked does not start and retry. So does a key that is
 not an option at all, here or in `connection`. None of these reasons carries
-the options.
+the options, and a key that is not an atom is not named in one:
+`{invalid_option, not_an_atom}`.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
 prints its child specs: in its progress report when the pool starts, when a
@@ -624,7 +625,7 @@ call(Name, Message, Timeout) ->
     | {invalid_max_idle, term()}
     | {invalid_max_age, term()}
     | {invalid_disconnected, term()}
-    | {invalid_option, term()}.
+    | {invalid_option, atom()}.
 
 -type settings() :: {pos_integer(), non_neg_integer(), timeout(), timeout(), fail | wait}.
 
@@ -646,7 +647,8 @@ init({_Name, _Opts}) ->
 checked(Opts) ->
     case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
         [] -> settings(Opts);
-        [Key | _Others] -> {refused, {invalid_option, Key}}
+        [Key | _Others] when is_atom(Key) -> {refused, {invalid_option, Key}};
+        [_NotAnAtom | _Others] -> {refused, {invalid_option, not_an_atom}}
     end.
 
 -spec settings(opts()) -> {ok, settings()} | {refused, refused()}.

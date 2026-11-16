@@ -179,11 +179,50 @@ an_option_a_pool_has_no_name_for_is_refused_test_() ->
             {pool_size, #{pool_size => 10, connection => connection()}},
             {max_size, #{size => 2, max_size => 10, connection => connection()}},
             {ssl, #{size => 2, ssl => true, connection => connection()}},
-            {~"size", #{~"size" => 2, connection => connection()}},
             {sslmode, #{size => 2, connection => asking(sslmode, require)}},
             {ssl_options, #{size => 2, connection => (connection())#{ssl_options => []}}}
         ]
     ].
+
+%% Options read from a file of secrets the wrong way round have them as keys,
+%% and a pool's reason for not starting is logged by whatever started it.
+a_key_that_is_not_an_atom_is_refused_without_being_repeated_test_() ->
+    Secret = ~"postgres://minato:s3cret@db.example.invalid/minato",
+    [
+        ?_assertEqual({error, {invalid_option, not_an_atom}}, linked(Opts))
+     || Opts <- [
+            #{~"size" => 2, connection => connection()},
+            #{"size" => 2, connection => connection()},
+            #{Secret => 2, connection => connection()},
+            #{size => 2, connection => asking(Secret, true)},
+            #{size => 2, connection => asking(~"timeout", 5000)}
+        ]
+    ] ++
+        [
+            fun() ->
+                ok = ready(),
+                ?assertEqual(
+                    {error, {invalid_option, not_an_atom}},
+                    minato_owned:listener(minato_pool_opts_tests_listener, Opts)
+                )
+            end
+         || Opts <- [
+                unknown(#{Secret => ~"jobs", connection => connection()}),
+                #{connection => asking(Secret, true)}
+            ]
+        ] ++
+        [
+            fun() ->
+                ok = ready(),
+                ?assertEqual(
+                    {error, {invalid_option, channel}},
+                    minato_owned:listener(
+                        minato_pool_opts_tests_listener,
+                        unknown(#{Secret => 1, channel => ~"jobs", connection => connection()})
+                    )
+                )
+            end
+        ].
 
 an_option_a_listener_has_no_name_for_is_refused_test_() ->
     [

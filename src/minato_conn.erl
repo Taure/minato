@@ -483,15 +483,21 @@ read as the default, which is the weaker one: `channel_binding => required`, or
 one, `~"5000"` out of the environment, was found by the first statement that
 ran out of it, as a `badarith`.
 
+A key that is not an option and is not an atom either is not repeated in the
+reason: `{error, {invalid_option, not_an_atom}}`. A map read from a file of
+secrets the wrong way round has them as its keys, and the reason goes into an
+exception, a telemetry event and whatever logs why a pool did not start.
+
 `connect/1` raises `error({minato_conn, #{message := options, reason :=
 {invalid_option, Key}}})` before it opens a socket, and a pool or a listener
 does not start: `{error, {invalid_option, Key}}`.
 """.
--spec validate(opts()) -> ok | {error, {invalid_option, term()}}.
+-spec validate(opts()) -> ok | {error, {invalid_option, atom()}}.
 validate(Opts) ->
     case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
         [] -> validate(?CHECKED, Opts);
-        [Key | _Others] -> {error, {invalid_option, Key}}
+        [Key | _Others] when is_atom(Key) -> {error, {invalid_option, Key}};
+        [_NotAnAtom | _Others] -> {error, {invalid_option, not_an_atom}}
     end.
 
 -spec validate([atom()], opts()) -> ok | {error, {invalid_option, atom()}}.
@@ -598,7 +604,7 @@ here(Name) when is_list(Name) ->
 here(_NotAHost) ->
     false.
 
--spec known(ok | {error, {invalid_option, term()}}) -> ok.
+-spec known(ok | {error, {invalid_option, atom()}}) -> ok.
 known(ok) -> ok;
 known({error, {invalid_option, Key} = Reason}) -> bad(options, Reason, Key).
 
