@@ -1076,9 +1076,6 @@ described(_Fields, undefined, Conn) ->
 described(Fields, DecodeOpts, #conn{frame_opts = Opts} = Conn) ->
     Conn#conn{frame_opts = Opts#{decoder => minato_protocol:decoder(Fields, DecodeOpts)}}.
 
-%% A deadline that has passed is not a read with no time left: that read
-%% hands back whatever is waiting, and a server that never lets the socket run
-%% empty would be read for as long as it went on writing.
 -doc false.
 %% A deadline with nothing behind it to cancel: for an answer the connection
 %% is given up over when it does not come, such as the one to a pool's reset.
@@ -1088,6 +1085,9 @@ giving_up_after(Conn, infinity) ->
 giving_up_after(Conn, Timeout) ->
     Conn#conn{deadline = erlang:monotonic_time(millisecond) + Timeout, cancelled = true}.
 
+%% A deadline that has passed is not a read with no time left: that read
+%% hands back whatever is waiting, and a server that never lets the socket run
+%% empty would be read for as long as it went on writing.
 -spec budget(conn(), timeout()) -> timeout() | overdue.
 budget(#conn{deadline = infinity}, Timeout) ->
     Timeout;
