@@ -267,15 +267,21 @@ an_answer_that_is_only_waited_out_ends_at_the_deadline_test_() ->
         [parse_complete], [{parameter_description, []}, no_data], [{ready_for_query, idle}]
     ],
     Begun = [{command_complete, ~"BEGIN"}, {ready_for_query, transaction}],
+    Kept = [
+        [parse_complete],
+        [{parameter_description, [23]}, no_data],
+        [],
+        [bind_complete],
+        [{command_complete, ~"UPDATE 1"}],
+        [{ready_for_query, idle}]
+    ],
     [
         {timeout, 60,
             {Label, fun() ->
                 Server = minato_backend_server:start([?READY | Script]),
                 Port = minato_backend_server:port(Server),
                 Answer = given(5000, fun() ->
-                    {ok, Conn} = minato_conn:connect(
-                        opts(Port, #{timeout => 300, cancel_timeout => 200})
-                    ),
+                    {ok, Conn} = minato_conn:connect(opts(Port, Opts#{cancel_timeout => 200})),
                     Result = waited_out(Asks, Conn),
                     ok = minato_conn:close(Conn),
                     Result
@@ -283,14 +289,23 @@ an_answer_that_is_only_waited_out_ends_at_the_deadline_test_() ->
                 minato_backend_server:stop(Server),
                 ?assertMatch({Took, Expected} when Took < 2500, Answer)
             end}}
-     || {Label, Asks, Script, Expected} <- [
-            {"closing a statement", close, Prepared ++ [{stream, [notice()]}],
+     || {Label, Asks, Opts, Script, Expected} <- [
+            {"preparing a statement", prepare, #{timeout => 300},
+                [[parse_complete], {stream, [notice()]}], {error, {socket, timeout}}},
+            {"asking again what a kept statement takes", retyped, #{timeout => 5000},
+                Kept ++ [[parse_complete], {stream, [notice()]}], {error, {socket, timeout}}},
+            {"closing a statement", close, #{timeout => 300}, Prepared ++ [{stream, [notice()]}],
                 {error, {socket, timeout}}},
-            {"rolling back for a function that raised", raise, [Begun, {stream, [notice()]}],
-                {error, stopped}}
+            {"rolling back for a function that raised", raise, #{timeout => 300},
+                [Begun, {stream, [notice()]}], {error, stopped}}
         ]
     ].
 
+waited_out(prepare, Conn) ->
+    minato_query:prepare(Conn, ~"s", ~"q");
+waited_out(retyped, Conn) ->
+    {ok, _Updated, Kept} = minato_query:cached(Conn, ~"q", [1]),
+    minato_query:cached(Kept, ~"q", [~"not a number"], #{timeout => 300});
 waited_out(close, Conn) ->
     {ok, Statement, Prepared} = minato_query:prepare(Conn, ~"s", ~"q"),
     minato_query:close(Prepared, Statement);

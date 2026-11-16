@@ -438,7 +438,7 @@ replanned(Conn, Sql, Statement, Parameters, Opts) ->
 ) ->
     {ok, result(), conn()} | {error, error(), conn()} | {error, error()}.
 described_again(Conn, Sql, #statement{parameters = Kept} = Statement, Parameters, Opts, Unchanged) ->
-    case prepare(Conn, ?UNNAMED, Sql) of
+    case asked(Conn, ?UNNAMED, Sql, sync) of
         {ok, #statement{parameters = Kept}, Ready} -> unchanged(Unchanged, Ready);
         {ok, _Retyped, Ready} -> replanned(Ready, Sql, Statement, Parameters, Opts);
         Failed -> Failed
@@ -458,11 +458,16 @@ one round trip itself: `Parse`, `Describe` and `Sync` in one write.
 
 The name is the caller's. A name already in use is refused with `42P05`, so
 `close/2` it first to parse something else under it.
+
+The answer is given the connection's `timeout` as its deadline, as a statement
+with no `timeout` of its own is. A server that has not finished it by then,
+whatever it sends in the meantime, costs the connection:
+`{error, {socket, timeout}}`.
 """.
 -spec prepare(conn(), binary(), iodata()) ->
     {ok, statement(), conn()} | {error, error(), conn()} | {error, error()}.
 prepare(Conn, Name, Sql) ->
-    asked(Conn, Name, Sql, sync).
+    cleared(asked(bounded(Conn, #{}), Name, Sql, sync)).
 
 -doc "`execute/4` with the default decoding options.".
 -spec execute(conn(), statement(), [term()]) ->
