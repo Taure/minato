@@ -113,6 +113,11 @@ out and the connection is closed whatever `send_timeout_close` says. With the
 `minato` application running that costs a timer; without it the bound still
 holds, and costs a process per write.
 
+On Windows that shutdown does not end a write `ssl` has already started, so a
+TLS write on the socket transport to a server that stopped reading is not
+bounded there. With `transport => inet` the driver bounds it, on Windows as
+elsewhere.
+
 Closing is bounded as well. `minato_conn:close/1` gives `Terminate` the shorter
 of `send_timeout` and one second, writes nothing behind bytes the server has
 not taken, and does not raise.

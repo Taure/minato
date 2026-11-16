@@ -140,6 +140,9 @@ Two of them stop something that ran on 1.1.6. Look for these first:
   socket down when a write runs out of time, and there the connection is
   closed whatever `send_timeout_close` says. Without the `minato` application
   running the deadline still holds, at the cost of a process per write.
+  Windows is the exception: a TLS write on the socket transport is not
+  bounded there, and `transport => inet` is the transport whose TLS writes
+  are.
   `minato_overdue` and `minato_sup` cannot be the name of a pool or a
   listener: `{error, {reserved_name, Name}}`.
 - A statement's `timeout` ends a result that is still arriving. It was only
