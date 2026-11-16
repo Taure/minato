@@ -23,6 +23,7 @@ Skips when no server answers.
     a_failing_statement_does_not_cost_the_connection/1,
     a_transaction_holds_one_connection/1,
     a_rolled_back_transaction_reports_its_reason/1,
+    a_result_is_read_a_fetch_at_a_time_through_a_cursor/1,
     a_connection_given_back_mid_transaction_is_reset/1,
     a_borrower_that_dies_is_replaced/1,
     a_connection_the_server_ended_is_not_handed_out/1,
@@ -84,6 +85,7 @@ all() ->
         a_failing_statement_does_not_cost_the_connection,
         a_transaction_holds_one_connection,
         a_rolled_back_transaction_reports_its_reason,
+        a_result_is_read_a_fetch_at_a_time_through_a_cursor,
         a_connection_given_back_mid_transaction_is_reset,
         a_borrower_that_dies_is_replaced,
         a_connection_the_server_ended_is_not_handed_out,
@@ -236,6 +238,39 @@ a_rolled_back_transaction_reports_its_reason(_Config) ->
     end),
     ?assertEqual({rollback, changed_my_mind}, Answer),
     ?assertEqual([], names()).
+
+%% What the configuration guide shows for a result too large to hold: each
+%% `FETCH` is a statement with a deadline and a size of its own.
+-spec a_result_is_read_a_fetch_at_a_time_through_a_cursor([{atom(), term()}]) -> ok.
+a_result_is_read_a_fetch_at_a_time_through_a_cursor(_Config) ->
+    Test = self(),
+    Answer = minato:transaction(?POOL, fun(Conn) ->
+        Declare = ~"DECLARE big CURSOR FOR SELECT n FROM generate_series(1, 2500) AS n",
+        {ok, _Declared, Open} = minato_query:simple(Conn, Declare),
+        fetched(Open, Test)
+    end),
+    ?assertEqual({ok, done}, Answer),
+    ?assertEqual([{1000, 1, 1000}, {1000, 1001, 2000}, {500, 2001, 2500}], parts()),
+    ?assertMatch(#{disconnects := 0}, minato:stats(?POOL)).
+
+fetched(Conn, Test) ->
+    case minato_query:query(Conn, ~"FETCH 1000 FROM big", [], #{timeout => 5000}) of
+        {ok, #{rows := []}, Read} ->
+            {ok, done, Read};
+        {ok, #{rows := [{First} | _] = Rows}, Read} ->
+            Test ! {part, length(Rows), First, element(1, lists:last(Rows))},
+            fetched(Read, Test);
+        {error, Reason, Read} ->
+            {rollback, Reason, Read};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+parts() ->
+    receive
+        {part, Rows, First, Last} -> [{Rows, First, Last} | parts()]
+    after 0 -> []
+    end.
 
 -spec a_connection_given_back_mid_transaction_is_reset([{atom(), term()}]) -> ok.
 a_connection_given_back_mid_transaction_is_reset(_Config) ->

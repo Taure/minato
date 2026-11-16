@@ -1474,6 +1474,10 @@ finished: `{error, {socket, timeout}}`, with no connection handed back.
 The deadline is looked at before every read, so it ends an answer that is still
 arriving as well as one that has stopped: rows a server sends without a pause
 are read until the deadline, then for `cancel_timeout` more, and no longer.
+That is a bound on how long a call reads and not on how much: what arrives in
+that time is held. With `infinity` for the deadline or for `cancel_timeout`
+there is no bound, and rows that keep arriving are read for as long as they
+come.
 
 It lasts until it is cleared with `infinity`, which the query layer does before
 handing a connection back, so a deadline belongs to one call rather than to the

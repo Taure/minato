@@ -20,8 +20,8 @@ directly.
 | `channel_binding` | `prefer` under TLS, `disable` without | `require` accepts `SCRAM-SHA-256-PLUS` and refuses every other method, including a server that asks for no password |
 | `auth` | every method | the methods a server may ask for, as libpq's `require_auth`; `[scram_sha_256]` to accept nothing else |
 | `connect_timeout` | `5000` | covers the TCP connect, the answer to the TLS request and the TLS handshake together; `infinity` to wait |
-| `timeout` | `15000` | the per read timeout, the default statement deadline, and how long the opening exchange may take from the startup message to `ReadyForQuery`; `infinity` to wait |
-| `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second |
+| `timeout` | `15000` | the per read timeout, the default statement deadline, and how long the opening exchange may take from the startup message to `ReadyForQuery`; `infinity` to wait, which also takes away the only bound on how long one call goes on reading: rows that keep arriving are read for as long as they come |
+| `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second; `infinity` takes away the same bound as `timeout => infinity` does |
 | `prepared_statements` | `64` | how many statements a connection keeps parsed; `0` disables |
 | `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}`, `{send_timeout, Timeout}`, `{send_timeout_close,true}` | each replaces one default; `Timeout` is the connection's `timeout` |
 | `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
@@ -280,6 +280,52 @@ columns it describes, and an atom is never collected. A key is an atom when the
 name is one already on this node, which the names your code matches on are, and
 the binary the server sent otherwise. A column aliased at run time, or one no
 loaded module mentions, comes back under a binary key.
+
+### A deadline bounds time, not memory
+
+A result is read whole before it is returned, and the deadline is on how long
+that takes, not on how much arrives. What one call can make its caller hold is
+what the server sends before the deadline and for `cancel_timeout` after it:
+at the defaults, twenty seconds of rows at whatever rate the link carries,
+which on a fast network is gigabytes. minato has no limit on the size of a
+result.
+
+`timeout => infinity`, on the connection or on a statement, takes the bound
+away altogether, and so does `cancel_timeout => infinity`: rows that keep
+arriving are read for as long as they come. Use `infinity` for a statement
+that is known to be slow and small, on a server that is trusted over TLS, and
+not as a connection's default.
+
+For a result that may be large, keep both finite and read it in parts. minato
+has no cursor or streaming call of its own, and needs none: a cursor is SQL.
+Each `FETCH` is a statement with a deadline of its own and a size the caller
+chose, and each part is dealt with before the next is asked for:
+
+```erlang
+in_parts(Pool, Handle) ->
+    minato:transaction(Pool, fun(Conn) ->
+        Declare = ~"DECLARE big CURSOR FOR SELECT id, payload FROM events",
+        {ok, _Declared, Open} = minato_query:simple(Conn, Declare),
+        fetched(Open, Handle)
+    end).
+
+fetched(Conn, Handle) ->
+    case minato_query:query(Conn, ~"FETCH 1000 FROM big", [], #{timeout => 5000}) of
+        {ok, #{rows := []}, Read} ->
+            {ok, done, Read};
+        {ok, #{rows := Rows}, Read} ->
+            ok = Handle(Rows),
+            fetched(Read, Handle);
+        {error, Reason, Read} ->
+            {rollback, Reason, Read};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+```
+
+Paging by key, `WHERE id > $1 ORDER BY id LIMIT 1000`, does the same without a
+transaction held open. A result that used to arrive and now takes longer than
+`timeout` to do so needs `timeout` raised for that call, to a number.
 
 ## The application environment
 

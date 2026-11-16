@@ -184,12 +184,23 @@ that was chosen. For each of these there is a test with a server that tries.
   looked at before every read, not only when a read comes back empty, so rows
   that arrive without a pause are read until the deadline and no further. The
   statement is cancelled then, and the connection given up `cancel_timeout`
-  later when the rows are still coming: `{error, {socket, timeout}}`. What a
-  server can make a caller hold is what it can send in `timeout` and
-  `cancel_timeout` together, so `cancel_timeout => infinity` is a bound taken
-  away. The answer to a pool's reset, to a statement being closed and to the
+  later when the rows are still coming: `{error, {socket, timeout}}`. The
+  answer to a pool's reset, to a statement being prepared or closed and to the
   rollback after a function that raised are held to one `timeout` as a whole
   in the same way.
+
+  The bound is on time and not on memory. What a server can make a caller
+  hold is what it can send in `timeout` and `cancel_timeout` together, which
+  at the defaults is twenty seconds of rows at the rate the link carries, and
+  nothing caps the size of a result. `timeout => infinity`, on a connection or
+  on a statement, is that bound taken away, and so is
+  `cancel_timeout => infinity`: a server, or anybody on the path of a
+  connection without TLS, can then grow the calling process for as long as it
+  keeps sending. Keep both finite towards a server that is not trusted, and
+  read a result that may be large in parts, with a cursor and `FETCH` or by
+  paging on a key, so that each part has a deadline and a size of its own. The
+  [configuration guide](configuration.md#a-deadline-bounds-time-not-memory)
+  shows how.
 - **Keep a write waiting.** A write gets the connection's `timeout` and the
   connection is closed when it runs out, on both transports, with TLS and
   without.
