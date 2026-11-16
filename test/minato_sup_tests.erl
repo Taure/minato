@@ -148,6 +148,78 @@ the_password_is_not_in_a_child_spec_test_() ->
     end).
 
 %%----------------------------------------------------------------------
+%% What a test started
+%%----------------------------------------------------------------------
+
+what_a_test_started_goes_when_the_test_does_test_() ->
+    [
+        running(fun() ->
+            {Test, Started} = started_by_a_test(Kind, keep),
+            Monitor = erlang:monitor(process, Started),
+            exit(Test, kill),
+            receive
+                {'DOWN', Monitor, process, Started, Reason} -> ?assertEqual(shutdown, Reason)
+            after 5000 -> error(still_running)
+            end
+        end)
+     || Kind <- [pool, listener]
+    ].
+
+%% Every test of a module runs in one process, so what watches for that process
+%% acts when the whole run ends, which is when the next run starts the same
+%% names.
+what_a_test_stopped_is_not_stopped_again_under_the_next_to_have_its_name_test_() ->
+    [
+        running(fun() ->
+            {Test, Stopped} = started_by_a_test(Kind, stop),
+            ?assertNot(is_process_alive(Stopped)),
+            {ok, Next} = start(Kind),
+            Monitor = erlang:monitor(process, Next),
+            try
+                exit(Test, kill),
+                receive
+                    {'DOWN', Monitor, process, Next, Reason} -> error({stopped, Reason})
+                after 300 -> ok
+                end,
+                ?assertEqual(Next, whereis(name(Kind)))
+            after
+                _ = minato_sup:stop_pool(name(Kind))
+            end
+        end)
+     || Kind <- [pool, listener]
+    ].
+
+what_does_not_start_answers_as_it_would_have_test() ->
+    ?assertEqual({error, {invalid_size, 0.5}}, minato_owned:pool(?POOL, sized(0.5))),
+    ?assertEqual({error, invalid_connection}, minato_owned:listener(?LISTENER, #{})).
+
+%% A process standing in for a test: it starts one through `m:minato_owned`,
+%% stops it again when told to, and then stays until it is killed.
+started_by_a_test(Kind, Then) ->
+    Asking = self(),
+    Test = spawn(fun() ->
+        {ok, Started} = owned(Kind),
+        _ = Then =:= stop andalso minato_sup:stop_pool(name(Kind)),
+        Asking ! {started, self(), Started},
+        receive
+            never -> ok
+        end
+    end),
+    receive
+        {started, Test, Started} -> {Test, Started}
+    after 5000 -> error(never_started)
+    end.
+
+owned(pool) -> minato_owned:pool(?POOL, pool());
+owned(listener) -> minato_owned:listener(?LISTENER, #{connection => connection()}).
+
+start(pool) -> minato:start_pool(?POOL, pool());
+start(listener) -> minato:start_listener(?LISTENER, #{connection => connection()}).
+
+name(pool) -> ?POOL;
+name(listener) -> ?LISTENER.
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 
@@ -155,6 +227,7 @@ running(Fun) ->
     {timeout, 30, fun() ->
         {ok, _Started} = application:ensure_all_started(minato),
         _ = minato_sup:stop_pool(?POOL),
+        _ = minato_sup:stop_pool(?LISTENER),
         Fun()
     end}.
 
