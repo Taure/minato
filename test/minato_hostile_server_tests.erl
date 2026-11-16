@@ -496,13 +496,14 @@ a_tls_write_to_a_server_that_stopped_reading_gives_up_test_() ->
             {"on the driver", #{transport => inet, socket_options => [{send_timeout, 500}]},
                 running}
         ],
-        bounded_here(Given, os:type())
+        bounded_here(Given#{tls => true}, os:type())
     ].
 
 %% Windows does not give a TLS write on the socket transport back when the
-%% socket under it is shut down, so there only the driver has a bound.
+%% socket under it is shut down, so there only the driver has a bound, and a
+%% close behind such a write waits with it.
 bounded_here(#{transport := inet}, _Os) -> true;
-bounded_here(_Given, {win32, _Name}) -> false;
+bounded_here(#{tls := true}, {win32, _Name}) -> false;
 bounded_here(_Given, _Os) -> true.
 
 %% `Terminate` is a courtesy, and a peer that has stopped reading is not owed
@@ -542,7 +543,8 @@ a_close_does_not_wait_on_a_server_that_stopped_reading_test_() ->
             {"behind TLS on the socket transport", #{tls => true}, #{}, 3000},
             {"behind TLS on the driver, where ssl closes in its own time", #{tls => true},
                 #{transport => inet}, 20000}
-        ]
+        ],
+        bounded_here(maps:merge(Server, Given), os:type())
     ].
 
 a_tls_write_that_is_in_time_is_left_alone_test() ->
