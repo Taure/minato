@@ -258,7 +258,8 @@ fetched(Conn, Test) ->
         {ok, #{rows := []}, Read} ->
             {ok, done, Read};
         {ok, #{rows := [{First} | _] = Rows}, Read} ->
-            Test ! {part, length(Rows), First, element(1, lists:last(Rows))},
+            {Last} = lists:last(Rows),
+            Test ! {part, length(Rows), First, Last},
             fetched(Read, Test);
         {error, Reason, Read} ->
             {rollback, Reason, Read};

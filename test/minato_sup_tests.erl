@@ -191,7 +191,13 @@ what_a_test_stopped_is_not_stopped_again_under_the_next_to_have_its_name_test_()
 
 what_does_not_start_answers_as_it_would_have_test() ->
     ?assertEqual({error, {invalid_size, 0.5}}, minato_owned:pool(?POOL, sized(0.5))),
-    ?assertEqual({error, invalid_connection}, minato_owned:listener(?LISTENER, #{})).
+    ?assertEqual(
+        {error, invalid_connection}, minato_owned:listener(?LISTENER, without_a_connection())
+    ).
+
+%% Options the type forbids, because what is asked is what refusing them answers.
+without_a_connection() ->
+    #{}.
 
 %% A process standing in for a test: it starts one through `m:minato_owned`,
 %% stops it again when told to, and then stays until it is killed.
