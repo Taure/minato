@@ -2,12 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
-## [unreleased]
+## [1.2.0] - 2026-11-16
 
 ### Upgrading
 
 Nothing in the API is removed or renamed. These are the changes a caller of
 1.1.6 can notice, most of them a refusal where there used to be silence.
+
+Two of them stop something that ran on 1.1.6. Look for these first:
+
+- **`ssl_options` without `ssl => true` are refused**, with
+  `{invalid_option, ssl_options}`: `minato_conn:connect/1` raises, and a pool
+  or a listener does not start. 1.1.6 passed the options over and connected
+  without TLS, so a configuration that read as encrypted was not. Add
+  `ssl => true`.
+- **A query whose whole answer takes longer than `timeout` fails.** `timeout`
+  is 15 seconds unless set, and it used to bound only the wait between two
+  reads, so a large result that kept arriving was read to its end. Now the
+  statement is cancelled at the deadline: `{error, {pgsql_error, #{code :=
+  ~"57014"}}}`, with the connection kept, from a server that takes the cancel,
+  and `{error, {socket, timeout}}`, with the connection closed, from one that
+  is still sending `cancel_timeout` later. Give that call a `timeout` that
+  covers the whole result, or read it in parts with a cursor; see "A deadline
+  bounds time, not memory" in the configuration guide.
 
 **Values and results**
 
@@ -79,6 +96,13 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   minato did not know used to be passed over, so `sslmode => require` or a
   misspelt `channel_binding` connected with the default. The options are the
   ones in the configuration guide; remove anything else from what is passed.
+  A key that is not an atom is not repeated in the reason:
+  `{invalid_option, not_an_atom}`.
+- `connect_timeout`, `timeout` and `cancel_timeout` are checked with the rest:
+  each is a number of milliseconds, an integer that is not negative, or
+  `infinity`, and anything else is `{invalid_option, Key}`. `"5000"` out of an
+  environment variable used to open a connection and raise `badarith` in the
+  first statement that ran out of time.
 - A `host` that is not a string, an atom, an address or `{local, Path}`, a
   binary above all, is `{invalid_option, host}`. `minato_conn:connect/1` raised
   `function_clause` for one, and a pool did not start, with that as the reason.
@@ -121,12 +145,24 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - A statement's `timeout` ends a result that is still arriving. It was only
   looked at when a read found nothing waiting, so rows sent without a pause
   were read for as long as the server sent them. The statement is cancelled at
-  the deadline and the connection given up `cancel_timeout` after that:
-  `{error, {socket, timeout}}`. A result that takes longer than `timeout` to
+  the deadline, which a PostgreSQL that is only sending a long result answers
+  with `57014`, and the connection is kept. A server still sending
+  `cancel_timeout` after that is given up on: `{error, {socket, timeout}}`,
+  and the connection is closed. A result that takes longer than `timeout` to
   arrive, and used to arrive, needs `timeout` raised for that call.
-- `minato_query:close/2`, the reset a pool reads at checkout and the rollback
-  after a function that raised in `minato_txn:transaction/2` get one `timeout`
-  for the whole answer, where each read of it got one.
+- The deadline bounds how long a call reads and not how much. `timeout =>
+  infinity` and `cancel_timeout => infinity` each take the bound away, so
+  keep both finite towards a server that is not trusted and read a result
+  that may be large with a cursor, a `FETCH` at a time. The configuration
+  guide shows how.
+- A statement's `timeout` that is not a number of milliseconds or `infinity`
+  raises `{minato_query, #{reason := {invalid_option, timeout}}}` before the
+  statement is sent, and the connection is kept. It was a `badarith`.
+- `minato_query:prepare/3`, `minato_query:close/2`, the reset a pool reads at
+  checkout and the rollback after a function that raised in
+  `minato_txn:transaction/2` get one `timeout` for the whole answer, where
+  each read of it got one. A server that has not finished the answer by then
+  costs the connection: `{error, {socket, timeout}}`.
 - `minato_conn:close/1` does not raise and does not wait on a server that has
   stopped reading: `Terminate` gets the shorter of `send_timeout` and one
   second, and is not written at all behind bytes the server has not taken. TLS
@@ -176,9 +212,10 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - Query events carry `host`, `port`, `database` and, on a pooled connection,
   `pool`.
 - The `reason` of a pool's `connect_failed` warning is narrowed the same way:
-  a server's error keeps the fields that name things, and an authentication
-  failure is its kind alone, `{minato_auth, no_supported_mechanism}` where it
-  carried the list the server offered. The warning is written on every try.
+  a server's error keeps the fields that name things, and a failure of
+  `minato_auth`, `minato_scram` or `minato_conn` is its kind alone,
+  `{minato_auth, no_supported_mechanism}` where it carried the list the server
+  offered. The warning is written on every try.
 
 **Pools, listeners and transactions**
 
@@ -229,6 +266,28 @@ Nothing in the API is removed or renamed. These are the changes a caller of
   "PgBouncer and connection poolers" in the configuration guide for what does
   not cross a pooler.
 
+### Added
+
+- `minato_conn:validate/1` says whether a connection's options would be
+  accepted, without connecting.
+- `minato_conn:origin/1` and the type `minato_conn:origin/0`: the `host`,
+  `port`, `database` and `pool` a connection's events carry.
+- `{array, Rows}` as a parameter, for an array of more than one dimension.
+- `{minato, [{log_values, true}]}` in the application environment puts
+  values back into raised errors and events. `minato_telemetry:values/0`
+  reads it, and `minato_telemetry:reason/1` and `minato_telemetry:frames/1`
+  are what narrow a failure and a stacktrace for an event.
+- `minato_auth:proven/1`: whether the server has proved in a SCRAM exchange
+  that it knows the password.
+- `minato_backoff:spread/1`: the random wait a pool and a listener take from
+  their backoff.
+- `minato_sup:reserved/1`: whether a name is one of minato's own.
+- `minato_overdue`, the supervised process that ends a TLS write on the
+  socket transport when it runs out of time, with `watch/2`, `finished/1` and
+  `ran_out/1`.
+- An `unencrypted_connection` warning from a pool started without `ssl` for
+  another host.
+
 ### Features
 
 - *(codec)* Send an array of more than one dimension only as `{array, Rows}`
@@ -236,7 +295,6 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 
 ### Bug Fixes
 
-- *(protocol)* Make no atom of a column name the server chose
 - *(codec)* Bound numeric to the range PostgreSQL stores and decode it in one pass
 - *(codec)* Bound array dimensions, nesting and element counts on decode
 - *(protocol)* Read command tags against a closed vocabulary
@@ -260,6 +318,7 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(codec)* Name the date field that is wrong, and refuse what the wire cannot hold
 - *(codec)* Write an array of more than one dimension
 - *(overdue)* Keep minato's own names, and the write deadline, whatever is started
+- *(protocol)* Make no atom of a column name the server chose
 - *(telemetry)* Take the arguments out of a frame that names no module
 - *(pool)* Open a connection for every caller waiting, up to the size
 - *(conn)* Refuse a security option minato does not know before a socket opens
@@ -273,6 +332,25 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(listener)* Send subscribers copies of the channel and the payload
 - *(pool)* Wait a random part of the backoff before connecting again
 - *(pool)* Ask the server for its limit once, whatever it answers
+- *(test)* Name only the other tests minato_conn is mutated against
+- *(test)* Mutate minato_conn against its own tests alone again
+- *(tls)* Make every handshake a full one
+- *(conn)* Hold an answer that is still arriving to its deadline
+- *(listener)* Refuse a name that cannot be a channel without asking the listener
+- *(pool)* Keep the connection of a statement that was refused before it was sent
+- *(pool)* Open nothing until the wait after a failed connect is over
+- *(conn)* Refuse a key that is not an option, and TLS options without TLS
+- *(conn)* Check the options before the password is read
+- *(codec)* Read a number or a date in text no further than its type goes
+- *(query)* Refuse an answer to a statement that was never bound
+- *(pool)* Log a failed connect by the name of its refusal
+- *(conn)* Refuse an unfinished bound exchange the way a required binding refuses the rest
+- *(conn)* Refuse a host that is not one by its name
+- *(query)* Give prepare/3 the deadline every other call has
+- *(conn)* Refuse a time that is not one when the options are checked
+- *(query)* Refuse a timeout that is not a time before the statement is sent
+- *(conn)* Name a key that is refused only when it is an atom
+- *(query)* Hand a connection back from close/2 without its deadline
 
 ### Documentation
 
@@ -285,18 +363,35 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - The write deadline without the application, a bounded close and minato's own names
 - *(security)* The setting for production, and what the defaults leave open
 - What raises and why, what listen/2 can answer, and a command that is a binary
+- A deadline bounds time and not memory, and how to read a large result
 
-### Perf
+### Performance
 
 - *(query)* Parse and run a kept statement in one exchange
+
+### Refactor
+
+- *(socket)* Type the v6 address and the partial send as the socket module specifies them
+- *(conn)* Keep the socket that was opened beside the one in use
+- *(pool)* Type the answer a limit is read from as the results it is
+- *(sup)* Type the options a child is started with as the two kinds they are
+- *(listener)* Catch only the raise a simple statement can make
+- *(pool)* Draw the wait before a reconnect in one place
+- Let a reraise that cannot fail carry nothing if it does
+- Drop two comments that repeat what is beside them
+- *(types)* Type what the hostname check, the limit and their tests are given
+- *(test)* Write out what a server answers after an unasked message
+- *(pool)* Name a refusal by its first element in a way the types follow
 
 ### Miscellaneous
 
 - *(types)* State what the new code and its tests hand eqWAlizer and the linter
 - *(mutate)* Point rebar3_mutate at the tests of modules tested under other names
+- *(types)* State what the pooler and traces tests and the write deadline hand eqWAlizer and the linter
 - *(types)* Ask the transport's own module about a closing socket, and drop a macro nothing uses
 - *(app)* List minato_overdue among the registered names
 - *(deps)* Pin every plugin to a version and resolve the lock again from nothing
+- *(bench)* Format the benchmarks, and open a new connection every 500 first uses
 
 ### Testing
 
@@ -322,6 +417,31 @@ Nothing in the API is removed or renamed. These are the changes a caller of
 - *(query)* What a query reports of itself, and answers that come out of turn
 - *(pool)* Clear a pool a run that was cut short left under the supervisor
 - *(pool)* What a pool makes of the limit it asks for, where mutation testing can run it
+- *(types)* Type the property tests instead of switching the checker off for them
+- *(pool)* A connection closed under a raise over its values is counted as lost
+- *(listener)* Ask what a listener does about a wait already started
+- *(listener)* Let the server's turn end with the test that asked for it
+- *(pool)* Run the growth tests under mutation, and wait a second at most
+- *(overdue)* Wait for the writer to be gone instead of asking whether it is
+- *(conn)* Run the hostile server tests when minato_conn is mutated
+- *(codec)* Send the array with no elements as the array it is in the round trip suite
+- *(protocol)* A column name no atom exists for stays a binary in a row
+- *(query)* Ask what a bind that is not answered as expected comes to
+- Take down what a test started when the test is killed
+- Give the helpers and the scripted server the types they are used with
+- *(redaction)* Judge what minato logs, not what ssl reports of its own
+- *(pool)* Keep a warning from one test out of the next one's capture
+- *(pool)* Cover a connect that fails during the wait and a connection read after its reset
+- *(pool)* Write the reset test's script with the helper the others use
+- Stop what a test started by its process, not by its name
+- *(conn)* Ask what ssl is handed for a session, on every release
+- *(query)* A result still arriving at its deadline, against a real PostgreSQL
+- *(types)* Give the cursor case and the refused listener the types they are used with
+
+### Style
+
+- *(query)* Wrap a comment that ran past the line
+- *(conn)* Put the comment on an overdue deadline beside the function it is about
 
 ## [1.1.6] - 2026-11-06
 
