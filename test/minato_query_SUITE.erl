@@ -36,6 +36,7 @@ Skips when no server answers.
     a_closed_statement_is_gone/1,
     an_empty_statement_is_not_an_error/1,
     a_statement_past_its_deadline_is_cancelled/1,
+    a_result_still_arriving_at_its_deadline_is_cancelled/1,
     a_cancelled_statement_leaves_the_connection_usable/1,
     the_connection_timeout_is_the_default_deadline/1,
     a_transaction_survives_a_cancelled_statement/1,
@@ -75,6 +76,7 @@ all() ->
         a_closed_statement_is_gone,
         an_empty_statement_is_not_an_error,
         a_statement_past_its_deadline_is_cancelled,
+        a_result_still_arriving_at_its_deadline_is_cancelled,
         a_cancelled_statement_leaves_the_connection_usable,
         the_connection_timeout_is_the_default_deadline,
         a_transaction_survives_a_cancelled_statement,
@@ -282,6 +284,22 @@ a_statement_past_its_deadline_is_cancelled(Config) ->
     Elapsed = erlang:monotonic_time(millisecond) - Started,
     ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}, _Conn}, Answer),
     ?assert(Elapsed < 5000).
+
+%% Rows that have not stopped arriving when the deadline passes, which a read
+%% that timed out never notices. A PostgreSQL that is only sending a long
+%% result takes the cancel, so the statement comes back cancelled and the
+%% connection is kept; `minato_hostile_server_tests` has the server that does
+%% not.
+-spec a_result_still_arriving_at_its_deadline_is_cancelled([{atom(), term()}]) -> ok.
+a_result_still_arriving_at_its_deadline_is_cancelled(Config) ->
+    Sql = ~"SELECT i, repeat('x', 100) FROM generate_series(1, 100000000) AS i",
+    Started = erlang:monotonic_time(millisecond),
+    Answer = minato_query:query(conn(Config), Sql, [], #{timeout => 300}),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}, _Conn}, Answer),
+    ?assert(Elapsed < 5000),
+    {error, _Reason, Cancelled} = Answer,
+    ?assertMatch({ok, #{rows := [{1}]}, _Read}, minato_query:query(Cancelled, ~"SELECT 1", [])).
 
 -spec a_cancelled_statement_leaves_the_connection_usable([{atom(), term()}]) -> ok.
 a_cancelled_statement_leaves_the_connection_usable(Config) ->
