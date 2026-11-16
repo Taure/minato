@@ -266,7 +266,7 @@ Options to `minato:query/4`, `minato:simple/3` and the `minato_query` functions:
 
 | option | default | |
 | --- | --- | --- |
-| `timeout` | the connection's `timeout` | deadline for the statement; on expiry it is cancelled on the server, not abandoned |
+| `timeout` | the connection's `timeout` | deadline for the statement, in milliseconds or `infinity`; on expiry it is cancelled on the server, not abandoned. Anything else raises `{minato_query, #{reason := {invalid_option, timeout}}}` before the statement is sent |
 | `return_rows_as_maps` | `false` | a map per row instead of a tuple |
 | `column_name_as_atom` | `false` | atom keys in those maps, for names that are atoms already |
 | `uuid_format` | `string` | `binary` for the raw 16 bytes |

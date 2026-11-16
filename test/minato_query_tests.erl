@@ -622,6 +622,55 @@ a_statement_run_unnamed_for_want_of_room_keeps_its_deadline_test() ->
     ?assert(lists:member({cancel_request, 4242, 777}, at_rest(Server))).
 
 %%----------------------------------------------------------------------
+%% How long a statement may run
+%%----------------------------------------------------------------------
+
+%% Text out of the environment was a `badarith`, a fraction a read that raised
+%% in the middle of the answer, and a negative number a statement cancelled as
+%% soon as it was sent.
+a_time_that_is_not_one_is_refused_before_anything_is_sent_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p given ~p", [Path, Timeout])), fun() ->
+            {Server, Conn} = connected(prepared([], [?TEXT]) ++ [selected([~"1"])]),
+            {ok, Statement, Ready} = minato_query:prepare(Conn, ~"mine", ~"SELECT 1"),
+            _ = asked(Server),
+            ?assertError(
+                {minato_query, #{
+                    message := options, reason := {invalid_option, timeout}, data := timeout
+                }},
+                timed(Path, Ready, Statement, Timeout)
+            ),
+            ?assertMatch({ok, [#{rows := [{~"1"}]}], _Read}, minato_query:simple(Ready, ~"s")),
+            ?assertEqual([{query, ~"s"}], asked(Server))
+        end}
+     || Path <- [simple, query, cached, execute],
+        Timeout <- ["5000", ~"5000", -1, 1.5, never]
+    ].
+
+%% Options the type forbids, because what is checked is that they are refused
+%% at run time too.
+-spec timed(atom(), minato_conn:conn(), minato_query:statement(), term()) -> dynamic().
+timed(Path, Conn, Statement, Timeout) ->
+    Opts = lasting(Timeout),
+    case Path of
+        simple -> minato_query:simple(Conn, ~"SELECT 1", Opts);
+        query -> minato_query:query(Conn, ?SQL, [1], Opts);
+        cached -> minato_query:cached(Conn, ?SQL, [1], Opts);
+        execute -> minato_query:execute(Conn, Statement, [], Opts)
+    end.
+
+-spec lasting(term()) -> dynamic().
+lasting(Timeout) ->
+    #{timeout => Timeout}.
+
+a_statement_may_be_given_no_deadline_test() ->
+    {_Server, Conn} = connected([selected([~"1"])]),
+    ?assertMatch(
+        {ok, [#{rows := [{~"1"}]}], _Read},
+        minato_query:simple(Conn, ~"SELECT 1", #{timeout => infinity})
+    ).
+
+%%----------------------------------------------------------------------
 %% What a query reports of itself
 %%----------------------------------------------------------------------
 

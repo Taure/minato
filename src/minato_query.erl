@@ -142,6 +142,13 @@ on the server rather than abandoned, and comes back as `57014` with the
 connection still usable. It defaults to the connection's own read timeout, so a
 statement that outlives that costs a statement rather than a connection. See
 `minato_conn:deadline/2`.
+
+`timeout` is a number of milliseconds, an integer that is not negative, or
+`infinity`. Anything else raises
+`error({minato_query, #{message := options, reason := {invalid_option, timeout}}})`
+before the statement is sent, so the connection that was passed in is the one
+to carry on with. It used to be a `badarith`, or a statement that was cancelled
+as soon as it was sent.
 """.
 -type opts() :: #{
     timeout => timeout(),
@@ -323,7 +330,8 @@ kept(Conn, Name, Sql, Parameters, Opts) ->
 %% did not hold before: an exchange left open has been ended with `Sync`, an
 %% answer partly read has been read to its end, and a statement parsed for the
 %% call has been closed. A null byte is found in the text of a statement or in
-%% a name, which is the first thing a call writes, so nothing was. The caller
+%% a name, which is the first thing a call writes, so nothing was, and an option
+%% is refused before that. The caller
 %% never sees the connection the call had got to, so the one it still has must
 %% be good. One that could not be brought back that far has been closed
 %% instead, and a pool it is returned to finds that out when it writes the
@@ -332,6 +340,7 @@ kept(Conn, Name, Sql, Parameters, Opts) ->
 left_ready({minato_codec, _Report}) -> true;
 left_ready({minato_protocol, #{reason := null_byte}}) -> true;
 left_ready({minato_query, #{reason := parameter_count_mismatch}}) -> true;
+left_ready({minato_query, #{reason := {invalid_option, _Key}}}) -> true;
 left_ready(_Reason) -> false.
 
 %% What says a kept statement has gone stale, and why it is run again once and
@@ -504,7 +513,11 @@ name(#statement{name = Name}) ->
 
 -spec bounded(conn(), opts()) -> conn().
 bounded(Conn, Opts) ->
-    minato_conn:deadline(Conn, maps:get(timeout, Opts, minato_conn:timeout(Conn))).
+    case maps:get(timeout, Opts, minato_conn:timeout(Conn)) of
+        infinity -> minato_conn:deadline(Conn, infinity);
+        Timeout when is_integer(Timeout), Timeout >= 0 -> minato_conn:deadline(Conn, Timeout);
+        _NotATime -> bad(options, {invalid_option, timeout}, timeout)
+    end.
 
 -spec decoding(opts()) -> minato_protocol:opts().
 decoding(Opts) when map_size(Opts) =:= 0 ->

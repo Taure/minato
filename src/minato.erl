@@ -152,8 +152,9 @@ round trip after the first on each connection in the pool. `minato_query:cached/
 documents what fills that cache and what happens when it is full.
 
 A parameter that will not encode raises `error({minato_codec, _})`, and the
-wrong number of them `error({minato_query, _})`. Both are about the call, so
-the connection goes back to the pool and is not replaced.
+wrong number of them `error({minato_query, _})`, as does a `timeout` that is
+not a time. All of them are about the call, so the connection goes back to the
+pool and is not replaced.
 """.
 -spec query(pool(), iodata(), [term()], minato_query:opts()) -> answer(minato_protocol:result()).
 query(Pool, Sql, Parameters, Opts) ->

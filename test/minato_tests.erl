@@ -97,6 +97,26 @@ a_statement_refused_before_it_is_sent_keeps_its_connection_test_() ->
         ]
     ].
 
+a_statement_whose_options_are_refused_keeps_its_connection_test_() ->
+    [
+        pooled(fun(Server) ->
+            ?assertError({minato_query, #{reason := {invalid_option, timeout}}}, Asks()),
+            ?assertMatch({ok, _Result}, minato:query(?POOL, ~"SELECT 1", [])),
+            ?assertMatch(#{disconnects := 0}, minato:stats(?POOL)),
+            ?assertNot(closed(Server))
+        end)
+     || Asks <- [
+            fun() -> minato:query(?POOL, ~"SELECT 1", [], lasting("5000")) end,
+            fun() -> minato:simple(?POOL, ~"SELECT 1", lasting(-1)) end
+        ]
+    ].
+
+%% Options the type forbids, because what is checked is that they are refused
+%% at run time too.
+-spec lasting(term()) -> dynamic().
+lasting(Timeout) ->
+    #{timeout => Timeout}.
+
 a_statement_raised_over_its_values_on_a_connection_it_lost_gives_it_up_test_() ->
     pooled(script({?MODULE, deaf_to_sync}), fun(Server) ->
         ?assertError(
