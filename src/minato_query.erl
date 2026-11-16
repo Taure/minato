@@ -574,6 +574,7 @@ reraise(Class, Reason, Stacktrace) ->
 -spec cleared(dynamic()) -> dynamic().
 cleared({ok, Answer, Conn}) -> {ok, Answer, minato_conn:deadline(Conn, infinity)};
 cleared({error, Reason, Conn}) -> {error, Reason, minato_conn:deadline(Conn, infinity)};
+cleared({ok, Conn}) -> {ok, minato_conn:deadline(Conn, infinity)};
 cleared(Answer) -> Answer.
 
 -spec reported(dynamic(), minato_telemetry:metadata()) ->

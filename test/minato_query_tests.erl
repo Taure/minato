@@ -102,6 +102,19 @@ closing_is_one_round_trip_test() ->
     ?assertMatch({ok, _Closed}, minato_query:close(Ready, Statement)),
     ?assertEqual([{close, statement, ~"mine"}, sync], asked(Server)).
 
+%% A deadline belongs to the call that set it. One left on the connection is
+%% found overdue by the next read the caller makes by hand, which then cancels
+%% whatever the caller is running.
+a_closed_statement_leaves_no_deadline_behind_test() ->
+    Late = {then, [], 300, [{command_complete, ~"SELECT 0"}, {ready_for_query, idle}]},
+    {Server, Conn} = connected(prepared([], []) ++ [[close_complete], ?IDLE, Late]),
+    {ok, Statement, Ready} = minato_query:prepare(Conn, ~"mine", ~"SELECT 1"),
+    {ok, Closed} = minato_query:close(Ready, Statement),
+    timer:sleep(700),
+    ok = minato_conn:send(Closed, {query, ~"SELECT 1"}),
+    ?assertMatch({ok, {command_complete, _Tag}, _Read}, minato_conn:next(Closed, 2000)),
+    ?assertEqual([], [Message || {cancel_request, _, _} = Message <- at_rest(Server)]).
+
 %%----------------------------------------------------------------------
 %% A statement the server will not parse
 %%----------------------------------------------------------------------
