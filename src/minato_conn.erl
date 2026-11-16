@@ -1945,11 +1945,19 @@ tls_options(Host, Opts) ->
 named(Upgraded, {Transport, Socket}, Name, Options) ->
     case unnamed(Options) andalso not carries(Upgraded, Name, Options) of
         true ->
-            _ = ssl:close(Upgraded),
+            ok = refused(Upgraded, os:type()),
             closing(Transport, Socket, {tls, {bad_cert, hostname_check_failed}});
         false ->
             {ok, Upgraded}
     end.
+
+%% The server has been told nothing and is still waiting, so the write side
+%% goes first: it answers that by closing, which is what closing a session on
+%% Windows waits for; see `close/1`.
+-spec refused(ssl:sslsocket(), os()) -> ok.
+refused(Upgraded, Os) ->
+    _ = ssl:shutdown(Upgraded, write),
+    shut(ssl, Upgraded, ?CLOSE_DRAIN_CAP, Os).
 
 -spec unnamed([ssl:tls_client_option()]) -> boolean().
 unnamed(Options) ->
