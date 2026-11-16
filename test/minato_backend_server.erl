@@ -13,7 +13,11 @@ started it.
 
 The script is a list of answers, one per frontend message read. `{raw, Bytes}`
 writes bytes as they are, which is how the single byte answer to `SSLRequest`
-is given; anything else is a list of `m:minato_backend_writer` messages. When
+is given; `{then, First, Milliseconds, Second}` writes one answer, waits, and
+writes another, which is a server saying something nobody asked for;
+`{reply, {Module, Function}}` is whatever `Module:Function(Message)` answers
+for the message that was read, for an answer that has to quote the client;
+anything else is a list of `m:minato_backend_writer` messages. When
 the script runs out the server keeps reading and answers nothing, which is what
 a client waiting on a message it will never get has to cope with.
 A `Terminate` is never answered, as no server would, and ends the conversation,
@@ -26,7 +30,7 @@ sitting in a backlog nobody reads, which is exactly the case a cancel test needs
 to observe.
 """.
 
--export([start/1, start/2, port/1, client_tls/1, received/1, stop/1]).
+-export([start/1, start/2, port/1, client_tls/1, received/1, received/2, stop/1]).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -35,19 +39,36 @@ to observe.
 -define(CHATTER_INTERVAL, 50).
 
 -doc "What to answer one frontend message with.".
--type answer() :: [minato_backend_writer:message()] | {raw, iodata()}.
+-type answer() ::
+    [minato_backend_writer:message()]
+    | {raw, iodata()}
+    | {then, answer(), Milliseconds :: non_neg_integer(), answer()}
+    | {stream, [minato_backend_writer:message()] | {raw, iodata()}}
+    | {reply, {module(), atom()}}.
 
 -doc """
 How the server behaves beyond the script.
 
 `tls` answers `SSLRequest` with `S` and completes a handshake with a certificate
 made for the server, which `client_tls/1` hands the client the trust for.
+`tls => chained` puts an intermediate between that certificate and its root,
+signed with SHA-384 where everything else is signed with SHA-256.
 `after_terminate` is what happens once `Terminate` or `CancelRequest` is read:
 `close` is what PostgreSQL does, `hold` keeps the session open and silent
-until the client closes it, and `chatter` keeps writing to it, so a client waiting for the close
-never waits on a quiet socket.
+until the client closes it, `chatter` keeps writing to it, so a client waiting for the close
+never waits on a quiet socket, and `flood` writes to it without a pause, so
+that client never finds the socket empty either. A `{stream, Answer}` step
+writes its answer over and over in the same way, for as long as the client
+keeps the connection. `after_script` is what happens once the script
+has run out: `read` goes on reading and answering nothing, and `stall` stops
+reading, with a small receive buffer, so that a client which goes on writing
+fills it.
 """.
--type opts() :: #{tls => boolean(), after_terminate => close | hold | chatter}.
+-type opts() :: #{
+    tls => boolean() | chained,
+    after_terminate => close | hold | chatter | flood,
+    after_script => read | stall
+}.
 
 -doc "A running server.".
 -opaque server() :: #{pid := pid(), port := inet:port_number(), tls := [ssl:tls_client_option()]}.
@@ -55,7 +76,7 @@ never waits on a quiet socket.
 -export_type([answer/0, opts/0, server/0]).
 
 -type identity() :: #{
-    cert := public_key:der_encoded(), key := {'ECPrivateKey', public_key:der_encoded()}
+    cert := [public_key:der_encoded()], key := {'ECPrivateKey', public_key:der_encoded()}
 }.
 
 -type peer() :: #{
@@ -65,7 +86,8 @@ never waits on a quiet socket.
     owner := pid(),
     acceptor := pid(),
     tls := identity() | undefined,
-    after_terminate := close | hold | chatter
+    after_terminate := close | hold | chatter | flood,
+    after_script := read | stall
 }.
 
 -doc "`start/2` with nothing beyond the script.".
@@ -76,14 +98,23 @@ start(Script) ->
 -doc "Listen on an ephemeral port and answer the script.".
 -spec start([answer()], opts()) -> server().
 start(Script, Opts) ->
-    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    Ended = maps:get(after_script, Opts, read),
+    {ok, Listen} = gen_tcp:listen(0, [
+        binary, {active, false}, {reuseaddr, true}, {nodelay, true} | buffer(Ended)
+    ]),
     {ok, Port} = inet:port(Listen),
     {Server, Client} = credentials(maps:get(tls, Opts, false)),
     Owner = self(),
     After = maps:get(after_terminate, Opts, close),
-    Pid = spawn_link(fun() -> accept(Listen, Owner, Script, {Server, After}) end),
+    Pid = spawn_link(fun() -> accept(Listen, Owner, Script, {Server, After, Ended}) end),
     ok = gen_tcp:controlling_process(Listen, Pid),
     #{pid => Pid, port => Port, tls => Client}.
+
+%% An answer is written a message at a time, and without `nodelay` every write
+%% after the first waits for the client to acknowledge the one before it.
+-spec buffer(read | stall) -> [gen_tcp:listen_option()].
+buffer(read) -> [];
+buffer(stall) -> [{recbuf, 4096}].
 
 -doc "Where it is listening.".
 -spec port(server()) -> inet:port_number().
@@ -103,14 +134,27 @@ called `start/1`. Under `hold` and `chatter`, `closed` follows `terminate` once
 the client has closed.
 """.
 -spec received(server()) -> [minato_protocol:frontend() | {password_message, binary()} | closed].
-received(#{pid := Pid}) ->
-    drain(Pid).
+received(Server) ->
+    received(Server, ?DRAIN_TIMEOUT).
 
--spec drain(pid()) -> [minato_protocol:frontend() | {password_message, binary()} | closed].
-drain(Pid) ->
+-doc """
+`received/1`, giving up once nothing has arrived for `Quiet` milliseconds.
+
+A message is handed over before it is answered. So a caller that has read the
+answer to the last message it sent can ask with a short wait, and one waiting
+on a message that is never answered, such as `Terminate`, wants `received/1`.
+""".
+-spec received(server(), non_neg_integer()) ->
+    [minato_protocol:frontend() | {password_message, binary()} | closed].
+received(#{pid := Pid}, Quiet) ->
+    drain(Pid, Quiet).
+
+-spec drain(pid(), non_neg_integer()) ->
+    [minato_protocol:frontend() | {password_message, binary()} | closed].
+drain(Pid, Quiet) ->
     receive
-        {?MODULE, Pid, Message} -> [Message | drain(Pid)]
-    after ?DRAIN_TIMEOUT -> []
+        {?MODULE, Pid, Message} -> [Message | drain(Pid, Quiet)]
+    after Quiet -> []
     end.
 
 -doc "Stop listening.".
@@ -120,17 +164,25 @@ stop(#{pid := Pid}) ->
     exit(Pid, shutdown),
     ok.
 
--spec credentials(boolean()) ->
+-spec credentials(boolean() | chained) ->
     {identity() | undefined, [ssl:tls_client_option()]}.
 credentials(false) ->
     {undefined, []};
 credentials(true) ->
+    chain([]);
+credentials(chained) ->
+    chain([[{key, {namedCurve, ?secp256r1}}, {digest, sha384}]]).
+
+-spec chain([[public_key:cert_opt()]]) -> {identity(), [ssl:tls_client_option()]}.
+chain(Intermediates) ->
     Key = [{key, {namedCurve, ?secp256r1}}, {digest, sha256}],
     Named = #'Extension'{
         extnID = ?'id-ce-subjectAltName', critical = false, extnValue = [{dNSName, "localhost"}]
     },
     #{server_config := Server, client_config := Client} = public_key:pkix_test_data(#{
-        server_chain => #{root => Key, intermediates => [], peer => [{extensions, [Named]} | Key]},
+        server_chain => #{
+            root => Key, intermediates => Intermediates, peer => [{extensions, [Named]} | Key]
+        },
         client_chain => #{root => Key, intermediates => [], peer => Key}
     }),
     {identity(Server), [{cacerts, trusted(Client)}, {server_name_indication, "localhost"}]}.
@@ -142,11 +194,17 @@ trusted([]) -> [].
 
 -spec identity([public_key:conf_opt()]) -> identity().
 identity(Server) ->
-    #{cert => certificate(Server), key => private_key(Server)}.
+    #{cert => [certificate(Server) | between(Server)], key => private_key(Server)}.
 
 -spec certificate([public_key:conf_opt()]) -> public_key:der_encoded().
 certificate([{cert, Der} | _Rest]) -> Der;
 certificate([_Other | Rest]) -> certificate(Rest).
+
+%% The intermediates come back in `cacerts`, which is what a server sends
+%% after its own certificate.
+-spec between([public_key:conf_opt()]) -> [public_key:der_encoded()].
+between(Server) ->
+    [Der || Der <- trusted(Server), not public_key:pkix_is_self_signed(Der)].
 
 %% `public_key:conf_opt()` says the key comes back decoded. It comes back DER
 %% encoded with its type, which is what `m:ssl` takes.
@@ -160,9 +218,9 @@ private_key([_Other | Rest]) ->
     gen_tcp:socket(),
     pid(),
     [answer()],
-    {identity() | undefined, close | hold | chatter}
+    {identity() | undefined, close | hold | chatter | flood, read | stall}
 ) -> no_return().
-accept(Listen, Owner, Script, {Tls, After} = Opts) ->
+accept(Listen, Owner, Script, {Tls, After, Ended} = Opts) ->
     case gen_tcp:accept(Listen, ?ACCEPT_TIMEOUT) of
         {ok, Socket} ->
             Peer = #{
@@ -172,7 +230,8 @@ accept(Listen, Owner, Script, {Tls, After} = Opts) ->
                 owner => Owner,
                 acceptor => self(),
                 tls => Tls,
-                after_terminate => After
+                after_terminate => After,
+                after_script => Ended
             },
             Served = spawn_link(fun() -> served(Peer, Script) end),
             ok = gen_tcp:controlling_process(Socket, Served),
@@ -197,6 +256,10 @@ closed(#{transport := Transport, socket := Socket}) ->
     ok.
 
 -spec serve(peer(), binary(), boolean(), [answer()]) -> peer().
+serve(#{after_script := stall} = Peer, _Buffer, true, []) ->
+    receive
+        {?MODULE, read_on} -> Peer
+    end;
 serve(#{tls := Tls, transport := gen_tcp} = Peer, Buffer, StartedUp, Script) when
     Tls =/= undefined
 ->
@@ -228,7 +291,7 @@ served(Peer, {ok, {cancel_request, _Pid, _Secret} = Message, _Rest}, _StartedUp,
     terminated(Peer);
 served(Peer, {ok, Message, Rest}, StartedUp, Script) ->
     told(Peer, Message),
-    answer(Peer, Rest, started_up(Message, StartedUp), Script);
+    answer(Peer, Message, Rest, started_up(Message, StartedUp), Script);
 served(Peer, closed, _StartedUp, _Script) ->
     Peer.
 
@@ -254,21 +317,45 @@ terminated(#{after_terminate := chatter, transport := Transport, socket := Socke
             terminated(Peer);
         {error, _Closed} ->
             gone(Peer)
-    end.
+    end;
+terminated(#{after_terminate := flood, transport := Transport, socket := Socket} = Peer) ->
+    ok = streamed(Transport, Socket, binary:copy(~"x", 16384)),
+    gone(Peer).
 
 -spec gone(peer()) -> peer().
 gone(Peer) ->
     told(Peer, closed),
     Peer.
 
--spec answer(peer(), binary(), boolean(), [answer()]) -> peer().
-answer(#{transport := Transport, socket := Socket} = Peer, Rest, StartedUp, [Answer | Script]) ->
-    ok = Transport:send(Socket, bytes(Answer)),
+-spec answer(peer(), term(), binary(), boolean(), [answer()]) -> peer().
+answer(
+    #{transport := Transport, socket := Socket} = Peer, Message, Rest, StartedUp, [Answer | Script]
+) ->
+    ok = sent(Transport, Socket, Message, Answer),
     serve(Peer, Rest, StartedUp, Script);
-answer(Peer, Rest, StartedUp, []) ->
+answer(Peer, _Message, Rest, StartedUp, []) ->
     serve(Peer, Rest, StartedUp, []).
 
--spec bytes(answer()) -> iodata().
+-spec sent(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), term(), answer()) -> ok.
+sent(Transport, Socket, Message, {then, First, Milliseconds, Second}) ->
+    ok = sent(Transport, Socket, Message, First),
+    ok = timer:sleep(Milliseconds),
+    sent(Transport, Socket, Message, Second);
+sent(Transport, Socket, _Message, {stream, Answer}) ->
+    streamed(Transport, Socket, iolist_to_binary(bytes(Answer)));
+sent(Transport, Socket, Message, {reply, {Module, Function}}) ->
+    sent(Transport, Socket, Message, Module:Function(Message));
+sent(Transport, Socket, _Message, Answer) ->
+    Transport:send(Socket, bytes(Answer)).
+
+-spec streamed(gen_tcp | ssl, gen_tcp:socket() | ssl:sslsocket(), binary()) -> ok.
+streamed(Transport, Socket, Bytes) ->
+    case Transport:send(Socket, Bytes) of
+        ok -> streamed(Transport, Socket, Bytes);
+        {error, _Closed} -> ok
+    end.
+
+-spec bytes([minato_backend_writer:message()] | {raw, iodata()}) -> iodata().
 bytes({raw, Bytes}) -> Bytes;
 bytes(Messages) -> minato_backend_writer:write_all(Messages).
 

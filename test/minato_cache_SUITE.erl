@@ -29,6 +29,16 @@ Skips when no server answers.
     a_cached_statement_answers_like_an_uncached_one/1,
     a_schema_change_under_a_cached_plan_is_recovered/1,
     a_deallocated_statement_is_parsed_again/1,
+    a_statement_is_kept_when_its_first_run_fails/1,
+    a_statement_that_does_not_parse_leaves_the_connection_in_step/1,
+    a_statement_that_does_not_parse_fails_its_transaction_and_no_more/1,
+    a_plan_that_changed_in_a_transaction_is_returned_as_the_server_put_it/1,
+    a_value_for_what_a_column_has_become_is_accepted/1,
+    a_value_for_what_a_column_was_is_refused_as_an_unkept_statement_would/1,
+    a_statement_the_server_refuses_over_its_old_types_is_parsed_again/1,
+    a_statement_refused_over_its_old_types_in_a_transaction_recovers_after_it/1,
+    a_value_that_does_not_fit_a_kept_statement_leaves_a_transaction_open/1,
+    a_session_that_discarded_everything_parses_again/1,
     a_statement_deallocated_in_a_transaction_fails_it/1,
     a_full_cache_falls_back_to_unnamed/1,
     caching_can_be_turned_off/1,
@@ -47,6 +57,16 @@ all() ->
         a_cached_statement_answers_like_an_uncached_one,
         a_schema_change_under_a_cached_plan_is_recovered,
         a_deallocated_statement_is_parsed_again,
+        a_statement_is_kept_when_its_first_run_fails,
+        a_statement_that_does_not_parse_leaves_the_connection_in_step,
+        a_statement_that_does_not_parse_fails_its_transaction_and_no_more,
+        a_plan_that_changed_in_a_transaction_is_returned_as_the_server_put_it,
+        a_value_for_what_a_column_has_become_is_accepted,
+        a_value_for_what_a_column_was_is_refused_as_an_unkept_statement_would,
+        a_statement_the_server_refuses_over_its_old_types_is_parsed_again,
+        a_statement_refused_over_its_old_types_in_a_transaction_recovers_after_it,
+        a_value_that_does_not_fit_a_kept_statement_leaves_a_transaction_open,
+        a_session_that_discarded_everything_parses_again,
         a_statement_deallocated_in_a_transaction_fails_it,
         a_full_cache_falls_back_to_unnamed,
         caching_can_be_turned_off,
@@ -178,6 +198,175 @@ a_statement_deallocated_in_a_transaction_fails_it(_Config) ->
     ?assertMatch({error, {pgsql_error, #{code := ~"26000"}}, _}, Failed),
     ?assertEqual([{3}], Rows).
 
+%% A statement the server has parsed stays parsed whatever becomes of the
+%% exchange it was parsed in, so one that failed to run is still worth keeping.
+-spec a_statement_is_kept_when_its_first_run_fails([{atom(), term()}]) -> ok.
+a_statement_is_kept_when_its_first_run_fails(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT 10 / $1::int4",
+    {error, {pgsql_error, #{code := Code}}, Kept} = minato_query:cached(Conn, Sql, [0]),
+    ?assertEqual(~"22012", Code),
+    ?assertEqual({1, 64}, minato_conn:statements(Kept)),
+    ?assertEqual([~"0"], counters(Kept)),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(Kept, Sql, [5]),
+    ?assertEqual([{2}], Rows),
+    ?assertEqual([~"0"], counters(Again)),
+    ok = minato_conn:close(Again).
+
+-spec a_statement_that_does_not_parse_leaves_the_connection_in_step([{atom(), term()}]) -> ok.
+a_statement_that_does_not_parse_leaves_the_connection_in_step(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    {error, {pgsql_error, #{code := Code}}, Refused} =
+        minato_query:cached(Conn, ~"SELECT FROM WHERE", []),
+    ?assertEqual(~"42601", Code),
+    ?assertEqual(idle, minato_conn:transaction_status(Refused)),
+    ?assertEqual({0, 64}, minato_conn:statements(Refused)),
+    {ok, #{rows := Rows}, Next} = minato_query:cached(Refused, ~"SELECT $1::int4", [7]),
+    ?assertEqual([{7}], Rows),
+    ok = minato_conn:close(Next).
+
+-spec a_statement_that_does_not_parse_fails_its_transaction_and_no_more([{atom(), term()}]) ->
+    ok.
+a_statement_that_does_not_parse_fails_its_transaction_and_no_more(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    {ok, Open} = minato_txn:open(Conn),
+    {error, {pgsql_error, #{code := Code}}, Refused} =
+        minato_query:cached(Open, ~"SELECT FROM WHERE", []),
+    ?assertEqual(~"42601", Code),
+    ?assertEqual(failed, minato_conn:transaction_status(Refused)),
+    {error, {pgsql_error, #{code := Aborted}}, Still} =
+        minato_query:cached(Refused, ~"SELECT 1", []),
+    ?assertEqual(~"25P02", Aborted),
+    {ok, RolledBack} = minato_txn:rollback(Still),
+    {ok, #{rows := Rows}, Next} = minato_query:cached(RolledBack, ~"SELECT 1", []),
+    ?assertEqual([{1}], Rows),
+    ok = minato_conn:close(Next).
+
+%% Parsing again inside the transaction the error aborted could only fail with
+%% 25P02 and hide what went wrong. The statement is dropped instead, so the
+%% next use after the rollback parses it as the table now is.
+-spec a_plan_that_changed_in_a_transaction_is_returned_as_the_server_put_it(
+    [{atom(), term()}]
+) -> ok.
+a_plan_that_changed_in_a_transaction_is_returned_as_the_server_put_it(_Config) ->
+    Sql = ~"SELECT * FROM minato_cache",
+    Cached = kept(~"a int4", Sql, []),
+    {ok, _Altered, Open} = minato_query:simple(
+        Cached, ~"BEGIN; INSERT INTO minato_cache VALUES (1); ALTER TABLE minato_cache ADD b int4"
+    ),
+    {error, {pgsql_error, #{code := Code}}, Aborted} = minato_query:cached(Open, Sql, []),
+    ?assertEqual(~"0A000", Code),
+    ?assertEqual(failed, minato_conn:transaction_status(Aborted)),
+    ?assertEqual({0, 64}, minato_conn:statements(Aborted)),
+    {ok, RolledBack} = minato_txn:rollback(Aborted),
+    ?assertEqual([], parsed(RolledBack)),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(RolledBack, Sql, []),
+    ?assertEqual([], Rows),
+    ok = dropped(Again).
+
+%% The statement was parsed when the column was an integer, and the types kept
+%% with it are what a value is encoded as. A value that is right for the table
+%% as it now is must not be refused over what the table was.
+-spec a_value_for_what_a_column_has_become_is_accepted([{atom(), term()}]) -> ok.
+a_value_for_what_a_column_has_become_is_accepted(_Config) ->
+    Sql = ~"SELECT b FROM minato_cache WHERE a = $1",
+    Cached = kept(~"a int4, b text", Sql, [1]),
+    {ok, _Altered, Altered} = minato_query:simple(
+        Cached,
+        ~"INSERT INTO minato_cache VALUES (1, 'one'); ALTER TABLE minato_cache ALTER a TYPE text"
+    ),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Altered, Sql, [~"1"]),
+    ?assertEqual([{~"one"}], Rows),
+    ?assertEqual({1, 64}, minato_conn:statements(Renewed)),
+    ?assertEqual(1, length(parsed(Renewed))),
+    {ok, #{rows := Again}, Reused} = minato_query:cached(Renewed, Sql, [~"1"]),
+    ?assertEqual([{~"one"}], Again),
+    ok = dropped(Reused).
+
+-spec a_value_for_what_a_column_was_is_refused_as_an_unkept_statement_would([{atom(), term()}]) ->
+    ok.
+a_value_for_what_a_column_was_is_refused_as_an_unkept_statement_would(_Config) ->
+    Sql = ~"SELECT b FROM minato_cache WHERE a = $1",
+    Cached = kept(~"a int4, b text", Sql, [1]),
+    {ok, _Altered, Altered} =
+        minato_query:simple(Cached, ~"ALTER TABLE minato_cache ALTER a TYPE text"),
+    Unkept = raised(fun() -> minato_query:query(Altered, Sql, [1]) end),
+    ?assertMatch({error, {minato_codec, #{type := text}}}, Unkept),
+    ?assertEqual(Unkept, raised(fun() -> minato_query:cached(Altered, Sql, [1]) end)),
+    ?assertEqual(Unkept, raised(fun() -> minato_query:cached(Altered, Sql, [1]) end)),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Altered, Sql, [~"1"]),
+    ?assertEqual([], Rows),
+    ?assertEqual(1, length(parsed(Renewed))),
+    ok = dropped(Renewed).
+
+%% `bytea = text` has no operator, so the server refuses the statement it kept
+%% with 42883 although the same SQL parses and runs if it is sent again.
+-spec a_statement_the_server_refuses_over_its_old_types_is_parsed_again([{atom(), term()}]) ->
+    ok.
+a_statement_the_server_refuses_over_its_old_types_is_parsed_again(_Config) ->
+    Sql = ~"SELECT a FROM minato_cache WHERE b = $1",
+    Cached = kept(~"a int4, b text", Sql, [~"one"]),
+    {ok, _Altered, Altered} = minato_query:simple(
+        Cached,
+        ~"INSERT INTO minato_cache VALUES (1, 'one'); ALTER TABLE minato_cache ALTER b TYPE bytea USING b::bytea"
+    ),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Altered, Sql, [~"one"]),
+    ?assertEqual([{1}], Rows),
+    ?assertEqual(1, length(parsed(Renewed))),
+    ok = dropped(Renewed).
+
+-spec a_statement_refused_over_its_old_types_in_a_transaction_recovers_after_it(
+    [{atom(), term()}]
+) -> ok.
+a_statement_refused_over_its_old_types_in_a_transaction_recovers_after_it(_Config) ->
+    Sql = ~"SELECT a FROM minato_cache WHERE b = $1",
+    Cached = kept(~"a int4, b text", Sql, [~"one"]),
+    {ok, _Altered, Altered} = minato_query:simple(
+        Cached,
+        ~"INSERT INTO minato_cache VALUES (1, 'one'); ALTER TABLE minato_cache ALTER b TYPE bytea USING b::bytea"
+    ),
+    {ok, Open} = minato_txn:open(Altered),
+    {error, {pgsql_error, #{code := Code}}, Aborted} = minato_query:cached(Open, Sql, [~"one"]),
+    ?assertEqual(~"42883", Code),
+    ?assertEqual({0, 64}, minato_conn:statements(Aborted)),
+    {ok, RolledBack} = minato_txn:rollback(Aborted),
+    {ok, Reopened} = minato_txn:open(RolledBack),
+    {ok, #{rows := Rows}, Renewed} = minato_query:cached(Reopened, Sql, [~"one"]),
+    ?assertEqual([{1}], Rows),
+    {ok, Committed} = minato_txn:commit(Renewed),
+    ok = dropped(Committed).
+
+%% Asking the server again what the statement takes is a `Parse`, which a
+%% transaction that is still good survives.
+-spec a_value_that_does_not_fit_a_kept_statement_leaves_a_transaction_open([{atom(), term()}]) ->
+    ok.
+a_value_that_does_not_fit_a_kept_statement_leaves_a_transaction_open(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT $1::int4",
+    {ok, _First, Cached} = minato_query:cached(Conn, Sql, [1]),
+    {ok, Open} = minato_txn:open(Cached),
+    ?assertMatch(
+        {error, {minato_codec, #{reason := not_an_integer}}},
+        raised(fun() -> minato_query:cached(Open, Sql, [~"one"]) end)
+    ),
+    {ok, #{rows := Rows}, Still} = minato_query:cached(Open, Sql, [2]),
+    ?assertEqual([{2}], Rows),
+    ?assertEqual(transaction, minato_conn:transaction_status(Still)),
+    ?assertEqual([~"0"], counters(Still)),
+    {ok, Committed} = minato_txn:commit(Still),
+    ok = minato_conn:close(Committed).
+
+-spec a_session_that_discarded_everything_parses_again([{atom(), term()}]) -> ok.
+a_session_that_discarded_everything_parses_again(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Sql = ~"SELECT $1::int4",
+    {ok, _First, Cached} = minato_query:cached(Conn, Sql, [1]),
+    {ok, _Gone, Discarded} = minato_query:simple(Cached, ~"DISCARD ALL"),
+    {ok, #{rows := Rows}, Again} = minato_query:cached(Discarded, Sql, [2]),
+    ?assertEqual([{2}], Rows),
+    ?assertEqual(1, length(parsed(Again))),
+    ok = minato_conn:close(Again).
+
 -spec a_full_cache_falls_back_to_unnamed([{atom(), term()}]) -> ok.
 a_full_cache_falls_back_to_unnamed(_Config) ->
     {ok, Conn} = minato_conn:connect(connection(#{prepared_statements => 2})),
@@ -205,6 +394,28 @@ a_pool_query_parses_each_statement_once(_Config) ->
     {ok, #{rows := [{3}]}} = minato:query(?POOL, Sql, [3]),
     {ok, #{rows := Rows}} = minato:query(?POOL, ~"SELECT name FROM pg_prepared_statements", []),
     ?assertEqual(2, length(Rows)).
+
+%%----------------------------------------------------------------------
+%% A table, and a statement kept against it
+%%----------------------------------------------------------------------
+
+kept(Columns, Sql, Parameters) ->
+    {ok, Conn} = minato_conn:connect(connection(#{})),
+    Create = [~"DROP TABLE IF EXISTS minato_cache; CREATE TABLE minato_cache (", Columns, ~")"],
+    {ok, _Made, Made} = minato_query:simple(Conn, Create),
+    {ok, _First, Cached} = minato_query:cached(Made, Sql, Parameters),
+    Cached.
+
+dropped(Conn) ->
+    {ok, _Dropped, Dropped} = minato_query:simple(Conn, ~"DROP TABLE minato_cache"),
+    minato_conn:close(Dropped).
+
+raised(Fun) ->
+    try Fun() of
+        Answer -> {answered, Answer}
+    catch
+        Class:Reason -> {Class, Reason}
+    end.
 
 %%----------------------------------------------------------------------
 %% Asking the server what it has parsed

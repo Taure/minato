@@ -29,6 +29,303 @@ messages the server received and require the password not to be among them.
     {ready_for_query, idle}
 ]).
 
+an_option_that_decides_how_a_connection_is_secured_is_checked_before_a_socket_opens_test_() ->
+    {setup, fun() -> gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]) end,
+        fun({ok, Listen}) -> gen_tcp:close(Listen) end, fun({ok, Listen}) ->
+            {ok, Port} = inet:port(Listen),
+            [
+                {lists:flatten(io_lib:format("~p as ~p", [Key, Value])), fun() ->
+                    ?assertError(
+                        {minato_conn, #{
+                            message := options, reason := {invalid_option, Key}, data := Key
+                        }},
+                        minato_conn:connect(asking(Port, #{Key => Value}))
+                    ),
+                    ?assertEqual({error, timeout}, gen_tcp:accept(Listen, 0))
+                end}
+             || {Key, Value} <- unknown_options()
+            ]
+        end}.
+
+%% Options the type may forbid, because what is checked is that they are
+%% refused at run time too.
+-spec asking(inet:port_number(), #{term() => term()}) -> dynamic().
+asking(Port, #{ssl_options := _} = Options) when not is_map_key(ssl, Options) ->
+    maps:merge(opts(Port, #{ssl => true}), Options);
+asking(Port, Options) ->
+    maps:merge(opts(Port, #{}), Options).
+
+%% A key that is not an option was skipped, so one that was misspelt left the
+%% default in force and nothing said so.
+an_option_minato_has_no_name_for_is_refused_before_a_socket_opens_test_() ->
+    {setup, fun() -> gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]) end,
+        fun({ok, Listen}) -> gen_tcp:close(Listen) end, fun({ok, Listen}) ->
+            {ok, Port} = inet:port(Listen),
+            [
+                {lists:flatten(io_lib:format("~p", [Key])), fun() ->
+                    ?assertError(
+                        {minato_conn, #{
+                            message := options, reason := {invalid_option, Key}, data := Key
+                        }},
+                        minato_conn:connect(asking(Port, #{Key => Value}))
+                    ),
+                    ?assertEqual({error, timeout}, gen_tcp:accept(Listen, 0))
+                end}
+             || {Key, Value} <- [
+                    {sslmode, require},
+                    {tls, true},
+                    {ssl_opts, [{verify, verify_peer}]},
+                    {chanel_binding, require},
+                    {channel_bindings, require},
+                    {pasword, ~"secret"},
+                    {username, ~"minato"}
+                ]
+            ]
+        end}.
+
+%% A map made from a file of secrets the wrong way round has them as its keys,
+%% and a key that is refused goes into the reason, the exception and the event.
+a_key_that_is_not_an_atom_is_refused_without_being_repeated_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Key])), fun() ->
+            Opts = asking(5432, #{Key => true}),
+            Handler = {?MODULE, self()},
+            {ok, _Started} = application:ensure_all_started(telemetry),
+            ok = telemetry:attach(
+                Handler, [minato, connect, exception], fun ?MODULE:exception/4, self()
+            ),
+            try
+                ?assertEqual({error, {invalid_option, not_an_atom}}, minato_conn:validate(Opts)),
+                ?assertEqual(
+                    {error, {minato_conn, {invalid_option, not_an_atom}}},
+                    minato_conn:attempt(Opts)
+                ),
+                Raised = raised(Opts),
+                ?assertMatch(
+                    {error,
+                        {minato_conn, #{
+                            message := options,
+                            reason := {invalid_option, not_an_atom},
+                            data := not_an_atom
+                        }},
+                        _Stacktrace},
+                    Raised
+                ),
+                Events = exceptions(),
+                ?assertMatch([_Attempt, _Connect], Events),
+                Printed = io_lib:format("~0tp", [{Raised, Events}]),
+                ?assertEqual(nomatch, string:find(Printed, "s3cret-key"))
+            after
+                ok = telemetry:detach(Handler)
+            end
+        end}
+     || Key <- [
+            ~"postgres://minato:s3cret-key@db.example.invalid/minato",
+            "s3cret-key",
+            {password, ~"s3cret-key"},
+            5432
+        ]
+    ].
+
+raised(Opts) ->
+    try minato_conn:connect(Opts) of
+        Returned -> {returned, Returned, []}
+    catch
+        Class:Reason:Stacktrace -> {Class, Reason, Stacktrace}
+    end.
+
+exceptions() ->
+    receive
+        {exception, Metadata} -> [Metadata | exceptions()]
+    after 100 -> []
+    end.
+
+every_option_there_is_has_a_name_test() ->
+    Every = #{
+        host => "db",
+        port => 5432,
+        user => ~"minato",
+        password => ~"secret",
+        database => ~"minato",
+        parameters => #{},
+        ssl => true,
+        ssl_options => [],
+        channel_binding => prefer,
+        auth => [scram_sha_256],
+        connect_timeout => 5000,
+        timeout => 15000,
+        socket_options => [],
+        transport => socket,
+        prepared_statements => 0,
+        cancel_timeout => 5000,
+        frame_opts => #{}
+    },
+    ?assertEqual(ok, minato_conn:validate(Every)).
+
+%% Options for a TLS session that nobody asked for are a session the caller
+%% believes it has.
+tls_options_without_tls_are_refused_test_() ->
+    [
+        ?_assertEqual({error, {invalid_option, ssl_options}}, minato_conn:validate(Opts))
+     || Opts <- [
+            #{user => ~"minato", ssl_options => [{verify, verify_peer}]},
+            #{user => ~"minato", ssl_options => []},
+            #{user => ~"minato", ssl => false, ssl_options => [{verify, verify_peer}]}
+        ]
+    ] ++
+        [
+            ?_assertEqual(ok, minato_conn:validate(#{user => ~"minato", ssl => false})),
+            ?_assertEqual(
+                ok,
+                minato_conn:validate(#{
+                    user => ~"minato", ssl => true, ssl_options => [{verify, verify_peer}]
+                })
+            )
+        ].
+
+a_value_that_cannot_be_read_does_not_hide_an_option_that_is_wrong_test() ->
+    ?assertError(
+        {minato_conn, #{message := options, reason := {invalid_option, channel_binding}}},
+        minato_conn:connect(asking(5432, #{channel_binding => required, password => [nope]}))
+    ).
+
+%% A list that does not end in one, which a list's type cannot say.
+-spec ending_in(term(), dynamic()) -> dynamic().
+ending_in(Head, Tail) ->
+    [Head | Tail].
+
+unknown_options() ->
+    [
+        {channel_binding, required},
+        {channel_binding, ~"require"},
+        {channel_binding, "require"},
+        {channel_binding, true},
+        {ssl, yes},
+        {ssl, ~"true"},
+        {ssl, verify_peer},
+        {auth, scram_sha_256},
+        {auth, []},
+        {auth, [scram]},
+        {auth, [scram_sha_256, ~"md5"]},
+        {auth, ending_in(scram_sha_256, md5)},
+        {ssl_options, #{verify => verify_peer}},
+        {ssl_options, [{verify, verify_pear}]},
+        {ssl_options, [{verify, true}]},
+        {ssl_options, [{handshake, hello}]},
+        {ssl_options, [{reuse_sessions, true}]},
+        {ssl_options, [{reuse_sessions, save}]},
+        {ssl_options, [{reuse_session, ~"an id"}]},
+        {ssl_options, [{session_tickets, auto}]},
+        {ssl_options, [{session_tickets, manual}]},
+        {ssl_options, [{use_ticket, [~"a ticket"]}]},
+        {ssl_options, [~"verify"]},
+        {ssl_options, ending_in({verify, verify_peer}, cacerts)},
+        {password, 42},
+        {password, undefined},
+        {host, ~"db.example.invalid"},
+        {host, 5432},
+        {host, {127, 0, 1}},
+        {host, {127, 0, 0, 256}},
+        {host, {local, socket}}
+    ] ++
+        [
+            {Key, Value}
+         || Key <- [connect_timeout, timeout, cancel_timeout],
+            Value <- ["5000", ~"5000", -1, 1.5, 5.0e3, never, undefined, {5, seconds}]
+        ].
+
+every_value_an_option_can_have_is_accepted_test_() ->
+    [
+        ?_assertEqual(ok, minato_conn:validate(asking(5432, #{Key => Value})))
+     || {Key, Value} <- [
+            {channel_binding, prefer},
+            {channel_binding, require},
+            {channel_binding, disable},
+            {ssl, true},
+            {ssl, false},
+            {auth, [scram_sha_256]},
+            {auth, [scram_sha_256, md5, cleartext, none]},
+            {ssl_options, []},
+            {ssl_options, [{verify, verify_none}]},
+            {ssl_options, [{verify, verify_peer}, {cacertfile, "ca.pem"}, {handshake, full}]},
+            {ssl_options, [{reuse_sessions, false}, {session_tickets, disabled}]},
+            {ssl_options, fun() -> [{verify, verify_peer}] end},
+            {password, ~"secret"},
+            {password, "secret"},
+            {password, fun() -> ~"secret" end},
+            {host, "db"},
+            {host, db},
+            {host, loopback},
+            {host, {127, 0, 0, 1}},
+            {host, {0, 0, 0, 0, 0, 0, 0, 1}},
+            {host, {local, "/var/run/postgresql/.s.PGSQL.5432"}},
+            {host, {local, ~"/var/run/postgresql/.s.PGSQL.5432"}}
+        ]
+    ] ++ [?_assertEqual(ok, minato_conn:validate(#{user => ~"minato"}))].
+
+every_time_an_option_can_have_is_accepted_test_() ->
+    [
+        ?_assertEqual(ok, minato_conn:validate(asking(5432, #{Key => Value})))
+     || Key <- [connect_timeout, timeout, cancel_timeout],
+        Value <- [0, 1, 5000, infinity]
+    ].
+
+the_first_option_that_is_wrong_is_the_one_named_test() ->
+    ?assertEqual(
+        {error, {invalid_option, channel_binding}},
+        minato_conn:validate(asking(5432, #{channel_binding => required, ssl => yes}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, ssl_options}},
+        minato_conn:validate(asking(5432, #{ssl_options => secure, password => 42}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, password}},
+        minato_conn:validate(asking(5432, #{password => 42, timeout => "5000"}))
+    ),
+    ?assertEqual(
+        {error, {invalid_option, connect_timeout}},
+        minato_conn:validate(asking(5432, #{connect_timeout => -1, cancel_timeout => "5000"}))
+    ).
+
+%% A time read from the environment is text, and it was taken as it came: the
+%% connection opened, and the first statement to run out of time raised
+%% `badarith` in the middle of its answer. A pool and a listener connect
+%% through here, and would have tried again for as long as they ran.
+a_time_that_is_not_one_is_refused_by_what_retries_a_connect_test_() ->
+    [
+        ?_assertEqual(
+            {error, {minato_conn, {invalid_option, Key}}},
+            minato_conn:attempt(asking(5432, #{Key => "5000"}))
+        )
+     || Key <- [connect_timeout, timeout, cancel_timeout]
+    ].
+
+%% Whether a session is resumed is up to the `m:ssl` a node runs, and the one
+%% in OTP 29 resumes none in the cases `minato_hostile_server_tests` sets up,
+%% so there those pass with or without the defaults. What `ssl:connect/3` is
+%% handed is the same on every release.
+every_handshake_is_asked_to_be_a_full_one_test_() ->
+    [
+        {Label, fun() ->
+            Calls = handed_to_ssl(fun() ->
+                {Server, {ok, Conn}} = tls_connects(#{}, Opts),
+                ok = minato_conn:close(Conn),
+                minato_backend_server:stop(Server)
+            end),
+            ?assertMatch([_Options], Calls),
+            [Options] = Calls,
+            ?assertEqual([false], proplists:get_all_values(reuse_sessions, Options)),
+            ?assertEqual([disabled], proplists:get_all_values(session_tickets, Options)),
+            ?assertNot(proplists:is_defined(reuse_session, Options)),
+            ?assertNot(proplists:is_defined(use_ticket, Options))
+        end}
+     || {Label, Opts} <- [
+            {"on the socket transport", #{}},
+            {"on the driver", #{transport => inet}}
+        ]
+    ].
+
 startup_carries_the_configured_parameters_test() ->
     {Server, {ok, Conn}} = connects([?READY], #{
         database => ~"minato_test", parameters => #{~"application_name" => ~"tests"}
@@ -71,6 +368,33 @@ the_parameters_and_the_key_the_server_sent_are_kept_test() ->
     ?assertEqual({4242, 777}, minato_conn:backend_key(Conn)),
     ok = minato_conn:close(Conn),
     minato_backend_server:stop(Server).
+
+a_null_byte_in_a_startup_parameter_is_refused_before_connecting_test_() ->
+    Smuggled = <<"minato_test", 0, "options", 0, "-c statement_timeout=1">>,
+    [
+        {Label, fun() ->
+            Server = minato_backend_server:start([?READY]),
+            Port = minato_backend_server:port(Server),
+            ?assertError(
+                {minato_conn, #{reason := null_byte_in_parameter, data := Name}},
+                minato_conn:connect(opts(Port, Opts))
+            ),
+            ?assertEqual(
+                {error, {minato_conn, null_byte_in_parameter}},
+                minato_conn:attempt(opts(Port, Opts))
+            ),
+            ?assertEqual([], minato_backend_server:received(Server)),
+            minato_backend_server:stop(Server)
+        end}
+     || {Label, Name, Opts} <- [
+            {"database", ~"database", #{database => Smuggled}},
+            {"user", ~"user", #{user => <<"mina", 0, "to">>, database => ~"minato_test"}},
+            {"options", ~"options", #{parameters => #{~"options" => <<"-c a=b", 0>>}}},
+            {"a name", <<"application", 0, "name">>, #{
+                parameters => #{<<"application", 0, "name">> => ~"tests"}
+            }}
+        ]
+    ].
 
 a_notice_during_startup_is_read_past_test() ->
     Script = [
@@ -166,11 +490,12 @@ a_raise_during_connect_is_returned_by_attempt_test() ->
     minato_backend_server:stop(Server).
 
 an_authentication_raise_is_returned_by_attempt_test() ->
-    Server = minato_backend_server:start([[{authentication_sasl, [~"SCRAM-SHA-256"]}]]),
-    Opts = opts(minato_backend_server:port(Server), #{
-        password => ~"pencil", channel_binding => require
-    }),
-    ?assertMatch({error, {minato_auth, _Reason}}, minato_conn:attempt(Opts)),
+    Server = minato_backend_server:start([[{authentication_sasl, [~"SCRAM-SHA-512"]}]]),
+    Opts = opts(minato_backend_server:port(Server), #{password => ~"pencil"}),
+    ?assertEqual(
+        {error, {minato_auth, {no_supported_mechanism, [~"SCRAM-SHA-512"]}}},
+        minato_conn:attempt(Opts)
+    ),
     minato_backend_server:stop(Server).
 
 a_scram_raise_is_returned_by_attempt_test() ->
@@ -276,6 +601,18 @@ what_the_server_sent_beyond_ready_is_readable_test() ->
     {Server, {ok, Conn}} = connects([?READY ++ [Notification]], #{}),
     ?assertMatch({ok, Notification, _Conn}, minato_conn:next(Conn)),
     ok = minato_conn:close(Conn),
+    minato_backend_server:stop(Server).
+
+a_message_too_long_for_its_length_field_is_refused_unsent_test() ->
+    {Server, {ok, Conn}} = connects([?READY], #{}),
+    Chunk = binary:copy(~"a", 16#1000000),
+    TooLong = [Chunk || _ <- lists:seq(1, 257)],
+    ?assertError(
+        {minato_protocol, #{reason := message_too_long}},
+        minato_conn:send(Conn, [{bind, ~"", ~"", [binary], [TooLong], []}, sync])
+    ),
+    ok = minato_conn:close(Conn),
+    ?assertMatch([{startup, _Parameters}, terminate], minato_backend_server:received(Server)),
     minato_backend_server:stop(Server).
 
 close_sends_terminate_test() ->
@@ -455,7 +792,55 @@ a_close_that_cannot_be_set_aside_leaves_no_closer_test() ->
     ?assertEqual(Closers, closers()),
     minato_backend_server:stop(Server).
 
+%% The session the closer is handed may already be gone, and `m:ssl` answers
+%% a write to one of those by exiting the caller as readily as with an error.
+a_closer_handed_a_session_that_is_gone_ends_quietly_test() ->
+    {Server, {ok, Conn}} = tls_connects(#{}, #{}),
+    Closer = proc_lib:spawn(minato_conn, closer, [?WINDOWS]),
+    Ref = monitor(process, Closer),
+    ok = minato_conn:give_away(Conn, Closer),
+    Session = ended(Conn),
+    Closer ! {minato_conn, close, Session, 100},
+    receive
+        {'DOWN', Ref, process, Closer, Reason} -> ?assertEqual(normal, Reason)
+    after 4000 -> error(closer_lives_on)
+    end,
+    minato_backend_server:stop(Server).
+
+a_close_of_a_session_that_is_gone_is_still_ok_test_() ->
+    [
+        {Label, fun() ->
+            {Server, {ok, Conn}} = tls_connects(#{}, Given),
+            _ = ended(Conn),
+            ?assertEqual(ok, minato_conn:close(Conn, ?POSIX)),
+            ?assertEqual(ok, minato_conn:close(Conn, ?WINDOWS)),
+            ?assertEqual(ok, minato_conn:close_aside(Conn, ?POSIX)),
+            ?assertEqual(ok, minato_conn:close_aside(Conn, ?WINDOWS)),
+            minato_backend_server:stop(Server)
+        end}
+     || {Label, Given} <- [{"socket", #{}}, {"driver", #{transport => inet}}]
+    ].
+
+%% Kills the processes of the TLS session a connection holds, and answers the
+%% session. The connection is opaque, and so is the session: both are searched.
+ended(Conn) ->
+    [Session] = [
+        Field
+     || Field <- tuple_to_list(Conn), is_tuple(Field), element(1, Field) =:= sslsocket
+    ],
+    Pids = [Pid || Pid <- tuple_to_list(Session), is_pid(Pid)],
+    Monitors = [monitor(process, Pid) || Pid <- Pids],
+    _ = [exit(Pid, kill) || Pid <- Pids],
+    _ = [
+        receive
+            {'DOWN', Monitor, process, _Pid, _Reason} -> ok
+        end
+     || Monitor <- Monitors
+    ],
+    Session.
+
 an_overdue_closer_is_killed_and_logged_test() ->
+    _ = logger:remove_handler(overdue_capture),
     ok = logger:add_handler(overdue_capture, ?MODULE, #{config => self()}),
     Closer = spawn(fun() ->
         receive
@@ -560,6 +945,38 @@ opts(Port, Opts) ->
         #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 5000},
         Opts
     ).
+
+%% What `ssl:connect/3` is called with while the function runs, by the process
+%% that runs it, which is the one a connection is opened in.
+handed_to_ssl(Connecting) ->
+    {ok, _Started} = application:ensure_all_started(ssl),
+    {module, ssl} = code:ensure_loaded(ssl),
+    Test = self(),
+    Collector = spawn_link(fun() -> collecting(Test, []) end),
+    1 = erlang:trace_pattern({ssl, connect, 3}, true, [global]),
+    1 = erlang:trace(Test, true, [call, {tracer, Collector}]),
+    try
+        Connecting()
+    after
+        1 = erlang:trace(Test, false, [call]),
+        1 = erlang:trace_pattern({ssl, connect, 3}, false, [global])
+    end,
+    Delivered = erlang:trace_delivered(Test),
+    receive
+        {trace_delivered, Test, Delivered} -> ok
+    end,
+    Collector ! {handed, Test},
+    receive
+        {handed, Collector, Calls} -> Calls
+    end.
+
+collecting(Test, Calls) ->
+    receive
+        {trace, Test, call, {ssl, connect, [_Socket, Options, _Timeout]}} ->
+            collecting(Test, [Options | Calls]);
+        {handed, Test} ->
+            Test ! {handed, self(), lists:reverse(Calls)}
+    end.
 
 tls_connects(ServerOpts, Opts) ->
     {ok, _Started} = application:ensure_all_started(ssl),

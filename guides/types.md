@@ -6,8 +6,8 @@ a type it has no codec for.
 ## The table
 
 Every type below works in both wire formats, and every one of them has an array
-type that works too. Arrays are lists; encoding writes one dimension, decoding
-reads any number and nests.
+type that works too. Arrays are lists, and an array of more than one dimension
+decodes to a list of lists; see [Arrays](#arrays) for how to send one.
 
 | PostgreSQL | Erlang out | Erlang in |
 | --- | --- | --- |
@@ -65,6 +65,82 @@ gives an integer count from the Unix epoch instead, which is lossless.
 **`uuid` is the readable form by default.** `uuid_format => binary` gives the
 raw 16 bytes, which is what you want if you are hashing or comparing them in
 bulk.
+
+## Arrays
+
+A list is an array of one dimension, and each element is a value of the
+element type:
+
+```erlang
+{ok, #{rows := [{[1, 2, 3]}]}} =
+    minato:query(main, ~"SELECT $1::int4[]", [[1, 2, 3]]).
+```
+
+An array of more than one dimension, up to the six PostgreSQL has, decodes to a
+list of lists. To send one, wrap it in `{array, _}`, which says that every list
+in it is a dimension:
+
+```erlang
+{ok, #{rows := [{[[1, 2], [3, 4]]}]}} =
+    minato:query(main, ~"SELECT $1::int4[]", [{array, [[1, 2], [3, 4]]}]).
+```
+
+Without the wrapper a list is never a row. For `text`, `varchar`, `json`,
+`jsonb` and `bytea` a list inside a list is one string, given as `iodata()`,
+and for every other element type it is refused by the element's codec, as it
+always was:
+
+```erlang
+[~"ab", ~"cd"]               = sent([[~"a", ~"b"], [~"c", ~"d"]]),
+[[~"a", ~"b"], [~"c", ~"d"]] = sent({array, [[~"a", ~"b"], [~"c", ~"d"]]}).
+```
+
+where `sent(V)` is what `SELECT $1::text[]` returns for `V`. So
+`["12", "34"]` handed to an `int4[]` raises `not_an_integer`: a string written
+as a list is a list, and read as a row it would be stored as character codes.
+Inside `{array, _}` an element is never a string written as a list.
+
+Rows must all be the same length and depth: anything else is refused with
+`ragged_array` before a byte is sent, and a seventh dimension with
+`dimensions_out_of_range`. An array with no elements has no dimensions, so
+`{array, [[], []]}` is `[]`. Lower bounds other than 1 are read and dropped.
+
+## What raises
+
+A value that cannot be what its type takes is a mistake in the call, so it is
+raised, with the statement not run and the connection left ready for the next:
+
+```erlang
+error({minato_codec, #{type := Type, reason := Reason, value := Value}})
+```
+
+`Type` is the type's name, its OID when minato has no name for it, or
+`{array, Oid}` with the array type's OID. `Value` is `redacted` unless
+`{minato, [{log_values, true}]}` is set, because the raise is printed by
+whatever supervises the caller.
+
+| `Reason` | Raised for |
+| --- | --- |
+| `not_an_integer`, `not_a_float`, `not_a_boolean`, `not_a_numeric`, `not_a_uuid`, `not_a_date`, `not_a_time`, `not_a_timestamp`, `not_iodata`, `not_a_list` | a value that is not what the type takes at all |
+| `out_of_range` | an integer wider than its type, a float `float4` cannot hold, a `numeric` with more digits or a larger scale than PostgreSQL has, a `date` or timestamp at or past the two values the wire keeps for infinity |
+| `month_out_of_range`, `day_out_of_range` | a `date` whose month is not 1 to 12, or whose day that month does not have |
+| `time_out_of_range` | a `time` outside `{0,0,0}` to `{24,0,0}`, or a count of microseconds longer than a day |
+| `ragged_array` | rows of an `{array, _}` that are not all the same length and depth |
+| `dimensions_out_of_range` | a seventh dimension, sent or received |
+| `unsupported_oid` | a value that is not a binary, for a type minato has no codec for |
+
+Two raises are not about a value's type:
+
+| Raise | Raised for |
+| --- | --- |
+| `{minato_query, #{reason := parameter_count_mismatch, data := {Wanted, Given}}}` | the wrong number of parameters. The statement was not run |
+| `{minato_protocol, #{reason := null_byte, data := Field}}` | a zero byte in the SQL or in a statement or portal name, where `Field` is `query`, `name`, `portal` or `statement`. Nothing was sent. A parameter value may hold any byte |
+
+And one is the server's mistake, not the caller's:
+`{minato_protocol, #{message := data_row, reason := column_count_mismatch,
+data := {Described, Sent}}}` is a row with another number of columns than the
+server said the result has. The answer cannot be read past it, so a pooled
+connection is closed and replaced.
 
 ## A type minato has no codec for
 

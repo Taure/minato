@@ -62,6 +62,8 @@ characters, or the 36 character hyphenated form, in either case.
 -define(INT4_MAX, 2147483647).
 -define(INT8_MIN, -9223372036854775808).
 -define(INT8_MAX, 9223372036854775807).
+-define(LONGEST_INTEGER, 20).
+-define(LONGEST_FLOAT, 32).
 
 -doc "Encode a scalar value to `Format` wire bytes.".
 -spec encode(minato_oid:name(), term(), minato_codec:format(), minato_codec:opts()) -> iodata().
@@ -171,12 +173,24 @@ integer_wire(int2, Value, binary) -> <<Value:16/signed>>;
 integer_wire(int4, Value, binary) -> <<Value:32/signed>>;
 integer_wire(_Type, Value, binary) -> <<Value:64/signed>>.
 
+%% Reading a decimal string costs more than linear time in its length, and the
+%% lowest `int8` is twenty characters, so a longer one is not read at all.
 -spec to_integer(minato_oid:name(), binary()) -> integer().
-to_integer(Type, Bin) ->
-    try
-        binary_to_integer(Bin)
+to_integer(Type, Bin) when byte_size(Bin) =< ?LONGEST_INTEGER ->
+    try binary_to_integer(Bin) of
+        Value -> within(Type, Value, Bin)
     catch
         error:badarg -> minato_codec:bad(Type, malformed_text, Bin)
+    end;
+to_integer(Type, Bin) ->
+    minato_codec:bad(Type, out_of_range, Bin).
+
+-spec within(minato_oid:name(), integer(), binary()) -> integer().
+within(Type, Value, Bin) ->
+    {Min, Max} = integer_range(Type),
+    case Value >= Min andalso Value =< Max of
+        true -> Value;
+        false -> minato_codec:bad(Type, out_of_range, Bin)
     end.
 
 %%----------------------------------------------------------------------
@@ -262,13 +276,17 @@ float_of_text(float4, Bin) ->
 float_of_text(Type, Bin) ->
     parse_float(Type, Bin).
 
+%% A `float8` is written in twenty five characters at most, whatever
+%% `extra_float_digits` is set to.
 -spec parse_float(minato_oid:name(), binary()) -> float().
-parse_float(Type, Bin) ->
+parse_float(Type, Bin) when byte_size(Bin) =< ?LONGEST_FLOAT ->
     try
         binary_to_float(with_point(Bin))
     catch
         error:badarg -> minato_codec:bad(Type, malformed_text, Bin)
-    end.
+    end;
+parse_float(Type, Bin) ->
+    minato_codec:bad(Type, malformed_text, Bin).
 
 -spec with_point(binary()) -> binary().
 with_point(Bin) ->

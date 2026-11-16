@@ -60,6 +60,10 @@ A result is a map:
 #{command => select, num_rows => 1, rows => [{42}]}
 ```
 
+`command` is an atom for every command tag PostgreSQL has. A server that
+answers with a word of its own gets that word back as the binary it sent, so
+match on the atoms you expect and let anything else through as a binary.
+
 Rows are tuples by default and maps under `return_rows_as_maps`:
 
 ```erlang
@@ -77,8 +81,13 @@ Rows are tuples by default and maps under `return_rows_as_maps`:
 
 A statement that fails is a normal outcome, not an exception: `code` is the
 SQLSTATE, and the connection goes back to the pool ready for the next caller.
-What raises is a bug - the wrong number of parameters, a value that does not fit
-the type the server asked for - and those raise where they happen.
+What raises is a bug, such as the wrong number of parameters or a value that
+does not fit the type the server asked for, and those raise where they happen. The raise
+names the type and the reason and says `redacted` where the value was, because
+an uncaught raise is printed by whatever supervises the caller;
+`{minato, [{log_values, true}]}` on a development node puts the value back.
+Neither costs the connection: it is put back to ready before the raise and
+goes back to the pool.
 
 ## A transaction
 
@@ -114,6 +123,9 @@ A listener that reconnects tells you: `{minato_listener, events, resubscribed}`
 means it was away, and `NOTIFY` has no replay, so anything published while it
 was gone is gone. Treat a notification as something that makes a poll faster,
 never as the only way you find out.
+
+PostgreSQL lets any role that can connect publish on any channel, so a payload
+is input from whoever did: check it as you would anything else from outside.
 
 ## Where next
 

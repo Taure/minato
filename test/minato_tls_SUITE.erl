@@ -28,11 +28,15 @@ Skips when no TLS server answers.
 
 -export([suite/0, all/0, init_per_suite/1, end_per_suite/1]).
 -export([init_per_testcase/2, end_per_testcase/2]).
+-export([any_hostname/2]).
 -export([
     a_verified_handshake_opens_a_working_session/1,
     the_server_reports_the_session_as_encrypted/1,
     an_untrusted_certificate_is_refused/1,
     a_hostname_the_certificate_does_not_cover_is_refused/1,
+    the_hostname_is_still_checked_with_no_server_name_sent/1,
+    a_refused_certificate_is_refused_on_the_next_connection_too/1,
+    a_hostname_check_of_the_callers_own_is_the_one_that_decides/1,
     verification_can_be_turned_off_deliberately/1,
     a_query_of_any_size_survives_the_tls_record_layer/1,
     a_transaction_works_over_tls/1,
@@ -71,6 +75,9 @@ all() ->
         the_server_reports_the_session_as_encrypted,
         an_untrusted_certificate_is_refused,
         a_hostname_the_certificate_does_not_cover_is_refused,
+        the_hostname_is_still_checked_with_no_server_name_sent,
+        a_refused_certificate_is_refused_on_the_next_connection_too,
+        a_hostname_check_of_the_callers_own_is_the_one_that_decides,
         verification_can_be_turned_off_deliberately,
         a_query_of_any_size_survives_the_tls_record_layer,
         a_transaction_works_over_tls,
@@ -204,6 +211,59 @@ a_hostname_the_certificate_does_not_cover_is_refused(_Config) ->
     Elsewhere = (verified())#{host => "127.0.0.1", ssl_options => [{cacerts, cacerts()}]},
     ?assertMatch({error, {tls, _Reason}}, minato_conn:connect(Elsewhere)).
 
+%% Not sending the server's name in the handshake is a statement about what
+%% goes over the wire in the clear, and OTP reads it as one about verification
+%% too: with the name disabled it skips the hostname check. minato keeps the
+%% two apart.
+-spec the_hostname_is_still_checked_with_no_server_name_sent([{atom(), term()}]) -> ok.
+the_hostname_is_still_checked_with_no_server_name_sent(_Config) ->
+    Unnamed = [{cacerts, cacerts()}, {server_name_indication, disable}],
+    Elsewhere = (verified())#{host => "127.0.0.1", ssl_options => Unnamed},
+    ?assertMatch({error, {tls, _Reason}}, minato_conn:connect(Elsewhere)),
+    {ok, Conn} = minato_conn:connect((verified())#{ssl_options => Unnamed}),
+    {ok, #{rows := [{1}]}, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [1]),
+    ok = minato_conn:close(Ready),
+    Unverified = [{verify, verify_none}, {server_name_indication, disable}],
+    {ok, Open} = minato_conn:connect((verified())#{host => "127.0.0.1", ssl_options => Unverified}),
+    ok = minato_conn:close(Open).
+
+%% Under TLS 1.2 a server may resume a session and present no certificate, and
+%% `m:ssl` offers a later connection the sessions earlier ones to the address
+%% left behind. The one refused here must not be what lets the next one in.
+-spec a_refused_certificate_is_refused_on_the_next_connection_too([{atom(), term()}]) -> ok.
+a_refused_certificate_is_refused_on_the_next_connection_too(_Config) ->
+    Resumable = [{cacerts, cacerts()}, {versions, ['tlsv1.2']}],
+    Elsewhere = (verified())#{host => "127.0.0.1"},
+    Unnamed = Elsewhere#{ssl_options => [{server_name_indication, disable} | Resumable]},
+    ?assertEqual(
+        {error, {tls, {bad_cert, hostname_check_failed}}}, minato_conn:connect(Unnamed)
+    ),
+    ?assertMatch(
+        {error, {tls, _Reason}}, minato_conn:connect(Elsewhere#{ssl_options => Resumable})
+    ),
+    {ok, Conn} = minato_conn:connect((verified())#{ssl_options => Resumable}),
+    ok = minato_conn:close(Conn),
+    ?assertMatch(
+        {error, {tls, _Reason}}, minato_conn:connect(Elsewhere#{ssl_options => Resumable})
+    ).
+
+-spec a_hostname_check_of_the_callers_own_is_the_one_that_decides([{atom(), term()}]) -> ok.
+a_hostname_check_of_the_callers_own_is_the_one_that_decides(_Config) ->
+    Any = {customize_hostname_check, [{match_fun, fun ?MODULE:any_hostname/2}]},
+    Named = (verified())#{host => "127.0.0.1", ssl_options => [{cacerts, cacerts()}, Any]},
+    {ok, Conn} = minato_conn:connect(Named),
+    ok = minato_conn:close(Conn),
+    Unnamed = Named#{
+        ssl_options => [{cacerts, cacerts()}, Any, {server_name_indication, disable}]
+    },
+    {ok, Open} = minato_conn:connect(Unnamed),
+    ok = minato_conn:close(Open).
+
+-doc false.
+-spec any_hostname(term(), term()) -> true.
+any_hostname(_Reference, _Presented) ->
+    true.
+
 %% `cacertfile` and `cacerts` answer the same question, so a caller who pins a
 %% private CA by file must not also be handed the public bundle: two answers to
 %% "which authorities are trusted" is the wider one deciding. The test CA is not
@@ -267,9 +327,8 @@ a_required_binding_is_refused_without_tls(_Config) ->
         channel_binding => require,
         timeout => ?TIMEOUT
     },
-    ?assertError(
-        {minato_auth, #{reason := {channel_binding_not_offered, _Mechanisms}}},
-        minato_conn:connect(Plain)
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}}, minato_conn:connect(Plain)
     ).
 
 -spec the_certificate_hash_is_the_one_the_server_computes([{atom(), term()}]) -> ok.

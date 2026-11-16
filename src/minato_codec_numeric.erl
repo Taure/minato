@@ -38,6 +38,20 @@ encodes the value the float actually holds. Floats are accepted for
 convenience but never produced, because decoding one would defeat the type.
 
 Negative zero normalises to positive zero, as it does on the server.
+
+## Bounds
+
+PostgreSQL stores at most 131072 digits before the decimal point and 16383
+after it, because the weight and the display scale are 16 bit fields. Both
+directions hold to that. Encoding a value outside it raises `out_of_range`
+rather than writing a header whose fields have wrapped, and an exponent is
+compared with the bounds before anything is built from it, so `1e999999999`
+costs a comparison and not a gigabyte of zeros. Decoding refuses a display scale
+above 16383 and a base-10000 digit above 9999, neither of which a server
+produces.
+
+Decoding is one pass over the digits into one binary, so its cost is linear in
+the size of the value.
 """.
 
 -export([encode/4, decode/4]).
@@ -48,6 +62,12 @@ Negative zero normalises to positive zero, as it does on the server.
 -define(SIGN_PINF, 16#D000).
 -define(SIGN_NINF, 16#F000).
 
+-define(NBASE, 10000).
+-define(MAX_SCALE, 16383).
+-define(MAX_INTEGER_DIGITS, 131072).
+-define(MAX_EXPONENT_DIGITS, 6).
+-define(EXPONENT_CEILING, 10000000).
+
 -doc "Encode a numeric value to `Format` wire bytes.".
 -spec encode(numeric, term(), minato_codec:format(), minato_codec:opts()) -> iodata().
 encode(numeric, nan, binary, _Opts) ->
@@ -57,7 +77,7 @@ encode(numeric, infinity, binary, _Opts) ->
 encode(numeric, neg_infinity, binary, _Opts) ->
     header(0, 0, ?SIGN_NINF, 0);
 encode(numeric, Value, binary, _Opts) ->
-    {Negative, Digits, Exponent} = parse(Value),
+    {Negative, Digits, Exponent} = ranged(Value, parse(Value)),
     to_binary_wire(Negative, Digits, Exponent);
 encode(numeric, nan, text, _Opts) ->
     ~"NaN";
@@ -66,7 +86,7 @@ encode(numeric, infinity, text, _Opts) ->
 encode(numeric, neg_infinity, text, _Opts) ->
     ~"-Infinity";
 encode(numeric, Value, text, _Opts) ->
-    {Negative, Digits, Exponent} = parse(Value),
+    {Negative, Digits, Exponent} = ranged(Value, parse(Value)),
     to_decimal_text(Negative, Digits, Exponent).
 
 -doc """
@@ -86,18 +106,18 @@ decode(numeric, <<_:16, _:16/signed, ?SIGN_PINF:16, _:16, _/binary>>, binary, _O
 decode(numeric, <<_:16, _:16/signed, ?SIGN_NINF:16, _:16, _/binary>>, binary, _Opts) ->
     neg_infinity;
 decode(
-    numeric, <<NDigits:16, Weight:16/signed, Sign:16, DScale:16, Rest/binary>> = Wire, binary, _Opts
+    numeric,
+    <<NDigits:16, Weight:16/signed, Sign:16, DScale:16, Digits/binary>> = Wire,
+    binary,
+    _Opts
 ) when
     Sign =:= ?SIGN_POS; Sign =:= ?SIGN_NEG
 ->
-    case byte_size(Rest) =:= NDigits * 2 of
+    case byte_size(Digits) =:= NDigits * 2 of
+        true when DScale =< ?MAX_SCALE ->
+            whole_text(sign_text(Sign =:= ?SIGN_NEG andalso NDigits > 0), Digits, Weight, DScale);
         true ->
-            Digits = [D || <<D:16>> <= Rest],
-            iolist_to_binary([
-                sign_text(Sign =:= ?SIGN_NEG andalso NDigits > 0),
-                integer_text(Digits, Weight),
-                fraction_text(Digits, Weight, DScale)
-            ]);
+            minato_codec:bad(numeric, scale_out_of_range, Wire);
         false ->
             minato_codec:bad(numeric, digit_count_mismatch, Wire)
     end;
@@ -109,7 +129,11 @@ decode(numeric, Bin, Format, _Opts) ->
 -spec floated(binary() | float() | nan | infinity | neg_infinity) ->
     float() | nan | infinity | neg_infinity.
 floated(Value) when is_binary(Value) ->
-    binary_to_float(exponentless(Value));
+    try
+        binary_to_float(exponentless(Value))
+    catch
+        error:badarg -> minato_codec:bad(numeric, not_a_float, Value)
+    end;
 floated(Value) when is_float(Value) ->
     Value;
 floated(Value) ->
@@ -130,10 +154,14 @@ decode_text(~"inf") -> infinity;
 decode_text(~"-inf") -> neg_infinity;
 decode_text(Bin) -> valid_decimal(Bin).
 
+%% A sign, every digit there can be before the point, the point and every
+%% digit after it is the longest a server writes.
 -spec valid_decimal(binary()) -> binary().
-valid_decimal(Bin) ->
+valid_decimal(Bin) when byte_size(Bin) =< ?MAX_INTEGER_DIGITS + ?MAX_SCALE + 2 ->
     _ = parse(Bin),
-    Bin.
+    Bin;
+valid_decimal(Bin) ->
+    minato_codec:bad(numeric, out_of_range, Bin).
 
 -spec header(non_neg_integer(), integer(), non_neg_integer(), non_neg_integer()) -> binary().
 header(NDigits, Weight, Sign, DScale) ->
@@ -247,32 +275,48 @@ drop_trailing_zeros([Digit | Rest]) ->
 %% Base-10000 digits to decimal string
 %%----------------------------------------------------------------------
 
--spec integer_text([non_neg_integer()], integer()) -> iodata().
-integer_text(_Digits, Weight) when Weight < 0 ->
-    ~"0";
-integer_text(Digits, Weight) ->
-    [leading_group(Digits) | [four(digit_at(Digits, I)) || I <- lists:seq(1, Weight)]].
+-spec whole_text(binary(), binary(), integer(), non_neg_integer()) -> binary().
+whole_text(Sign, Digits, Weight, DScale) when Weight < 0 ->
+    fraction_text(Digits, -Weight - 1, DScale, <<Sign/binary, $0>>);
+whole_text(Sign, <<D:16, Rest/binary>>, Weight, DScale) when D < ?NBASE ->
+    grouped(Rest, Weight, DScale, <<Sign/binary, (integer_to_binary(D))/binary>>);
+whole_text(Sign, ~"", Weight, DScale) ->
+    grouped(~"", Weight, DScale, <<Sign/binary, $0>>);
+whole_text(_Sign, <<D:16, _Rest/binary>>, _Weight, _DScale) ->
+    minato_codec:bad(numeric, digit_out_of_range, D).
 
--spec leading_group([non_neg_integer()]) -> binary().
-leading_group(Digits) ->
-    integer_to_binary(digit_at(Digits, 0)).
+-spec grouped(binary(), non_neg_integer(), non_neg_integer(), binary()) -> binary().
+grouped(Digits, 0, DScale, Acc) ->
+    fraction_text(Digits, 0, DScale, Acc);
+grouped(<<D:16, Rest/binary>>, Left, DScale, Acc) when D < ?NBASE ->
+    grouped(Rest, Left - 1, DScale, <<Acc/binary, (four(D))/binary>>);
+grouped(~"", Left, DScale, Acc) ->
+    fraction_text(~"", 0, DScale, <<Acc/binary, (zeros(Left * 4))/binary>>);
+grouped(<<D:16, _Rest/binary>>, _Left, _DScale, _Acc) ->
+    minato_codec:bad(numeric, digit_out_of_range, D).
 
--spec fraction_text([non_neg_integer()], integer(), non_neg_integer()) -> iodata().
-fraction_text(_Digits, _Weight, 0) ->
-    [];
-fraction_text(Digits, Weight, DScale) ->
-    Groups = [four(digit_at(Digits, Weight + K)) || K <- lists:seq(1, (DScale + 3) div 4)],
-    [$., binary_part(iolist_to_binary(Groups), 0, DScale)].
+-spec fraction_text(binary(), non_neg_integer(), non_neg_integer(), binary()) -> binary().
+fraction_text(_Digits, _ZeroGroups, 0, Acc) ->
+    Acc;
+fraction_text(Digits, ZeroGroups, DScale, Acc) ->
+    Zeros = min(ZeroGroups * 4, DScale),
+    fractional(Digits, DScale - Zeros, <<Acc/binary, $., (zeros(Zeros))/binary>>).
 
--spec digit_at([non_neg_integer()], integer()) -> non_neg_integer().
-digit_at([Digit | _Rest], 0) -> Digit;
-digit_at([_Digit | Rest], Index) when Index > 0 -> digit_at(Rest, Index - 1);
-digit_at(_Digits, _Index) -> 0.
+-spec fractional(binary(), non_neg_integer(), binary()) -> binary().
+fractional(_Digits, 0, Acc) ->
+    Acc;
+fractional(<<D:16, Rest/binary>>, Left, Acc) when D < ?NBASE, Left >= 4 ->
+    fractional(Rest, Left - 4, <<Acc/binary, (four(D))/binary>>);
+fractional(<<D:16, _Rest/binary>>, Left, Acc) when D < ?NBASE ->
+    <<Acc/binary, (binary_part(four(D), 0, Left))/binary>>;
+fractional(~"", Left, Acc) ->
+    <<Acc/binary, (zeros(Left))/binary>>;
+fractional(<<D:16, _Rest/binary>>, _Left, _Acc) ->
+    minato_codec:bad(numeric, digit_out_of_range, D).
 
 -spec four(non_neg_integer()) -> binary().
 four(D) ->
-    Bin = integer_to_binary(D),
-    <<(zeros(4 - byte_size(Bin)))/binary, Bin/binary>>.
+    <<(D div 1000 + $0), (D div 100 rem 10 + $0), (D div 10 rem 10 + $0), (D rem 10 + $0)>>.
 
 %%----------------------------------------------------------------------
 %% Parsing the accepted Erlang forms into sign, digits and exponent
@@ -290,6 +334,29 @@ parse(Value) when is_binary(Value) ->
     end;
 parse(Value) ->
     minato_codec:bad(numeric, not_a_numeric, Value).
+
+%% The bounds are checked on the digit count and the exponent, before either is
+%% turned into bytes: an exponent is a few characters that ask for any amount of
+%% zeros. A zero is zero whatever it is multiplied by, so its positive exponent
+%% is dropped rather than refused.
+-spec ranged(term(), {boolean(), binary(), integer()}) -> {boolean(), binary(), integer()}.
+ranged(Value, {_Negative, _Digits, Exponent}) when Exponent < -?MAX_SCALE ->
+    minato_codec:bad(numeric, out_of_range, Value);
+ranged(Value, {Negative, Digits, Exponent} = Parsed) ->
+    case byte_size(Digits) - leading_zeros(Digits, 0) of
+        0 when Exponent > 0 -> {Negative, Digits, 0};
+        Significant when Significant + Exponent > ?MAX_INTEGER_DIGITS ->
+            minato_codec:bad(numeric, out_of_range, Value);
+        _InRange ->
+            Parsed
+    end.
+
+-spec leading_zeros(binary(), non_neg_integer()) -> non_neg_integer().
+leading_zeros(Bin, Count) ->
+    case Bin of
+        <<_:Count/binary, $0, _/binary>> -> leading_zeros(Bin, Count + 1);
+        _ -> Count
+    end.
 
 -spec parse_decimal(binary()) -> {boolean(), binary(), integer()} | invalid.
 parse_decimal(Bin) ->
@@ -336,10 +403,22 @@ take_exponent(<<E, Rest/binary>>) when E =:= $e; E =:= $E ->
     case take_digits(Body) of
         {~"", _} -> invalid;
         {_, Trailing} when Trailing =/= ~"" -> invalid;
-        {Digits, _} -> exponent_value(Negative, binary_to_integer(Digits))
+        {Digits, _} -> exponent_value(Negative, magnitude(Digits))
     end;
 take_exponent(_) ->
     invalid.
+
+%% Reading a decimal string costs more than linear time in its length, so an
+%% exponent too long to be in range is not read: it becomes a number that is
+%% out of every range instead.
+-spec magnitude(binary()) -> non_neg_integer().
+magnitude(Digits) ->
+    Zeros = leading_zeros(Digits, 0),
+    case byte_size(Digits) - Zeros of
+        0 -> 0;
+        Size when Size > ?MAX_EXPONENT_DIGITS -> ?EXPONENT_CEILING;
+        Size -> binary_to_integer(binary_part(Digits, Zeros, Size))
+    end.
 
 -spec exponent_value(boolean(), integer()) -> integer().
 exponent_value(true, Value) -> -Value;

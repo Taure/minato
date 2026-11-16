@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.4
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.3.2
     permissions:
       contents: write
       pull-requests: write
@@ -47,13 +47,82 @@ jobs:
       enable-coverage: true
       enable-elp-lint: true
       enable-elp-eqwalize: true
+      # The release these two jobs have been running. erlang-ci now defaults to
+      # a later one, built against a newer OTP 28 than .tool-versions pins.
+      elp-version: '2026-02-27'
       enable-sbom: false
       enable-sbom-scan: false
       enable-dependency-submission: true
       enable-summary: true
 
+  # The job above runs the suites on the PostgreSQL the compose file starts by
+  # default. This one runs them on every other major minato says it supports,
+  # each with the two PgBouncers the compose file puts in front of it.
+  postgres:
+    name: Common Test (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '18']
+    env:
+      MINATO_PG_TAG: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: Taure/erlang-ci@f6d2bb3c08104d05721739db874d0467f6296433 # v2.3.2
+        with:
+          version-file: '.tool-versions'
+      - name: Start PostgreSQL ${{ matrix.postgres }} and the poolers
+        run: docker compose -f test/docker-compose.yml up -d --wait
+      - name: Which server answered
+        run: >-
+          docker exec minato-differential-postgres
+          psql -U minato -d minato_test -Atc 'SHOW server_version'
+      - name: Common Test
+        timeout-minutes: 10
+        run: rebar3 ct
+      - name: The Common Test logs, which say which case
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ct-logs-postgres-${{ matrix.postgres }}-${{ github.run_attempt }}
+          path: _build/test/logs
+          retention-days: 5
+
+  # Mutation testing runs `<module>_tests` against a module, or the tests
+  # rebar.config names for it, and passes over a module that has neither
+  # without a word. So a module without them is an error here, and so is one
+  # rebar.config names no tests for.
+  scored:
+    name: Every module has tests mutation can run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Look for a module mutation testing would skip
+        run: |
+          unscored=0
+          for source in src/*.erl; do
+            module=$(basename "$source" .erl)
+            if [ ! -f "test/${module}_tests.erl" ] &&
+               ! grep -Ezq "[[:space:]]${module} => \[[[:space:]]*[a-z]" rebar.config; then
+              echo "::error file=${source}::${module} has no ${module}_tests and no tests named for it under eunit_tests in rebar.config, so mutation testing skips it"
+              unscored=1
+            fi
+          done
+          exit "$unscored"
+
   release:
-    needs: ci
+    needs: [ci, postgres, scored]
     if: ${{ github.event_name == 'push' }}
     uses: Taure/erlang-ci/.github/workflows/release.yml@v2.3.2
     permissions:

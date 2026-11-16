@@ -117,6 +117,62 @@ integer_boundaries_test_() ->
      || {Oid, Value, Wire} <- Cases
     ].
 
+%% What a server writes for an integer is as long as the type's lowest value
+%% and no longer. Reading a run of digits costs more than its length, so one
+%% that long is not read at all.
+an_integer_in_text_is_read_no_further_than_its_type_goes_test_() ->
+    [
+        {
+            lists:flatten(io_lib:format("~p past ~p", [Oid, Bound])),
+            ?_assertError(
+                {minato_codec, #{reason := out_of_range}},
+                minato_codec:decode(Oid, Text, text)
+            )
+        }
+     || {Oid, Bound} <- [
+            {21, 32768},
+            {21, -32769},
+            {23, 2147483648},
+            {23, -2147483649},
+            {20, 9223372036854775808},
+            {20, -9223372036854775809}
+        ],
+        Text <- [integer_to_binary(Bound)]
+    ] ++
+        [
+            {
+                lists:flatten(io_lib:format("~p of ~p digits", [Oid, Digits])),
+                ?_assertError(
+                    {minato_codec, #{reason := out_of_range}},
+                    minato_codec:decode(Oid, binary:copy(~"9", Digits), text)
+                )
+            }
+         || Oid <- [21, 23, 20], Digits <- [21, 100000]
+        ].
+
+a_float_in_text_is_no_longer_than_a_server_writes_one_test_() ->
+    [
+        ?_assertEqual(
+            -2.2250738585072014e-308,
+            minato_codec:decode(701, ~"-2.2250738585072014e-308", text)
+        ),
+        ?_assertEqual(
+            -1.7976931348623157e308,
+            minato_codec:decode(701, ~"-1.79769313486231570e+308", text)
+        ),
+        ?_assertEqual(
+            1.0, minato_codec:decode(701, <<"1.", (binary:copy(~"0", 30))/binary>>, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := malformed_text}},
+            minato_codec:decode(701, <<"1.", (binary:copy(~"0", 31))/binary>>, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := malformed_text}},
+            minato_codec:decode(700, <<"1.", (binary:copy(~"0", 100000))/binary>>, text)
+        )
+    ].
+
 integer_out_of_range_test_() ->
     [
         ?_assertError({minato_codec, #{reason := out_of_range}}, enc(21, 32768, binary)),

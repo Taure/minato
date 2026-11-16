@@ -3,6 +3,23 @@
 What minato does about the network, the credentials and the log, and which of
 those you have to ask for.
 
+## The setting for production
+
+```erlang
+#{ssl => true,
+  auth => [scram_sha_256],
+  channel_binding => require}
+```
+
+The defaults connect to any PostgreSQL there is, and leave three things open to
+somebody on the path: without `ssl => true` nothing is encrypted and an MD5 or
+SCRAM exchange can be relayed; with it and the default `auth`, whoever holds a
+certificate the client accepts can ask for the password itself; and
+`channel_binding => prefer` binds only when the server offers to. The three
+options above close all of it, and the sections below say why each is needed.
+A pool that leaves `ssl` out towards a host that is not this machine logs one
+warning at start, and `ssl => false` written out silences it.
+
 ## Parameters are parameters
 
 There is no string interpolation anywhere in this client. Values travel as bound
@@ -12,7 +29,11 @@ as being for statements that have no values in them.
 
 Identifiers that minato itself has to put in a statement, which is channel names
 in `LISTEN` and savepoint names, are quoted rather than interpolated. There is a
-test that subscribes to a channel called `minato; DROP TABLE nothing`.
+test that subscribes to a channel called `minato; DROP TABLE nothing`. A name
+that cannot be a channel at all, one with a null byte in it or one that is not
+a binary, is answered `{error, {invalid_channel, Why}}` without the listener
+being asked, so a name taken from a request costs the listener's other
+subscribers nothing.
 
 ## TLS
 
@@ -28,6 +49,26 @@ explicitly on a socket upgrade. Anything in `ssl_options` replaces that one
 default and nothing else, so turning verification off is possible and has to be
 written down where a reviewer can see it.
 
+`{server_name_indication, disable}` keeps the server's name out of the
+handshake, where it travels in the clear, and that is all it does here. `m:ssl`
+on its own also stops checking the certificate for the name when it is given
+that option; minato puts the check back, against `host`, once the handshake is
+over and before the startup message is sent, so the option cannot be used to
+turn hostname verification off by accident. The ways to turn it off
+are the ones that say so: `{verify, verify_none}`, a `verify_fun` of your own,
+or a `customize_hostname_check` whose `match_fun` accepts what you mean it to.
+
+Every handshake is a full one. `m:ssl` keeps the TLS 1.2 sessions of every
+client on the node in one table and offers a later connection to the same
+address one of them, and a server that resumes a session presents no
+certificate. What a resumed connection trusts is then whatever the connection
+that opened the session accepted, which may be another pool with other
+`ssl_options`, or another application. minato leaves no session behind and
+takes none: `{reuse_sessions, false}` and `{session_tickets, disabled}` are
+defaults, and `ssl_options` asking for `reuse_sessions`, `reuse_session`,
+`session_tickets` or `use_ticket` to be anything else are refused before a
+socket opens. A connection is opened once and kept, so resuming saves nothing.
+
 ## Channel binding
 
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, on by default under TLS.
@@ -40,8 +81,19 @@ server's certificate is inside the material the client proof covers, so the
 relay's proof is computed over the wrong certificate and the server refuses it.
 
 - `prefer` (default under TLS) uses it when the server offers it
-- `require` refuses to connect without it
+- `require` authenticates with `SCRAM-SHA-256-PLUS` or not at all
 - `disable` never binds
+
+`require` is a statement about the whole exchange, not only about SCRAM. The
+server chooses which method to ask for, so somebody answering in its place can
+ask for a cleartext password, for MD5, or for nothing, and none of those can
+carry a binding. Under `require` each of them is refused before a byte of the
+password is read: `{error, {channel_binding_required, Method}}`. A server that
+offers SCRAM without `-PLUS`, and `require` on a connection with no TLS under
+it, are refused the same way with nothing sent, `Method` being
+`scram_sha_256`, which a pool reports as a failed connect. So is a server that
+takes the bound mechanism and then lets the client in before it has proved it
+knows the password.
 
 A client that can bind but is offered no `-PLUS` mechanism sends `y,,` in the
 gs2 header, which is how a server that *does* support binding learns its
@@ -54,6 +106,123 @@ that PostgreSQL offers, with one rule that is not configurable: **a cleartext
 password is refused on a plain socket**, always. The password opens every future
 connection too, so handing it to whoever is on the wire is worse than failing to
 connect.
+
+The default is permissive because a client cannot know how a server it has not
+met is configured. A deployment does know, and should say so: the server picks
+the method, so a client that accepts all of them will hand an MD5 response, or
+over TLS the password itself, to anything that asks. `auth` is what libpq calls
+`require_auth`:
+
+| `auth` | `require_auth` | the server asked for |
+| --- | --- | --- |
+| `scram_sha_256` | `scram-sha-256` | SASL, with or without channel binding |
+| `md5` | `md5` | an MD5 response |
+| `cleartext` | `password` | the password itself |
+| `none` | `none` | nothing: `trust`, or a method that needs no answer |
+
+A method outside the list is refused with `{error, {auth_method_refused,
+Method}}` before anything is sent in answer to it.
+
+## A setting minato does not know
+
+`channel_binding => required`, or `~"require"` as a configuration file or an
+environment variable would hand it over, is not `require`. Reading it as the
+default would be reading it as the weaker setting, so it is not read at all:
+`channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
+before a socket is opened, `minato_conn:connect/1` raises
+`{minato_conn, #{message := options, reason := {invalid_option, Key}}}`, and a
+pool or a listener does not start. In `ssl_options`, `verify` has to be
+`verify_peer` or `verify_none`, `{handshake, hello}` is refused because it
+answers with a session that has verified nothing yet, and so is anything that
+resumes a TLS session or keeps one for another connection to resume.
+
+The same goes for a key minato has no option by. `sslmode => require`,
+`tls => true` or `chanel_binding => require` used to be passed over, and the
+connection was opened with the defaults the caller thought it had changed: in
+the clear, or unbound. Every key in a connection's options, a pool's and a
+listener's has to be one of the options in the
+[configuration guide](configuration.md), and the first that is not is
+`{invalid_option, Key}`. `ssl_options` without `ssl => true` are refused in the
+same way, because options for a TLS session nobody asked for are a session the
+caller believes it has.
+
+The reason names the key and never carries a value. A key is named only when
+it is an atom: a binary or a string that is not an option is
+`{invalid_option, not_an_atom}`, because the reason goes into an exception, a
+telemetry event and whatever a supervisor logs, and a map built the wrong way
+round from a file of secrets has them as its keys.
+
+## What a server cannot make the client do
+
+The server is not trusted either. It may be compromised, or it may be somebody
+between the client and the real one, and everything it sends is read as input
+that was chosen. For each of these there is a test with a server that tries.
+
+- **Run out of memory on one message.** A message longer than
+  `max_message_length`, 64 MiB unless raised, is refused from its header,
+  before its payload is waited for.
+- **Run out of memory on one value.** A `numeric` is held to the range
+  PostgreSQL stores, 131072 digits before the point and 16383 after, whatever
+  its header claims, and decodes in time linear in its length. An array has at
+  most six dimensions and no more elements than the bytes that arrived could
+  hold, so its header cannot ask for a list longer than the message. A number,
+  a date or a time sent as text is read no further than the longest one a
+  server writes for that type, and an integer has to fit the column it came
+  in: more digits than that is a codec failure, not time spent reading them,
+  and the connection is ready for the next statement.
+- **Make atoms.** A command tag is read against the words PostgreSQL uses. One
+  it does not use comes back as a binary: `command` and `num_rows` in a result
+  are atoms and integers for every statement there is, and binaries for one a
+  server invented. Column names are binaries, and under
+  `column_name_as_atom` a name is looked up among the atoms that exist and
+  left a binary when it is not one of them.
+- **Keep a connect waiting.** `connect_timeout` covers the TCP connect and the
+  TLS handshake together, and `timeout` the whole exchange from the startup
+  message to `ReadyForQuery`, not each read of it. What the server reports
+  about itself on the way is kept up to 64 parameters.
+- **Keep a statement running past its deadline.** A statement's `timeout` is
+  looked at before every read, not only when a read comes back empty, so rows
+  that arrive without a pause are read until the deadline and no further. The
+  statement is cancelled then, and the connection given up `cancel_timeout`
+  later when the rows are still coming: `{error, {socket, timeout}}`. The
+  answer to a pool's reset, to a statement being prepared or closed and to the
+  rollback after a function that raised are held to one `timeout` as a whole
+  in the same way.
+
+  The bound is on time and not on memory. What a server can make a caller
+  hold is what it can send in `timeout` and `cancel_timeout` together, which
+  at the defaults is twenty seconds of rows at the rate the link carries, and
+  nothing caps the size of a result. `timeout => infinity`, on a connection or
+  on a statement, is that bound taken away, and so is
+  `cancel_timeout => infinity`: a server, or anybody on the path of a
+  connection without TLS, can then grow the calling process for as long as it
+  keeps sending. Keep both finite towards a server that is not trusted, and
+  read a result that may be large in parts, with a cursor and `FETCH` or by
+  paging on a key, so that each part has a deadline and a size of its own. The
+  [configuration guide](configuration.md#a-deadline-bounds-time-not-memory)
+  shows how.
+- **Keep a write waiting.** A write gets the connection's `timeout` and the
+  connection is closed when it runs out, on both transports, with TLS and
+  without. On Windows a TLS write on the socket transport is the exception
+  and has no bound, and neither has a close that waits behind one; use
+  `transport => inet` for TLS there.
+- **Take a pool or a listener down.** An answer that is not a message ends the
+  connection it arrived on, which is reconnected with backoff. The process
+  holding it stays up, a listener's subscribers are told they were
+  disconnected, and a pool's borrowers are not kept waiting on a server that
+  has stopped answering the pool's own questions.
+- **Be connected to as often as callers arrive.** A pool that could not
+  connect waits before it tries again, twice as long each time up to a limit,
+  and opens nothing during the wait whoever asks. A database that is down or
+  restarting is asked when a wait ends and one connect at a time, however many
+  callers are queued.
+- **Choose a weaker authentication.** See the two sections above: the methods
+  in `auth` are the only ones answered, and `channel_binding => require` is
+  answered with a bound SCRAM exchange or not at all.
+
+A value on its way to the server is held to the same limits: a message that
+does not fit the protocol's length field, more than 65535 parameters, or a
+startup parameter with a null byte in it is refused before anything is sent.
 
 ## Credentials
 
@@ -70,9 +239,19 @@ module that has been reloaded twice raises `badfun`.
 
 ## What reaches a log
 
-**Parameters never do.** Not in a log, not in a telemetry event, not in any
-configuration. They are the values themselves - the email address, the token,
-the amount.
+**Parameters never do.** Not in a log and not in a telemetry event, unless
+`log_values` below was turned on and one came back inside a failure. They are
+the values themselves: the email address, the token, the amount.
+
+**Values inside a failure only if you ask.** A server error quotes what it
+refused: `detail` holds the row that broke a constraint and `message` the input
+that would not parse. In a query event the error keeps the fields that name
+things, `code`, `constraint`, `table` and the like, and loses those two and the
+rest. A parameter that would not encode is raised with `redacted` where the
+value was, because an uncaught raise is printed by whatever supervises the
+caller. `{minato, [{log_values, true}]}` turns both off, for a development node
+or an incident, and is read per call. The `{error, {pgsql_error, Fields}}` a
+caller is returned is always whole.
 
 **Statements only if you ask.** `{minato, [{log_statements, true}]}` puts the SQL
 in query events. It is off by default because a statement is not a secret but
@@ -90,6 +269,12 @@ which can hold a private key, into the child spec as funs that return them, so
 each of those prints `#Fun<...>` where the secret would be. Pools, listeners
 and connections hold them the same way. The application environment itself
 still holds what `sys.config` gave it.
+
+What `ssl` is handed it is handed as given, and what `ssl` reports is its own.
+On OTP 28 the supervisor of each TLS connection prints the options the
+connection was started with in its progress report, so a node logging at
+`debug` writes an `srp_identity` given in `ssl_options` there. OTP 29 does not
+print them.
 
 This is hygiene for logs and reports, not a security boundary. Anyone who can
 run code on the node, from a remote shell or otherwise, can still read the
@@ -112,7 +297,8 @@ server refused.
   PostgreSQL will use it, but nothing in minato tests that path.
 - **No `sslmode=verify-ca` distinct from `verify-full`.** Verification checks the
   chain and the hostname; a deployment that wants the chain without the hostname
-  can say so in `ssl_options`, and should write down why.
+  can say so in `ssl_options` with a `customize_hostname_check` whose
+  `match_fun` accepts any name, and should write down why.
 - **No secret redaction pass over values you pass to `logger` yourself.** minato
   keeps its own output clean; what your handlers do with `{error, {pgsql_error,
   Fields}}` is yours.

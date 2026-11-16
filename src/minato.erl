@@ -78,6 +78,9 @@ anyway and the first query waits.
 A pool that does not start returns the pool's own reason, such as
 `{error, {invalid_size, 0.5}}`, not the supervisor's `{Reason, ChildSpec}`: the
 child spec holds the connection options.
+
+`minato_overdue` and `minato_sup` are minato's own processes and not names for
+a pool or a listener: `{error, {reserved_name, Name}}`.
 """.
 -spec start_pool(pool(), minato_pool:opts()) -> supervisor:startchild_ret().
 start_pool(Name, Opts) ->
@@ -110,9 +113,18 @@ stop_listener(Name) ->
 Subscribe the calling process to a channel.
 
 Notifications arrive as `{minato_notification, Channel, Payload, From}`, and a
-reconnect arrives as `{minato_listener, Name, resubscribed}` - which means
+reconnect arrives as `{minato_listener, Name, resubscribed}`, which means
 notifications were missed, because `NOTIFY` has no replay. See
 `m:minato_listener`.
+
+`{error, not_connected}` while the listener has no connection, `{error,
+{pgsql_error, Fields}}` when the server refuses the `LISTEN`, and the socket's
+error or `{error, {minato_protocol, Reason}}` when the connection was lost
+asking. After any of them the subscription is not held, so ask again, at the
+latest when `resubscribed` arrives.
+
+`{error, {invalid_channel, not_a_binary | null_byte}}` for a name that cannot
+be a channel, which the listener is not asked about.
 """.
 -spec listen(minato_listener:name(), binary()) -> ok | {error, term()}.
 listen(Listener, Channel) ->
@@ -138,10 +150,15 @@ formats are asked for.
 The statement is parsed once per connection and kept, so the same SQL costs one
 round trip after the first on each connection in the pool. `minato_query:cached/4`
 documents what fills that cache and what happens when it is full.
+
+A parameter that will not encode raises `error({minato_codec, _})`, and the
+wrong number of them `error({minato_query, _})`, as does a `timeout` that is
+not a time. All of them are about the call, so the connection goes back to the
+pool and is not replaced.
 """.
 -spec query(pool(), iodata(), [term()], minato_query:opts()) -> answer(minato_protocol:result()).
 query(Pool, Sql, Parameters, Opts) ->
-    with(Pool, fun(Conn) -> answered(minato_query:cached(Conn, Sql, Parameters, Opts)) end).
+    statement(Pool, fun(Conn) -> answered(minato_query:cached(Conn, Sql, Parameters, Opts)) end).
 
 -doc "`simple/3` with the default decoding options.".
 -spec simple(pool(), iodata()) -> answer([minato_protocol:result()]).
@@ -156,7 +173,7 @@ it; a statement with a value in it belongs in `query/3`.
 """.
 -spec simple(pool(), iodata(), minato_query:opts()) -> answer([minato_protocol:result()]).
 simple(Pool, Sql, Opts) ->
-    with(Pool, fun(Conn) -> answered(minato_query:simple(Conn, Sql, Opts)) end).
+    statement(Pool, fun(Conn) -> answered(minato_query:simple(Conn, Sql, Opts)) end).
 
 -doc """
 Run a function inside a transaction, on one borrowed connection.
@@ -191,7 +208,15 @@ bytes on it that nobody has read.
     Value | {error, term()}.
 with(Pool, Fun) ->
     case minato_pool:checkout(Pool) of
-        {ok, Conn} -> used(Pool, Conn, Fun);
+        {ok, Conn} -> used(Pool, Conn, Fun, with);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec statement(pool(), fun((conn()) -> {keep, Value, conn()} | {discard, Value})) ->
+    Value | {error, term()}.
+statement(Pool, Fun) ->
+    case minato_pool:checkout(Pool) of
+        {ok, Conn} -> used(Pool, Conn, Fun, statement);
         {error, Reason} -> {error, Reason}
     end.
 
@@ -258,8 +283,13 @@ stats(Pool) ->
 %% Borrowing
 %%----------------------------------------------------------------------
 
--spec used(pool(), conn(), fun((conn()) -> {keep, Value, conn()} | {discard, Value})) -> Value.
-used(Pool, Conn, Fun) ->
+-spec used(
+    pool(),
+    conn(),
+    fun((conn()) -> {keep, Value, conn()} | {discard, Value}),
+    with | statement
+) -> Value.
+used(Pool, Conn, Fun, Borrower) ->
     try Fun(Conn) of
         {discard, Value} ->
             ok = minato_pool:discard(Pool, Conn),
@@ -269,9 +299,21 @@ used(Pool, Conn, Fun) ->
             Value
     catch
         Class:Reason:Stacktrace ->
-            ok = minato_pool:discard(Pool, Conn),
+            ok = given_up(Pool, Conn, Borrower, Class, Reason),
             reraise(Class, Reason, Stacktrace)
     end.
+
+%% A function of the caller's that raised stopped somewhere this module cannot
+%% see, so its connection is not lent again. A statement of minato's own that
+%% raised over what it was given has put the connection back first.
+-spec given_up(pool(), conn(), with | statement, error | exit | throw, term()) -> ok.
+given_up(Pool, Conn, statement, error, Reason) ->
+    case minato_query:left_ready(Reason) of
+        true -> minato_pool:checkin(Pool, Conn);
+        false -> minato_pool:discard(Pool, Conn)
+    end;
+given_up(Pool, Conn, _Borrower, _Class, _Reason) ->
+    minato_pool:discard(Pool, Conn).
 
 -spec answered(
     {ok, Result, conn()} | {error, term(), conn()} | {error, term()}
@@ -296,4 +338,4 @@ concluded({error, Reason}) -> {discard, {error, Reason}}.
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    error({minato, #{message => Class, reason => Reason, data => Stacktrace}}).
+    error(badarg).

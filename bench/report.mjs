@@ -7,7 +7,7 @@ const results = readFileSync(path, 'utf8')
   .filter((line) => line.trim().startsWith('['))
   .flatMap((line) => JSON.parse(line));
 
-const order = ['simple', 'unnamed', 'cached', 'rows_1000', 'rows_5000', 'wide_row', 'insert', 'concurrent'];
+const order = ['simple', 'unnamed', 'first_use', 'cached', 'rows_1000', 'rows_5000', 'wide_row', 'insert', 'concurrent'];
 const pad = (value, width, right = false) =>
   right ? String(value).padStart(width) : String(value).padEnd(width);
 const number = (value) => (value === undefined || value === null ? '-' : Math.round(value));

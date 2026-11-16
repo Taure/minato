@@ -48,13 +48,30 @@ told explicitly on a socket upgrade. Anything passed in `ssl_options` replaces
 the default for that option and nothing else, so turning verification off is
 possible and has to be written down.
 
+`{server_name_indication, disable}` is not a way to write it down. It keeps the
+name out of the handshake, and the certificate is still checked for `host`,
+which `m:ssl` alone would stop doing. The check is made when the handshake is
+over and before anything is sent in the session, and one that fails is
+`{error, {tls, {bad_cert, hostname_check_failed}}}`. `{verify, verify_none}`, a
+`verify_fun` or a `customize_hostname_check` is what changes the check.
+
+Every handshake is a full one. `m:ssl` keeps the TLS 1.2 sessions of all the
+clients on a node in one place and resumes one for a later connection to the
+same address without the server presenting a certificate again, so what a
+resumed connection trusts is whatever the connection that opened the session
+was willing to accept. minato neither leaves a session there nor takes one
+from there: `{reuse_sessions, false}` and `{session_tickets, disabled}` are
+defaults, and `ssl_options` that ask for anything else are refused as
+`{invalid_option, ssl_options}`. A connection is opened once and kept, so
+there is nothing a resumed handshake would have saved.
+
 Under TLS the SCRAM exchange is bound to the session by default:
 `SCRAM-SHA-256-PLUS` with `tls-server-end-point`, which puts the hash of the
 server's certificate inside the material the client proof covers. A man in the
 middle holding a certificate the client accepts can otherwise relay the whole
 exchange and keep the session; with binding, the hash it bound to is not the one
 the real server sees, and the proof is refused. `channel_binding => require`
-refuses to connect without it.
+refuses to connect without it, whatever the server asks for instead.
 
 ## A refusal that arrives as a closed socket
 
@@ -122,33 +139,62 @@ the server issued is the whole of the authorisation.
     backend_key/1,
     timeout/1,
     with_timeout/2,
-    deadline/2
+    deadline/2,
+    giving_up_after/2,
+    origin/1,
+    pooled/2
 ]).
+-export([validate/1, in_the_clear/1]).
 
 -define(DEFAULT_HOST, "localhost").
 -define(DEFAULT_PORT, 5432).
 -define(DEFAULT_CONNECT_TIMEOUT, 5000).
+-define(MOST_PARAMETERS, 64).
+-define(LONGEST_PARAMETER, 4096).
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_TLS_DEPTH, 3).
 -define(DEFAULT_STATEMENTS, 64).
 -define(DEFAULT_CANCEL_TIMEOUT, 5000).
+-define(OPTIONS, [
+    host,
+    port,
+    user,
+    password,
+    database,
+    parameters,
+    ssl,
+    ssl_options,
+    channel_binding,
+    auth,
+    connect_timeout,
+    timeout,
+    socket_options,
+    transport,
+    prepared_statements,
+    cancel_timeout,
+    frame_opts
+]).
+-define(CHECKED, [
+    host,
+    channel_binding,
+    ssl,
+    auth,
+    ssl_options,
+    password,
+    connect_timeout,
+    timeout,
+    cancel_timeout
+]).
 -define(CLOSE_DRAIN_CAP, 1000).
 -define(CLOSER_LIFETIME, 5000).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
-%% eqWAlizer cannot see that the transport field decides what the socket field
-%% holds, and `ssl:connect/3` is specified for the sockets that existed before
-%% it learned to take a handle from `m:socket`. Both are true at run time and
-%% neither is expressible, so the two crossings live here rather than spread
-%% through the module.
--eqwalizer({nowarn_function, handle/1}).
--eqwalizer({nowarn_function, upgraded/3}).
-
 -record(conn, {
     transport :: transport(),
     socket :: socket(),
+    plain :: plain_socket(),
     binding :: binary() | undefined,
     buffer = ~"" :: binary(),
     pending = [] :: [minato_protocol:backend()],
@@ -157,6 +203,7 @@ the server issued is the whole of the authorisation.
     key :: key() | undefined,
     timeout :: timeout(),
     deadline = infinity :: integer() | infinity,
+    opening = infinity :: integer() | infinity,
     cancelled = false :: boolean(),
     grace :: timeout(),
     frame_opts :: minato_protocol:frame_opts(),
@@ -168,6 +215,7 @@ the server issued is the whole of the authorisation.
     limit :: non_neg_integer(),
     send_timeout = infinity :: timeout(),
     send_timeout_close = false :: boolean(),
+    origin :: origin(),
     opts :: opts()
 }).
 
@@ -207,6 +255,11 @@ password given as a string, or returned as one by the fun, is converted to a
 binary, and one that is not valid text raises
 `{minato_conn, #{reason := not_text}}` without the password.
 
+`user`, `database` and everything in `parameters` go into the `StartupMessage`
+as null terminated strings, so none of them may hold a null byte: `connect/1`
+raises `{minato_conn, #{reason := null_byte_in_parameter}}` naming the parameter
+before it opens a socket.
+
 `parameters` are added to the `StartupMessage` and are how `application_name`
 gets set. Two are sent unless they are given here: `client_encoding` is `UTF8`,
 because the codecs decode text as UTF-8 and a server sending LATIN1 would put
@@ -216,8 +269,20 @@ affects the binary format.
 
 `channel_binding` decides whether SCRAM is tied to the TLS session. It defaults
 to `prefer` under `ssl => true` and `disable` without it, since there is nothing
-to bind to on a plain socket. `require` refuses to connect at all unless the
-server offers `SCRAM-SHA-256-PLUS`.
+to bind to on a plain socket. `require` connects through `SCRAM-SHA-256-PLUS`
+or not at all: a server that asks for a cleartext or MD5 password, or for
+nothing, or that offers SCRAM without `-PLUS`, is refused with
+`{error, {channel_binding_required, Method}}` before anything is answered, and
+so is any server on a connection without TLS, where there is nothing to bind
+to. Those are the semantics of `channel_binding=require` in libpq.
+
+`auth` is the list of methods the server may ask for, and it defaults to all
+four. It is what `require_auth` is in libpq, with `scram_sha_256` for
+`scram-sha-256`, `md5` for `md5`, `cleartext` for `password` and `none` for
+`none`. A method outside the list is refused with
+`{error, {auth_method_refused, Method}}` before it is answered, so
+`auth => [scram_sha_256]` is a connection that never sends a password or an MD5
+digest of one, and never accepts a server that asks for nothing.
 
 `transport` is `socket`, which is `m:minato_socket` over the socket NIFs, or
 `inet`, the driver every BEAM program uses. `socket` is the default: it does
@@ -232,7 +297,29 @@ the server for `minato_query:cached/4`. It defaults to 64, and 0 turns caching
 off. See `m:minato_query` for what fills it.
 
 `timeout` is the per read timeout and applies for the life of the connection.
-`connect_timeout` covers the TCP connect and the TLS handshake. `cancel_timeout`
+It is also how long the opening exchange may take as a whole, from the startup
+message to `ReadyForQuery`, so that a server answering each read in time but
+never finishing is given up on: `{error, {socket, timeout}}`.
+`connect_timeout` covers the TCP connect, the answer to the TLS request and the
+TLS handshake together, not each of them. Either can be `infinity`.
+
+A write is bounded too. Unless `socket_options` says otherwise, `send_timeout`
+is `timeout` and `send_timeout_close` is `true`, so a server that stops reading
+costs one timeout and the connection, where it used to hold the caller for as
+long as it liked. The bound is on a whole write, not on each part of it, so a
+value of hundreds of megabytes over a slow link wants `{send_timeout, _}` set
+to what that takes, or to `infinity`. A TLS session on the socket transport is
+written by `m:ssl`, which takes no deadline of its own; there the socket under
+the session is shut down when the time runs out, by `m:minato_overdue`, whether
+or not the `minato` application is running, and the connection is closed
+whatever `send_timeout_close` says, since a session cut off in the middle of a
+record cannot be written to again. Windows does not end a write `m:ssl` has
+started when the socket under it is shut down, so a TLS write on the socket
+transport has no bound there, and a `close/1` behind one waits with it; with
+`transport => inet` both have the driver's.
+
+The server's `ParameterStatus` messages are kept for `parameters/1`, up to 64 of
+them and 4096 bytes each; one beyond that is not kept. `cancel_timeout`
 is how long a cancelled statement is given to come back before the connection is
 given up on; see `deadline/2`. On Windows it also bounds how long closing a TLS
 connection waits for the server to close first, to at most a second; see
@@ -268,6 +355,14 @@ An authentication method the server may ask for.
 -doc "An open connection. Owned by the process that called `connect/1`.".
 -opaque conn() :: #conn{}.
 
+-doc "Where a connection goes: what it was asked to reach, and the pool holding it.".
+-type origin() :: #{
+    host := inet:socket_address() | inet:hostname(),
+    port := inet:port_number(),
+    database := binary(),
+    pool => atom()
+}.
+
 -doc "What `CancelRequest` needs: the process id and secret the server issued.".
 -type key() :: {Pid :: integer(), Secret :: integer()}.
 
@@ -278,16 +373,18 @@ An authentication method the server may ask for.
     | {tls, term()}
     | tls_refused
     | cleartext_password_refused
-    | {auth_method_refused, method()}.
+    | {auth_method_refused, method()}
+    | {channel_binding_required, method()}.
 
 -doc "The map carried by an `error({minato_conn, Report})` exception.".
 -type report() :: #{message := term(), reason := term(), data := term()}.
 
--export_type([conn/0, opts/0, method/0, key/0, error/0, report/0]).
+-export_type([conn/0, opts/0, method/0, key/0, error/0, report/0, origin/0]).
 
 -type transport() :: plain() | ssl.
 -type plain() :: gen_tcp | minato_socket.
 -type socket() :: gen_tcp:socket() | ssl:sslsocket() | minato_socket:socket().
+-type plain_socket() :: {gen_tcp, gen_tcp:socket()} | {minato_socket, minato_socket:socket()}.
 -type os() :: {atom(), atom()}.
 
 -doc """
@@ -316,7 +413,10 @@ connect(#{user := _} = Opts) ->
             user => maps:get(user, Opts),
             ssl => maps:get(ssl, Opts, false)
         },
-        fun() -> connected(opening(minato_secret:connection(Opts))) end
+        fun() ->
+            ok = known(validate(Opts)),
+            connected(opening(minato_secret:connection(Opts)))
+        end
     ).
 
 %% For the pool and the listener, which retry what fails here: a raise comes
@@ -342,18 +442,202 @@ attempt(Opts) ->
 connected({ok, Conn}) ->
     {{ok, Conn}, #{outcome => ok}};
 connected({error, Reason}) ->
-    {{error, Reason}, #{outcome => error, reason => Reason}}.
+    {{error, Reason}, #{outcome => error, reason => minato_telemetry:reason(Reason)}}.
 
 -spec opening(opts()) -> {ok, conn()} | {error, error()}.
 opening(Opts) ->
+    ok = terminator_free(startup_parameters(maps:get(user, Opts), Opts)),
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    Transport = transport(Opts),
-    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> secure(Transport, Socket, Host, Timeout, Opts);
+    Deadline = within(Timeout),
+    case reach(transport(Opts), Host, Port, socket_options(Opts), Timeout) of
+        {ok, Plain} -> secure(Plain, Host, Deadline, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
+
+-doc """
+Whether every option is one minato has, and those that decide how a connection
+is secured say something it knows.
+
+A key that is not in `t:opts/0` is refused, whatever its value: `sslmode`,
+`tls`, or `channel_binding` misspelt would otherwise be skipped, and the
+connection opened with the default the caller meant to change. `ssl_options`
+are refused without `ssl => true`, because options for a TLS session nobody
+asked for are a session the caller believes it has.
+
+`host` is a name as a string or an atom, an address as a tuple, or
+`{local, Path}`, and not a binary; `channel_binding` is `prefer`, `require` or
+`disable`; `ssl` is a boolean;
+`auth` is a list of at least one of `scram_sha_256`, `md5`, `cleartext` and
+`none`; `password` is a binary, a string or a fun that answers one;
+`ssl_options` is a list of options, in which `verify` is `verify_peer` or
+`verify_none`, the handshake is not paused with `{handshake, hello}`, and no
+session is kept for another connection or resumed from one: `reuse_sessions`
+is `false`, `session_tickets` is `disabled`, and there is no `reuse_session`
+or `use_ticket`; and `connect_timeout`, `timeout` and `cancel_timeout` are
+each a number of milliseconds, an integer that is not negative, or `infinity`.
+
+Anything else answers `{error, {invalid_option, Key}}` for the first key that
+is wrong, a key that is not an option before a value that is not one, without
+the value. A value minato did not know used to be
+read as the default, which is the weaker one: `channel_binding => required`, or
+`~"require"` out of a configuration file, was `prefer`. A time that was not
+one, `~"5000"` out of the environment, was found by the first statement that
+ran out of it, as a `badarith`.
+
+A key that is not an option and is not an atom either is not repeated in the
+reason: `{error, {invalid_option, not_an_atom}}`. A map read from a file of
+secrets the wrong way round has them as its keys, and the reason goes into an
+exception, a telemetry event and whatever logs why a pool did not start.
+
+`connect/1` raises `error({minato_conn, #{message := options, reason :=
+{invalid_option, Key}}})` before it opens a socket, and a pool or a listener
+does not start: `{error, {invalid_option, Key}}`.
+""".
+-spec validate(opts()) -> ok | {error, {invalid_option, atom()}}.
+validate(Opts) ->
+    case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
+        [] -> validate(?CHECKED, Opts);
+        [Key | _Others] when is_atom(Key) -> {error, {invalid_option, Key}};
+        [_NotAnAtom | _Others] -> {error, {invalid_option, not_an_atom}}
+    end.
+
+-spec validate([atom()], opts()) -> ok | {error, {invalid_option, atom()}}.
+validate([Key | Rest], Opts) ->
+    case Opts of
+        #{Key := Value} ->
+            case valid(Key, Value, Opts) of
+                true -> validate(Rest, Opts);
+                false -> {error, {invalid_option, Key}}
+            end;
+        #{} ->
+            validate(Rest, Opts)
+    end;
+validate([], _Opts) ->
+    ok.
+
+-spec valid(atom(), term(), opts()) -> boolean().
+valid(host, {local, Path}, _Opts) ->
+    is_binary(Path) orelse is_list(Path);
+valid(host, Address, _Opts) when is_tuple(Address) ->
+    inet:is_ip_address(Address);
+valid(host, Name, _Opts) ->
+    is_atom(Name) orelse is_list(Name);
+valid(channel_binding, Binding, _Opts) ->
+    Binding =:= prefer orelse Binding =:= require orelse Binding =:= disable;
+valid(ssl, Wanted, _Opts) ->
+    is_boolean(Wanted);
+valid(auth, [_ | _] = Methods, _Opts) ->
+    methods(Methods);
+valid(auth, _NotMethods, _Opts) ->
+    false;
+valid(ssl_options, Options, Opts) ->
+    maps:get(ssl, Opts, false) andalso tls_shaped(minato_secret:revealed(Options));
+valid(password, Password, _Opts) ->
+    is_binary(Password) orelse is_list(Password) orelse is_function(Password, 0);
+valid(Time, Timeout, _Opts) when
+    Time =:= connect_timeout; Time =:= timeout; Time =:= cancel_timeout
+->
+    Timeout =:= infinity orelse (is_integer(Timeout) andalso Timeout >= 0).
+
+-spec methods(term()) -> boolean().
+methods([Method | Rest]) -> lists:member(Method, all_methods()) andalso methods(Rest);
+methods([]) -> true;
+methods(_Improper) -> false.
+
+%% A handshake paused at the server's hello answers with a session that has
+%% verified nothing yet, and nothing here would go on to finish it. A session
+%% that is resumed, by its id or from a ticket, is one whose certificate was
+%% looked at by whichever connection opened it and not by this one.
+-spec tls_shaped(term()) -> boolean().
+tls_shaped([{handshake, hello} | _Rest]) ->
+    false;
+tls_shaped([{verify, Verify} | Rest]) ->
+    (Verify =:= verify_peer orelse Verify =:= verify_none) andalso tls_shaped(Rest);
+tls_shaped([{reuse_sessions, Reuse} | Rest]) ->
+    Reuse =:= false andalso tls_shaped(Rest);
+tls_shaped([{session_tickets, Tickets} | Rest]) ->
+    Tickets =:= disabled andalso tls_shaped(Rest);
+tls_shaped([{Resumes, _Session} | _Rest]) when Resumes =:= reuse_session; Resumes =:= use_ticket ->
+    false;
+tls_shaped([{Name, _Value} | Rest]) when is_atom(Name) ->
+    tls_shaped(Rest);
+tls_shaped([Name | Rest]) when is_atom(Name) ->
+    tls_shaped(Rest);
+tls_shaped([]) ->
+    true;
+tls_shaped(_NotOptions) ->
+    false.
+
+-doc false.
+%% Whether these options send everything unencrypted to another machine without
+%% anybody having said so: `ssl` left out, and a host that is not this one. A
+%% name is not resolved to find out, so only `localhost` is known to be here.
+-spec in_the_clear(opts()) -> {true, inet:socket_address() | inet:hostname()} | false.
+in_the_clear(#{ssl := _Said}) ->
+    false;
+in_the_clear(Opts) ->
+    Host = maps:get(host, Opts, ?DEFAULT_HOST),
+    case here(Host) of
+        true -> false;
+        false -> {true, Host}
+    end.
+
+-spec here(inet:socket_address() | inet:hostname()) -> boolean().
+here({local, _Path}) ->
+    true;
+here({127, _, _, _}) ->
+    true;
+here({0, 0, 0, 0, 0, 0, 0, 1}) ->
+    true;
+here(Address) when is_tuple(Address) ->
+    false;
+here(loopback) ->
+    true;
+here(Name) when is_atom(Name) ->
+    here(atom_to_list(Name));
+here("localhost") ->
+    true;
+here(Name) when is_list(Name) ->
+    case inet:parse_address(Name) of
+        {ok, Address} -> here(Address);
+        {error, _NotAnAddress} -> false
+    end;
+here(_NotAHost) ->
+    false.
+
+-spec known(ok | {error, {invalid_option, atom()}}) -> ok.
+known(ok) -> ok;
+known({error, {invalid_option, Key} = Reason}) -> bad(options, Reason, Key).
+
+-spec reach(
+    plain(),
+    inet:socket_address() | inet:hostname(),
+    inet:port_number(),
+    [gen_tcp:connect_option()],
+    timeout()
+) -> {ok, plain_socket()} | {error, term()}.
+reach(gen_tcp, Host, Port, Options, Timeout) ->
+    case gen_tcp:connect(Host, Port, Options, Timeout) of
+        {ok, Socket} -> {ok, {gen_tcp, Socket}};
+        {error, Reason} -> {error, Reason}
+    end;
+reach(minato_socket, Host, Port, Options, Timeout) ->
+    case minato_socket:connect(Host, Port, Options, Timeout) of
+        {ok, Socket} -> {ok, {minato_socket, Socket}};
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% A timeout given to each step is a timeout a server can spend once per step.
+%% These turn one into a point in time that every step is measured against.
+-spec within(timeout()) -> integer() | infinity.
+within(infinity) -> infinity;
+within(Timeout) -> erlang:monotonic_time(millisecond) + Timeout.
+
+-spec left(integer() | infinity) -> timeout().
+left(infinity) -> infinity;
+left(Deadline) -> remaining(Deadline - erlang:monotonic_time(millisecond), infinity).
 
 -spec transport(opts()) -> plain().
 transport(#{transport := inet}) -> gen_tcp;
@@ -365,7 +649,15 @@ Close a connection.
 `Terminate` is sent first so the server tears the backend down rather than
 discovering a closed socket, and a failure to send it is not reported: the
 socket is being closed either way. The send waits no longer than
-`send_timeout`.
+`send_timeout` and never more than a second, whatever `send_timeout` is, so a
+server that has stopped reading does not hold a close up. A close answers `ok`
+and does not raise, whatever state the socket or the TLS session is in.
+
+With `transport => inet` the bound on a write is the driver's, and a driver
+still holding bytes the server has not taken is not written to at all: the
+socket is closed and what it held is dropped. A TLS session on that transport
+then says its own goodbye through `m:ssl`, which gives up on a server that is
+not reading after its own timeouts, about ten seconds.
 
 On Windows a TLS session waits for the server's own close before it is closed,
 for no longer than `cancel_timeout` and never more than a second. `m:ssl` keeps a
@@ -384,8 +676,56 @@ close(Conn) ->
 -doc false.
 -spec close(conn(), os()) -> ok.
 close(#conn{transport = Transport, socket = Socket, grace = Grace} = Conn, Os) ->
-    _ = terminated(Conn),
+    ok = farewell(Conn),
     shut(Transport, Socket, Grace, Os).
+
+%% `Terminate` is a courtesy: the server finds out from a closed socket as
+%% well. It gets one write with the bound of a close on it, and whatever
+%% becomes of that write the close goes on.
+-spec farewell(conn()) -> ok.
+farewell(#conn{send_timeout = Timeout} = Conn) ->
+    Bound = shorter(Timeout, ?CLOSE_DRAIN_CAP),
+    try hurried(Conn, Bound) of
+        clear ->
+            _ = terminated(Conn#conn{send_timeout = Bound, send_timeout_close = false}),
+            ok;
+        behind ->
+            ok
+    catch
+        _Class:_Reason -> ok
+    end.
+
+-spec shorter(timeout(), non_neg_integer()) -> non_neg_integer().
+shorter(infinity, Cap) -> Cap;
+shorter(Timeout, Cap) -> min(Timeout, Cap).
+
+%% Where a driver holds the bound on a write, the driver is told the new one.
+%% A driver still holding bytes it could not send has a peer that is not
+%% reading: a write would wait behind them for as long as the peer cared to,
+%% and `Terminate` after half a message is not `Terminate` to the server
+%% either. So nothing is written, and what is held is dropped with the socket
+%% instead of being waited on.
+-spec hurried(conn(), non_neg_integer()) -> clear | behind.
+hurried(#conn{transport = gen_tcp, plain = {gen_tcp, Socket}}, Bound) ->
+    case inet:getstat(Socket, [send_pend]) of
+        {ok, [{send_pend, 0}]} ->
+            _ = inet:setopts(Socket, [{send_timeout, Bound}]),
+            clear;
+        _Held ->
+            _ = inet:setopts(Socket, [{linger, {true, 0}}]),
+            behind
+    end;
+hurried(#conn{transport = ssl, plain = {gen_tcp, _Port}, socket = Socket}, Bound) ->
+    case ssl:getstat(Socket, [send_pend]) of
+        {ok, [{send_pend, 0}]} ->
+            _ = ssl:setopts(Socket, [{send_timeout, Bound}]),
+            clear;
+        _Held ->
+            _ = ssl:setopts(Socket, [{linger, {true, 0}}]),
+            behind
+    end;
+hurried(_Conn, _Bound) ->
+    clear.
 
 %% For a process that cannot afford the drain `close/1` waits for on Windows,
 %% such as a pool: the close goes to a process of its own, which is killed if
@@ -418,7 +758,7 @@ closer(Os) ->
     {ok, _Timer} = timer:apply_after(?CLOSER_LIFETIME, ?MODULE, overdue, [self()]),
     receive
         {?MODULE, close, Socket, Grace} ->
-            _ = ssl:send(Socket, minato_protocol:encode(terminate)),
+            _ = session_write(Socket, minato_protocol:encode(terminate)),
             shut(ssl, Socket, Grace, Os)
     end.
 
@@ -436,13 +776,23 @@ overdue(Closer) ->
             ok
     end.
 
+%% A socket that is already closed, and a TLS session whose processes are
+%% already gone, are closed as far as a caller is concerned.
 -spec shut(transport(), socket(), timeout(), os()) -> ok.
-shut(ssl, Socket, Grace, {win32, _Name}) ->
+shut(Transport, Socket, Grace, Os) ->
+    try
+        released(Transport, Socket, Grace, Os)
+    catch
+        _Class:_Reason -> ok
+    end.
+
+-spec released(transport(), socket(), timeout(), os()) -> ok.
+released(ssl, Socket, Grace, {win32, _Name}) ->
     _ = ssl:setopts(Socket, [{active, false}]),
     ok = drained(Socket, erlang:monotonic_time(millisecond) + drain_cap(Grace)),
     _ = ssl:close(Socket),
     ok;
-shut(Transport, Socket, _Grace, _Os) ->
+released(Transport, Socket, _Grace, _Os) ->
     _ = Transport:close(Socket),
     ok.
 
@@ -452,16 +802,18 @@ drain_cap(Grace) -> min(Grace, ?CLOSE_DRAIN_CAP).
 
 -spec drained(ssl:sslsocket(), integer()) -> ok.
 drained(Socket, Deadline) ->
-    case ssl:recv(Socket, 0, remaining(Deadline - erlang:monotonic_time(millisecond), infinity)) of
-        {ok, _Unread} -> drained(Socket, Deadline);
-        {error, _Closed_or_timeout} -> ok
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> ok;
+        Left -> drained(Socket, Deadline, ssl:recv(Socket, 0, Left))
     end.
 
--spec terminated(conn()) -> ok | {error, term()}.
-terminated(#conn{transport = minato_socket, send_timeout = Timeout} = Conn) ->
-    minato_socket:send(handle(Conn), minato_protocol:encode(terminate), Timeout);
-terminated(#conn{transport = Transport, socket = Socket}) ->
-    Transport:send(Socket, minato_protocol:encode(terminate)).
+-spec drained(ssl:sslsocket(), integer(), {ok, term()} | {error, term()}) -> ok.
+drained(Socket, Deadline, {ok, _Unread}) -> drained(Socket, Deadline);
+drained(_Socket, _Deadline, {error, _Closed_or_timeout}) -> ok.
+
+-spec terminated(conn()) -> ok | {error, error()}.
+terminated(Conn) ->
+    written(Conn, minato_protocol:encode(terminate)).
 
 -doc """
 Ask the server to cancel whatever this connection is running.
@@ -482,9 +834,8 @@ cancel(#conn{key = Key, grace = Grace, opts = Opts}, Os) ->
     Host = maps:get(host, Opts, ?DEFAULT_HOST),
     Port = maps:get(port, Opts, ?DEFAULT_PORT),
     Timeout = maps:get(connect_timeout, Opts, ?DEFAULT_CONNECT_TIMEOUT),
-    Transport = transport(Opts),
-    case Transport:connect(Host, Port, socket_options(Opts), Timeout) of
-        {ok, Socket} -> requested(Transport, Socket, Host, Key, {Timeout, Grace, Os}, Opts);
+    case reach(transport(Opts), Host, Port, socket_options(Opts), Timeout) of
+        {ok, Plain} -> requested(Plain, Host, Key, {Timeout, Grace, Os}, Opts);
         {error, Reason} -> {error, {socket, Reason}}
     end.
 
@@ -494,6 +845,10 @@ Write one frontend message, or a list of them in order.
 A list is written as a single send, which is what the extended query protocol
 wants: `Parse`, `Bind`, `Execute` and `Sync` in one write is one round trip
 rather than four.
+
+A message too long for the protocol's length field raises
+`error({minato_protocol, _})` before any of the list is written; see
+`m:minato_protocol_frontend`.
 
 A pooled connection used this way has to have every answer read before it goes
 back with `minato_pool:checkin/2`. One with answers still unread is closed by
@@ -511,18 +866,50 @@ send(#conn{} = Conn, Message) ->
 %% passed to the send instead. A write that times out has left the server half a
 %% message, so `send_timeout_close` is honoured here as well: the connection is
 %% not usable again either way, and a caller that asked for it to be closed
-%% should not have to notice that for itself.
+%% should not have to notice that for itself. It is closed without a
+%% `Terminate`, which would be one more write to a peer that is not reading.
 -spec written(conn(), iodata()) -> ok | {error, error()}.
 written(#conn{transport = minato_socket, send_timeout = Timeout} = Conn, Bytes) ->
     timed(Conn, minato_socket:send(handle(Conn), Bytes, Timeout));
+written(
+    #conn{transport = ssl, plain = {minato_socket, Under}, send_timeout = Timeout} = Conn, Bytes
+) when
+    is_integer(Timeout)
+->
+    Timer = minato_overdue:watch(Under, Timeout),
+    watched(Conn, Timer, session_write(Conn#conn.socket, Bytes));
 written(#conn{transport = Transport, socket = Socket}, Bytes) ->
     write(Transport, Socket, Bytes).
+
+%% `ssl:send/2` has no deadline and no driver under it here to have one, so the
+%% write is timed from outside: see `m:minato_overdue`. A write that came back
+%% in time costs a timer started and cancelled, with no message sent.
+-spec watched(conn(), minato_overdue:watch(), ok | {error, error()}) -> ok | {error, error()}.
+watched(_Conn, Timer, ok) ->
+    minato_overdue:finished(Timer);
+watched(Conn, Timer, {error, Reason}) ->
+    case minato_overdue:ran_out(Timer) of
+        true -> timed(Conn#conn{send_timeout_close = true}, {error, timeout});
+        false -> {error, Reason}
+    end.
+
+%% A session whose socket is shut down under a write can end the write by
+%% exiting the process the caller is waiting on, which `m:ssl` passes on for
+%% the reasons it does not expect.
+-spec session_write(socket(), iodata()) -> ok | {error, error()}.
+session_write(Socket, Bytes) ->
+    try
+        write(ssl, Socket, Bytes)
+    catch
+        _Class:_Ended -> {error, {socket, closed}}
+    end.
 
 -spec timed(conn(), ok | {error, term()}) -> ok | {error, error()}.
 timed(_Conn, ok) ->
     ok;
 timed(#conn{send_timeout_close = true} = Conn, {error, timeout}) ->
-    ok = close(Conn),
+    #conn{transport = Transport, socket = Socket, grace = Grace} = Conn,
+    ok = shut(Transport, Socket, Grace, os:type()),
     {error, {socket, timeout}};
 timed(_Conn, {error, Reason}) ->
     {error, {socket, Reason}}.
@@ -563,21 +950,50 @@ would be hiding the one thing the message exists to announce.
 A pooled connection read this way goes back with `minato_pool:checkin/2` only
 once its last `ReadyForQuery` has been read, and is otherwise discarded with
 `minato_pool:discard/2`.
+
+With a decoder set by `decoding/2` or `decoding_opts/2`, a value that will not
+decode raises `error({minato_codec, _})` from here. The rest of that
+statement's answer is read first, undecoded, up to its `ReadyForQuery`, so the
+connection the caller passed in is ready for the next statement when the raise
+arrives. One that could not be read that far is closed.
 """.
 -spec next(conn(), timeout()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
 next(#conn{pending = [Message | Rest]} = Conn, _Timeout) ->
     {ok, Message, noted(Message, Conn#conn{pending = Rest})};
 next(#conn{buffer = Buffer, frame_opts = FrameOpts} = Conn, Timeout) ->
-    case minato_protocol:frame(Buffer, FrameOpts) of
+    try minato_protocol:frame(Buffer, FrameOpts) of
         {[], _Rest} ->
-            case fill(Conn, budget(Conn, Timeout)) of
-                {ok, Filled} -> next(Filled, Timeout);
-                {error, {socket, timeout}} -> expired(Conn, Timeout);
-                {error, Reason} -> {error, Reason}
+            case budget(Conn, Timeout) of
+                overdue -> expired(Conn, Timeout);
+                Budget -> read(Conn, Budget, Timeout)
             end;
         {[Message | Rest], Remainder} ->
             Read = Conn#conn{buffer = Remainder, pending = Rest},
             {ok, Message, noted(Message, Read)}
+    catch
+        error:{minato_codec, _Report} = Reason:Stacktrace ->
+            ok = skipped(decoding_opts(Conn, undefined), Timeout),
+            reraise(error, Reason, Stacktrace)
+    end.
+
+-spec read(conn(), timeout(), timeout()) ->
+    {ok, minato_protocol:backend(), conn()} | {error, error()}.
+read(Conn, Budget, Timeout) ->
+    case fill(Conn, Budget) of
+        {ok, Filled} -> next(Filled, Timeout);
+        {error, {socket, timeout}} -> expired(Conn, Timeout);
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% A decoder is only ever set for a statement whose answer ends in
+%% ReadyForQuery, so there is always one to read to. The bytes that would not
+%% decode are still in the buffer, and are framed again here as plain rows.
+-spec skipped(conn(), timeout()) -> ok.
+skipped(Conn, Timeout) ->
+    case next(Conn, Timeout) of
+        {ok, {ready_for_query, _Status}, _Ready} -> ok;
+        {ok, _Message, Read} -> skipped(Read, Timeout);
+        {error, _Reason} -> close(Conn)
     end.
 
 -doc """
@@ -663,11 +1079,26 @@ described(_Fields, undefined, Conn) ->
 described(Fields, DecodeOpts, #conn{frame_opts = Opts} = Conn) ->
     Conn#conn{frame_opts = Opts#{decoder => minato_protocol:decoder(Fields, DecodeOpts)}}.
 
--spec budget(conn(), timeout()) -> timeout().
+-doc false.
+%% A deadline with nothing behind it to cancel: for an answer the connection
+%% is given up over when it does not come, such as the one to a pool's reset.
+-spec giving_up_after(conn(), timeout()) -> conn().
+giving_up_after(Conn, infinity) ->
+    deadline(Conn, infinity);
+giving_up_after(Conn, Timeout) ->
+    Conn#conn{deadline = erlang:monotonic_time(millisecond) + Timeout, cancelled = true}.
+
+%% A deadline that has passed is not a read with no time left: that read
+%% hands back whatever is waiting, and a server that never lets the socket run
+%% empty would be read for as long as it went on writing.
+-spec budget(conn(), timeout()) -> timeout() | overdue.
 budget(#conn{deadline = infinity}, Timeout) ->
     Timeout;
 budget(#conn{deadline = Deadline}, Timeout) ->
-    remaining(Deadline - erlang:monotonic_time(millisecond), Timeout).
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> overdue;
+        Left -> remaining(Left, Timeout)
+    end.
 
 -spec remaining(integer(), timeout()) -> timeout().
 remaining(Left, _Timeout) when Left =< 0 -> 0;
@@ -909,10 +1340,10 @@ recall(#conn{statements = Statements}, Sql) ->
 -doc """
 Keep a parsed statement under its SQL, if there is room.
 
-Room is `claim/1`'s to give: a connection that has handed out every name it is
-allowed answers `undefined` there, and the caller runs the statement unnamed. An
-unbounded workload therefore gets the uncached path rather than an unbounded
-pile of parsed statements in the backend.
+Room is `claim/1`'s to give: a connection that is keeping as many statements
+as it is allowed answers `undefined` there, and the caller runs the statement
+unnamed. An unbounded workload therefore gets the uncached path rather than an
+unbounded pile of parsed statements in the backend.
 """.
 -spec remember(conn(), binary(), term()) -> conn().
 remember(#conn{statements = Statements} = Conn, Sql, Statement) ->
@@ -920,6 +1351,11 @@ remember(#conn{statements = Statements} = Conn, Sql, Statement) ->
 
 -doc """
 Take the next statement name this connection has room for, or `undefined`.
+
+Room is counted in statements kept, so a name whose statement was never kept,
+because the server refused to parse it, or is kept no longer, after
+`forget/2`, takes none. A connection that has renewed or dropped statements
+any number of times still keeps as many as `prepared_statements` allows.
 
 Names never repeat, even after `forget/2`, because the statement a forgotten
 name refers to may still be parsed on the server, and parsing a second one under
@@ -941,7 +1377,7 @@ random bytes make it impossible instead of unlikely - a counter that only has
 to be unique per connection stays a counter, and the prefix does the rest.
 """.
 -spec claim(conn()) -> {binary() | undefined, conn()}.
-claim(#conn{prepared = Prepared, limit = Limit} = Conn) when Prepared >= Limit ->
+claim(#conn{statements = Statements, limit = Limit} = Conn) when map_size(Statements) >= Limit ->
     {undefined, Conn};
 claim(#conn{prefix = Prefix, prepared = Prepared} = Conn) ->
     Name = <<"minato_", Prefix/binary, "_", (integer_to_binary(Prepared))/binary>>,
@@ -957,7 +1393,7 @@ under a cached plan looks like.
 forget(#conn{statements = Statements} = Conn, Sql) ->
     Conn#conn{statements = maps:remove(Sql, Statements)}.
 
--doc "How many statements this connection is keeping, and how many names it may claim.".
+-doc "How many statements this connection is keeping, and how many it may keep.".
 -spec statements(conn()) -> {non_neg_integer(), non_neg_integer()}.
 statements(#conn{statements = Statements, limit = Limit}) ->
     {map_size(Statements), Limit}.
@@ -1007,6 +1443,22 @@ age(#conn{opened = Opened}) ->
     erlang:monotonic_time(millisecond) - Opened.
 
 -doc """
+Where a connection goes, for the metadata of an event: `host`, `port` and
+`database` as they were asked for, and `pool` when a pool holds it.
+
+Built once when the connection opens, so a query event that carries it pays for
+one small map and not for reading the options again.
+""".
+-spec origin(conn()) -> origin().
+origin(#conn{origin = Origin}) ->
+    Origin.
+
+-doc false.
+-spec pooled(conn(), atom()) -> conn().
+pooled(#conn{origin = Origin} = Conn, Pool) ->
+    Conn#conn{origin = Origin#{pool => Pool}}.
+
+-doc """
 Give the statement that runs next this long, then cancel it.
 
 A read timeout on its own can only end the wait, not the statement: the server
@@ -1021,6 +1473,14 @@ costing one query and costing a connection.
 The cancelled statement gets `cancel_timeout` to acknowledge it. A server that
 does not answer even that has stopped talking, and the connection really is
 finished: `{error, {socket, timeout}}`, with no connection handed back.
+
+The deadline is looked at before every read, so it ends an answer that is still
+arriving as well as one that has stopped: rows a server sends without a pause
+are read until the deadline, then for `cancel_timeout` more, and no longer.
+That is a bound on how long a call reads and not on how much: what arrives in
+that time is held. With `infinity` for the deadline or for `cancel_timeout`
+there is no bound, and rows that keep arriving are read for as long as they
+come.
 
 It lasts until it is cleared with `infinity`, which the query layer does before
 handing a connection back, so a deadline belongs to one call rather than to the
@@ -1055,69 +1515,79 @@ with_timeout(Conn, Timeout) ->
 %% Opening
 %%----------------------------------------------------------------------
 
--spec secure(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secure(
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, conn()} | {error, error()}.
-secure(Transport, Socket, Host, Timeout, Opts) ->
+secure({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     case maps:get(ssl, Opts, false) of
         false ->
-            start(new(Transport, Socket, Opts), Opts);
+            start(new(Transport, Socket, Plain, Opts), Opts);
         true ->
-            case upgrade(Transport, Socket, Host, Timeout, Opts) of
-                {ok, Upgraded} -> start(new(ssl, Upgraded, Opts), Opts);
+            case upgrade(Plain, Host, Deadline, Opts) of
+                {ok, Upgraded} -> start(new(ssl, Upgraded, Plain, Opts), Opts);
                 {error, Reason} -> {error, Reason}
             end
     end.
 
--spec upgrade(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec upgrade(
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-upgrade(Transport, Socket, Host, Timeout, Opts) ->
+upgrade({Transport, Socket} = Plain, Host, Deadline, Opts) ->
     case Transport:send(Socket, minato_protocol:encode(ssl_request)) of
-        ok -> negotiate(Transport, Socket, Host, Timeout, Opts);
+        ok -> negotiate(Plain, Host, Deadline, Opts);
         {error, Reason} -> closing(Transport, Socket, {socket, Reason})
     end.
 
--spec negotiate(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec negotiate(
+    plain_socket(), inet:socket_address() | inet:hostname(), integer() | infinity, opts()
+) ->
     {ok, ssl:sslsocket()} | {error, error()}.
-negotiate(Transport, Socket, Host, Timeout, Opts) ->
-    case Transport:recv(Socket, 1, Timeout) of
+negotiate({Transport, Socket} = Plain, Host, Deadline, Opts) ->
+    case Transport:recv(Socket, 1, left(Deadline)) of
         {ok, Answer} when is_binary(Answer) ->
-            answered(minato_protocol:ssl_response(Answer), Transport, Socket, Host, Timeout, Opts);
+            answered(minato_protocol:ssl_response(Answer), Plain, Host, Deadline, Opts);
         {error, Reason} ->
             closing(Transport, Socket, {socket, Reason})
     end.
 
 -spec answered(
     {ok, accepted | rejected | error_response, binary()} | incomplete,
-    plain(),
-    socket(),
+    plain_socket(),
     inet:socket_address() | inet:hostname(),
-    timeout(),
+    integer() | infinity,
     opts()
 ) -> {ok, ssl:sslsocket()} | {error, error()}.
-answered({ok, accepted, _Rest}, Transport, Socket, Host, Timeout, Opts) ->
-    case upgraded(Socket, tls_options(Host, Opts), Timeout) of
-        {ok, Upgraded} -> {ok, Upgraded};
+answered({ok, accepted, _Rest}, {Transport, Socket} = Plain, Host, Deadline, Opts) ->
+    Options = tls_options(Host, Opts),
+    case upgraded(Plain, Options, left(Deadline)) of
+        {ok, Upgraded} -> named(Upgraded, Plain, server_name(Host), Options);
         {error, Reason} -> closing(Transport, Socket, {tls, Reason})
     end;
-answered({ok, _Refused, _Rest}, Transport, Socket, _Host, _Timeout, _Opts) ->
+answered({ok, _Refused, _Rest}, {Transport, Socket}, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, tls_refused);
-answered(incomplete, Transport, Socket, _Host, _Timeout, _Opts) ->
+answered(incomplete, {Transport, Socket}, _Host, _Deadline, _Opts) ->
     closing(Transport, Socket, {socket, closed}).
 
 -spec handle(conn()) -> minato_socket:socket().
-handle(#conn{socket = Socket}) ->
+handle(#conn{plain = {minato_socket, Socket}}) ->
     Socket.
 
--spec upgraded(socket(), [ssl:tls_client_option()], timeout()) ->
+-spec upgraded(plain_socket(), [ssl:tls_client_option()], timeout()) ->
     {ok, ssl:sslsocket()} | {error, term()}.
-upgraded(Socket, Options, Timeout) ->
-    ssl:connect(Socket, Options, Timeout).
+upgraded({_Transport, Socket}, Options, Timeout) ->
+    case ssl:connect(Socket, Options, Timeout) of
+        {ok, Upgraded} -> {ok, Upgraded};
+        {error, Reason} -> {error, Reason}
+    end.
 
--spec new(transport(), socket(), opts()) -> conn().
-new(Transport, Socket, Opts) ->
+-spec new(transport(), socket(), plain_socket(), opts()) -> conn().
+new(Transport, Socket, Plain, Opts) ->
     #conn{
         transport = Transport,
         socket = Socket,
+        plain = Plain,
         binding = binding(Transport, Socket),
         opened = erlang:monotonic_time(millisecond),
         timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
@@ -1126,7 +1596,12 @@ new(Transport, Socket, Opts) ->
         prefix = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
         frame_opts = maps:get(frame_opts, Opts, #{}),
         send_timeout = send_timeout(Opts),
-        send_timeout_close = option(send_timeout_close, Opts) =:= true,
+        send_timeout_close = found(send_timeout_close, socket_options(Opts)) =:= true,
+        origin = #{
+            host => maps:get(host, Opts, ?DEFAULT_HOST),
+            port => maps:get(port, Opts, ?DEFAULT_PORT),
+            database => maps:get(database, Opts, maps:get(user, Opts))
+        },
         opts = maps:remove(password, Opts)
     }.
 
@@ -1136,14 +1611,10 @@ new(Transport, Socket, Opts) ->
 %% this transport exists to avoid.
 -spec send_timeout(opts()) -> timeout().
 send_timeout(Opts) ->
-    case option(send_timeout, Opts) of
+    case found(send_timeout, socket_options(Opts)) of
         Milliseconds when is_integer(Milliseconds), Milliseconds >= 0 -> Milliseconds;
-        _Absent -> infinity
+        _Unbounded -> infinity
     end.
-
--spec option(atom(), opts()) -> term().
-option(Name, Opts) ->
-    found(Name, maps:get(socket_options, Opts, [])).
 
 -spec found(atom(), [term()]) -> term().
 found(Name, [{Name, Value} | _Rest]) -> Value;
@@ -1151,12 +1622,25 @@ found(Name, [_Other | Rest]) -> found(Name, Rest);
 found(_Name, []) -> undefined.
 
 -spec start(conn(), opts()) -> {ok, conn()} | {error, error()}.
-start(Conn, Opts) ->
+start(#conn{timeout = Timeout} = Unbounded, Opts) ->
+    Conn = Unbounded#conn{opening = within(Timeout)},
     User = maps:get(user, Opts),
     Startup = {startup, startup_parameters(User, Opts)},
     case send(Conn, Startup) of
         ok -> guarded(Conn, credentials(Conn, User, Opts));
         {error, Reason} -> closing(Conn, Reason)
+    end.
+
+%% The opening exchange as a whole gets what one read gets afterwards. A read
+%% timeout alone bounds a server that says nothing, and not one that says
+%% something small and unhelpful just often enough.
+-spec awaited(conn()) -> {ok, minato_protocol:backend(), conn()} | {error, error()}.
+awaited(#conn{opening = infinity} = Conn) ->
+    next(Conn);
+awaited(#conn{opening = Deadline, timeout = Timeout} = Conn) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 -> {error, {socket, timeout}};
+        Left -> next(Conn, remaining(Left, Timeout))
     end.
 
 -spec startup_parameters(binary(), opts()) -> #{binary() => binary()}.
@@ -1165,6 +1649,22 @@ startup_parameters(User, Opts) ->
     Defaults = #{~"client_encoding" => ~"UTF8", ~"DateStyle" => ~"ISO, MDY"},
     Base = #{~"user" => User, ~"database" => maps:get(database, Opts, User)},
     maps:merge(maps:merge(Defaults, Given), Base).
+
+%% A null byte ends a string in the startup packet, so one inside a value makes
+%% whatever follows it a parameter of its own. Checked before the socket is
+%% opened, so that nothing is connected only to be given up on, and reported by
+%% name: the value is not in the reason.
+-spec terminator_free(#{binary() => binary()}) -> ok.
+terminator_free(Parameters) ->
+    _ = [
+        bad(startup, null_byte_in_parameter, Name)
+     || Name := Value <- Parameters, holds_null(Name) orelse holds_null(Value)
+    ],
+    ok.
+
+-spec holds_null(term()) -> boolean().
+holds_null(Text) when is_binary(Text) -> binary:match(Text, <<0>>) =/= nomatch;
+holds_null(_NotText) -> false.
 
 -spec credentials(conn(), binary(), opts()) -> minato_auth:credentials().
 credentials(#conn{transport = Transport, binding = Hash}, User, Opts) ->
@@ -1240,17 +1740,17 @@ guarded(Conn, Credentials) ->
 -spec reraise(error | exit | throw, term(), erlang:raise_stacktrace()) -> no_return().
 reraise(Class, Reason, Stacktrace) ->
     erlang:raise(Class, Reason, Stacktrace),
-    bad(Class, Reason, Stacktrace).
+    error(badarg).
 
 -spec authenticate(conn(), minato_auth:state(), boolean()) -> {ok, conn()} | {error, error()}.
 authenticate(Conn, State, Asked) ->
-    case next(Conn) of
+    case awaited(Conn) of
         {ok, {error_response, Fields}, Read} ->
             closing(Read, {pgsql_error, Fields});
         {ok, {notice_response, _Fields}, Read} ->
             authenticate(Read, State, Asked);
         {ok, Message, Read} ->
-            case permitted(Message, Read, Asked) of
+            case permitted(Message, Read, Asked, minato_auth:proven(State)) of
                 ok -> answer(Read, minato_auth:step(Message, State));
                 {error, Reason} -> closing(Read, Reason)
             end;
@@ -1271,7 +1771,7 @@ answer(Conn, {send, Reply, State}) ->
 
 -spec settle(conn()) -> {ok, conn()} | {error, error()}.
 settle(Conn) ->
-    case next(Conn) of
+    case awaited(Conn) of
         {ok, {parameter_status, Name, Value}, Read} ->
             settle(store(Read, Name, Value));
         {ok, {backend_key_data, Pid, Secret}, Read} ->
@@ -1279,7 +1779,7 @@ settle(Conn) ->
         {ok, {notice_response, _Fields}, Read} ->
             settle(Read);
         {ok, {ready_for_query, _Status}, Read} ->
-            {ok, Read};
+            {ok, Read#conn{opening = infinity}};
         {ok, {error_response, Fields}, Read} ->
             closing(Read, {pgsql_error, Fields});
         {ok, Message, Read} ->
@@ -1289,21 +1789,57 @@ settle(Conn) ->
             closing(Conn, Reason)
     end.
 
+%% PostgreSQL reports about fifteen parameters, each a line of text. What is
+%% kept is bounded well above that and copied out of the read it arrived in, so
+%% a connection holds neither as many as a server cares to send nor the buffers
+%% they came in. One that does not fit is not kept, and is not an error.
 -spec store(conn(), binary(), binary()) -> conn().
-store(#conn{parameters = Parameters} = Conn, Name, Value) ->
-    Conn#conn{parameters = Parameters#{Name => Value}}.
+store(#conn{parameters = Parameters} = Conn, Name, Value) when
+    byte_size(Name) + byte_size(Value) =< ?LONGEST_PARAMETER,
+    is_map_key(Name, Parameters) orelse map_size(Parameters) < ?MOST_PARAMETERS
+->
+    Conn#conn{parameters = Parameters#{binary:copy(Name) => binary:copy(Value)}};
+store(Conn, _Name, _Value) ->
+    Conn.
 
 %%----------------------------------------------------------------------
 %% What the server is allowed to ask for
 %%----------------------------------------------------------------------
 
--spec permitted(minato_protocol:backend(), conn(), boolean()) -> ok | {error, error()}.
-permitted(Message, #conn{transport = Transport, opts = Opts}, Asked) ->
+%% Under a required binding the only exchange that gets as far as being
+%% answered is the bound one, so a server that lets the client in before
+%% proving itself has not bound anything either.
+-spec permitted(minato_protocol:backend(), conn(), boolean(), boolean()) ->
+    ok | {error, error()}.
+permitted(authentication_ok, #conn{opts = #{channel_binding := require}}, true, false) ->
+    {error, {channel_binding_required, scram_sha_256}};
+permitted(Message, #conn{transport = Transport, binding = Hash, opts = Opts}, Asked, _Proven) ->
     case method(Message, Asked) of
-        undefined -> ok;
-        cleartext when Transport =/= ssl -> {error, cleartext_password_refused};
-        Method -> allowed(Method, maps:get(auth, Opts, all_methods()))
+        undefined ->
+            ok;
+        cleartext when Transport =/= ssl ->
+            {error, cleartext_password_refused};
+        Method ->
+            Binding = maps:get(channel_binding, Opts, prefer(Transport)),
+            bindable(Method, binds(Message, Hash), Binding, maps:get(auth, Opts, all_methods()))
     end.
+
+%% Only SCRAM can be bound to the TLS session, and only where the server offers
+%% the bound mechanism and there is a certificate to bind to. A connection that
+%% requires binding has nothing to say to a server that asks for anything else,
+%% and says so the same way whatever was asked for.
+-spec bindable(method(), boolean(), minato_auth:channel_binding(), [method()]) ->
+    ok | {error, error()}.
+bindable(Method, false, require, _Methods) ->
+    {error, {channel_binding_required, Method}};
+bindable(Method, _Binds, _Binding, Methods) ->
+    allowed(Method, Methods).
+
+-spec binds(minato_protocol:backend(), binary() | undefined) -> boolean().
+binds({authentication_sasl, Mechanisms}, Hash) when is_binary(Hash) ->
+    lists:member(~"SCRAM-SHA-256-PLUS", Mechanisms);
+binds(_Message, _Hash) ->
+    false.
 
 -spec method(minato_protocol:backend(), boolean()) -> method() | undefined.
 method(authentication_ok, false) -> none;
@@ -1331,15 +1867,14 @@ all_methods() ->
 %% The server closes a cancel connection as soon as it has read the request, so
 %% the TLS one waits for that close on Windows for the same reason `close/1` does.
 -spec requested(
-    plain(),
-    socket(),
+    plain_socket(),
     inet:socket_address() | inet:hostname(),
     key(),
     {timeout(), timeout(), os()},
     opts()
 ) -> ok | {error, error()}.
-requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
-    case secured(Transport, Socket, Host, Timeout, Opts) of
+requested(Plain, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
+    case secured(Plain, Host, Timeout, Opts) of
         {ok, Secure, Secured} ->
             Sent = write(Secure, Secured, minato_protocol:encode({cancel_request, Pid, Secret})),
             ok = shut(Secure, Secured, Grace, Os),
@@ -1348,16 +1883,16 @@ requested(Transport, Socket, Host, {Pid, Secret}, {Timeout, Grace, Os}, Opts) ->
             {error, Reason}
     end.
 
--spec secured(plain(), socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
+-spec secured(plain_socket(), inet:socket_address() | inet:hostname(), timeout(), opts()) ->
     {ok, transport(), socket()} | {error, error()}.
-secured(Transport, Socket, _Host, _Timeout, #{ssl := false}) ->
+secured({Transport, Socket}, _Host, _Timeout, #{ssl := false}) ->
     {ok, Transport, Socket};
-secured(Transport, Socket, Host, Timeout, #{ssl := true} = Opts) ->
-    case upgrade(Transport, Socket, Host, Timeout, Opts) of
+secured(Plain, Host, Timeout, #{ssl := true} = Opts) ->
+    case upgrade(Plain, Host, within(Timeout), Opts) of
         {ok, Upgraded} -> {ok, ssl, Upgraded};
         {error, Reason} -> {error, Reason}
     end;
-secured(Transport, Socket, _Host, _Timeout, _Opts) ->
+secured({Transport, Socket}, _Host, _Timeout, _Opts) ->
     {ok, Transport, Socket}.
 
 %%----------------------------------------------------------------------
@@ -1367,12 +1902,20 @@ secured(Transport, Socket, _Host, _Timeout, _Opts) ->
 -spec socket_options(opts()) -> [gen_tcp:connect_option()].
 socket_options(Opts) ->
     Given = maps:get(socket_options, Opts, []),
-    Given ++
-        [
-            Option
-         || Option <- [binary, {active, false}, {packet, raw}, {nodelay, true}],
-            not given(Option, Given)
-        ].
+    Defaults = [binary, {active, false}, {packet, raw}, {nodelay, true} | bounded_sends(Opts)],
+    Given ++ [Option || Option <- Defaults, not given(Option, Given)].
+
+%% A write waits on the peer as a read does, and a peer that stops reading is a
+%% write that never returns: the statement deadline is spent on reads, so it
+%% would not end it. Unless told otherwise a write gets what a read gets, and a
+%% connection whose write ran out is closed, because the server holds half a
+%% message and nothing after it can be believed.
+-spec bounded_sends(opts()) -> [gen_tcp:connect_option()].
+bounded_sends(Opts) ->
+    case maps:get(timeout, Opts, ?DEFAULT_TIMEOUT) of
+        Timeout when is_integer(Timeout) -> [{send_timeout, Timeout}, {send_timeout_close, true}];
+        infinity -> [{send_timeout_close, true}]
+    end.
 
 -spec given(term(), [term()]) -> boolean().
 given(Option, Given) ->
@@ -1389,6 +1932,73 @@ key(Option) ->
 tls_options(Host, Opts) ->
     Given = minato_secret:revealed(maps:get(ssl_options, Opts, [])),
     Given ++ [Option || Option <- tls_defaults(Host), not superseded(Option, Given)].
+
+%% `{server_name_indication, disable}` asks for the name to stay out of the
+%% handshake, and `m:ssl` takes it to mean the certificate need not carry the
+%% name either. Those are two decisions, and only the first was made, so the
+%% name is looked for here, once the handshake is over and before anything is
+%% said in the session. Not in a `verify_fun`: `m:ssl` asks one of those in
+%% place of checks of its own. A caller who gave a `verify_fun` or turned
+%% verification off has made the second decision.
+-spec named(ssl:sslsocket(), plain_socket(), string(), [ssl:tls_client_option()]) ->
+    {ok, ssl:sslsocket()} | {error, error()}.
+named(Upgraded, {Transport, Socket}, Name, Options) ->
+    case unnamed(Options) andalso not carries(Upgraded, Name, Options) of
+        true ->
+            ok = refused(Upgraded, os:type()),
+            closing(Transport, Socket, {tls, {bad_cert, hostname_check_failed}});
+        false ->
+            {ok, Upgraded}
+    end.
+
+%% The server has been told nothing and is still waiting, so the write side
+%% goes first: it answers that by closing, which is what closing a session on
+%% Windows waits for; see `close/1`.
+-spec refused(ssl:sslsocket(), os()) -> ok.
+refused(Upgraded, Os) ->
+    _ = ssl:shutdown(Upgraded, write),
+    shut(ssl, Upgraded, ?CLOSE_DRAIN_CAP, Os).
+
+-spec unnamed([ssl:tls_client_option()]) -> boolean().
+unnamed(Options) ->
+    proplists:get_value(server_name_indication, Options) =:= disable andalso
+        proplists:get_value(verify, Options) =:= verify_peer andalso
+        not proplists:is_defined(verify_fun, Options).
+
+-spec carries(ssl:sslsocket(), string(), [ssl:tls_client_option()]) -> boolean().
+carries(Upgraded, Name, Options) ->
+    case ssl:peercert(Upgraded) of
+        {ok, Certificate} ->
+            public_key:pkix_verify_hostname(Certificate, [reference(Name)], customized(Options));
+        {error, _Reason} ->
+            false
+    end.
+
+%% `m:ssl` has taken these options by now, so every one of them is a check.
+-spec customized([ssl:tls_client_option()]) ->
+    [{match_fun | fqdn_fun | fail_callback, fun()}].
+customized(Options) ->
+    case proplists:get_value(customize_hostname_check, Options, []) of
+        Checks when is_list(Checks) -> checks(Checks);
+        _Other -> []
+    end.
+
+-spec checks([term()]) -> [{match_fun | fqdn_fun | fail_callback, fun()}].
+checks([{match_fun, Fun} | Rest]) when is_function(Fun) -> [{match_fun, Fun} | checks(Rest)];
+checks([{fqdn_fun, Fun} | Rest]) when is_function(Fun) -> [{fqdn_fun, Fun} | checks(Rest)];
+checks([{fail_callback, Fun} | Rest]) when is_function(Fun) ->
+    [{fail_callback, Fun} | checks(Rest)];
+checks([_Other | Rest]) ->
+    checks(Rest);
+checks([]) ->
+    [].
+
+-spec reference(string()) -> {ip, inet:ip_address()} | {dns_id, string()}.
+reference(Name) ->
+    case inet:parse_strict_address(Name) of
+        {ok, Address} -> {ip, Address};
+        {error, _Reason} -> {dns_id, Name}
+    end.
 
 %% A default is replaced by the option that answers the same question, not
 %% merely by one spelled the same way. `cacertfile` and `cacerts` are one
@@ -1411,6 +2021,8 @@ tls_defaults(Host) ->
         {cacerts, public_key:cacerts_get()},
         {depth, ?DEFAULT_TLS_DEPTH},
         {server_name_indication, Name},
+        {reuse_sessions, false},
+        {session_tickets, disabled},
         {customize_hostname_check, [
             {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
         ]}

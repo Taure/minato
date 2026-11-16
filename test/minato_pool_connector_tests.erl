@@ -44,7 +44,7 @@ accepting(Listen, Test, Held) ->
 accepted(Count) ->
     receive
         {accepted, Count} -> ok
-    after 3000 -> error({not_accepted, Count})
+    after 1000 -> error({not_accepted, Count})
     end.
 
 %% The connector is a plain fun, so its initial call says nothing; its stack is

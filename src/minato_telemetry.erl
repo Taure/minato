@@ -26,12 +26,33 @@ in native units.
 
 ## What is in the metadata, and what is never
 
+A query event says where it went: `host`, `port` and `database` as the
+connection was asked to reach them, `pool` when a pool holds the connection,
+and `path` for which query path ran it. They are on `start`, `stop` and
+`exception` alike, so a handler that only reads `stop` can still label a
+duration by database and pool.
+
 `sql` is present when `minato` was configured with `log_statements => true`,
 and absent otherwise. A statement is not a secret but it is close to one:
 `SELECT * FROM users WHERE email = $1` in a log is fine, and the same statement
 written by a caller that pasted the value in is a leak. Parameters are never in
 an event, in any configuration, for the same reason - they are the values
 themselves.
+
+The same holds for a value that arrives inside a failure. A server error keeps
+the fields that name things (`code`, `severity`, `severity_non_localised`,
+`constraint`, `schema`, `table`, `column`, `data_type`, `routine`) and loses
+`message`, `detail`, `hint` and the rest, because those quote the row that
+violated the constraint or the input that would not parse. A parameter that
+would not encode is reported as its type and why, with `redacted` where the
+value was, and a message that could not be read keeps its lengths and counts
+and loses its bytes the same way.
+The caller is still handed the whole server error as the return value; it is
+the event that is narrowed.
+
+`log_values => true` in the `minato` application environment puts all of it
+back, for a development node or an incident. Like `log_statements` it is read
+per call.
 
 Passwords never reach this module at all. See `m:minato_conn` for where they
 stop.
@@ -50,6 +71,19 @@ end, undefined).
 """.
 
 -export([span/3, event/2, event/3, statements/0, statements/1]).
+-export([values/0, reason/1, frames/1]).
+
+-define(NAMING_FIELDS, [
+    code,
+    severity,
+    severity_non_localised,
+    constraint,
+    schema,
+    table,
+    column,
+    data_type,
+    routine
+]).
 
 -doc "The metadata a caller attaches to an event: atoms to whatever they carry.".
 -type metadata() :: #{atom() => term()}.
@@ -100,3 +134,75 @@ statements(Sql) ->
         true -> #{sql => iolist_to_binary(Sql)};
         false -> #{}
     end.
+
+-doc """
+Whether a value may appear in an event or in a raised error.
+
+Off unless the `minato` application environment says `log_values` is true, and
+read per call for the reason `statements/0` is.
+""".
+-spec values() -> boolean().
+values() ->
+    application:get_env(minato, log_values, false) =:= true.
+
+-doc """
+A failure as an event may carry it: what went wrong, without the values.
+
+```erlang
+1> minato_telemetry:reason({pgsql_error, #{code => ~"23505", detail => ~"Key (email)=(a@b.se) already exists."}}).
+{pgsql_error,#{code => <<"23505">>}}
+```
+""".
+-spec reason(Reason) -> Reason when Reason :: term().
+reason(Reason) ->
+    case values() of
+        true -> Reason;
+        false -> narrowed(Reason)
+    end.
+
+-spec narrowed(dynamic()) -> dynamic().
+narrowed({pgsql_error, Fields}) when is_map(Fields) ->
+    {pgsql_error, maps:with(?NAMING_FIELDS, Fields)};
+narrowed({minato_codec, #{value := _Value} = Report}) ->
+    {minato_codec, Report#{value := redacted}};
+narrowed({Module, #{data := Data} = Report} = Reason) when
+    Module =:= minato_protocol; Module =:= minato_query
+->
+    case holds_no_bytes(Data) of
+        true -> Reason;
+        false -> {Module, Report#{data := redacted}}
+    end;
+narrowed(Reason) ->
+    Reason.
+
+%% A report's data is either what was counted, a length or a number of columns,
+%% or what was read, and only the second can be somebody's row.
+-spec holds_no_bytes(term()) -> boolean().
+holds_no_bytes(Data) when is_integer(Data); is_atom(Data) -> true;
+holds_no_bytes(Data) when is_tuple(Data) -> lists:all(fun holds_no_bytes/1, tuple_to_list(Data));
+holds_no_bytes(_Bytes) -> false.
+
+-doc """
+A stacktrace as an event may carry it: where, without the arguments.
+
+A frame holds the arguments of the call that failed when nothing matched them,
+and on the query path those are the parameters.
+""".
+-spec frames(erlang:stacktrace()) -> erlang:stacktrace().
+frames(Stacktrace) ->
+    case values() of
+        true -> Stacktrace;
+        false -> counted(Stacktrace)
+    end.
+
+-spec counted(erlang:stacktrace()) -> erlang:stacktrace().
+counted([{Module, Function, Arguments, Location} | Rest]) ->
+    [{Module, Function, arity(Arguments), Location} | counted(Rest)];
+counted([{Called, Arguments, Location} | Rest]) ->
+    [{Called, arity(Arguments), Location} | counted(Rest)];
+counted([]) ->
+    [].
+
+-spec arity(arity() | [term()]) -> arity().
+arity(Arguments) when is_list(Arguments) -> length(Arguments);
+arity(Count) -> Count.

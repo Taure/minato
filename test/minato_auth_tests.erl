@@ -106,6 +106,116 @@ only_channel_binding_on_offer_is_refused_test() ->
         offer([~"SCRAM-SHA-256-PLUS"])
     ).
 
+%%----------------------------------------------------------------------
+%% Requiring channel binding
+%%----------------------------------------------------------------------
+
+a_required_binding_answers_only_the_bound_mechanism_test() ->
+    Step = minato_auth:step(
+        {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}, required(~"hash")
+    ),
+    ?assertMatch({send, {sasl_initial_response, ~"SCRAM-SHA-256-PLUS", _Data}, _State}, Step),
+    ?assertMatch(<<"p=tls-server-end-point,,", _/binary>>, client_first(Step)).
+
+client_first({send, {sasl_initial_response, _Mechanism, Data}, _State}) ->
+    iolist_to_binary(Data).
+
+a_required_binding_is_not_talked_down_to_plain_scram_test_() ->
+    [
+        ?_assertError(
+            {minato_auth, #{reason := {channel_binding_not_offered, [~"SCRAM-SHA-256"]}}},
+            minato_auth:step({authentication_sasl, [~"SCRAM-SHA-256"]}, required(~"hash"))
+        ),
+        ?_assertError(
+            {minato_auth, #{reason := {channel_binding_not_offered, []}}},
+            minato_auth:step({authentication_sasl, []}, required(~"hash"))
+        ),
+        ?_assertError(
+            {minato_auth, #{reason := {channel_binding_not_offered, _Mechanisms}}},
+            minato_auth:step(
+                {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]},
+                required(undefined)
+            )
+        )
+    ].
+
+a_required_binding_refuses_every_method_that_cannot_be_bound_test_() ->
+    [
+        {Label,
+            ?_assertError(
+                {minato_auth, #{reason := channel_binding_required}},
+                minato_auth:step(Message, State)
+            )}
+     || {StateLabel, State} <- [
+            {"with a session to bind to", required(~"hash")},
+            {"with none", required(undefined)},
+            {"with no password to read", passwordless()}
+        ],
+        {MessageLabel, Message} <- [
+            {"cleartext", authentication_cleartext_password},
+            {"md5", {authentication_md5_password, ?SALT}},
+            {"a server that asks for nothing", authentication_ok}
+        ],
+        Label <- [MessageLabel ++ " " ++ StateLabel]
+    ].
+
+a_preferred_binding_still_answers_the_other_methods_test_() ->
+    Preferring = minato_auth:init(#{
+        user => ?USER,
+        password => ?PASSWORD,
+        channel_binding => prefer,
+        channel_binding_data => ~"hash"
+    }),
+    [
+        ?_assertMatch(
+            {send, {password, ?PASSWORD}, _State},
+            minato_auth:step(authentication_cleartext_password, Preferring)
+        ),
+        ?_assertMatch(
+            {send, {password, <<"md5", _/binary>>}, _State},
+            minato_auth:step({authentication_md5_password, ?SALT}, Preferring)
+        ),
+        ?_assertEqual(authenticated, minato_auth:step(authentication_ok, Preferring)),
+        ?_assertMatch(
+            {send, {sasl_initial_response, ~"SCRAM-SHA-256", _Data}, _State},
+            minato_auth:step({authentication_sasl, [~"SCRAM-SHA-256"]}, Preferring)
+        )
+    ].
+
+a_preferred_binding_is_used_when_the_server_offers_it_test() ->
+    Step = minato_auth:step(
+        {authentication_sasl, [~"SCRAM-SHA-256-PLUS", ~"SCRAM-SHA-256"]}, preferring()
+    ),
+    ?assertMatch({send, {sasl_initial_response, ~"SCRAM-SHA-256-PLUS", _Data}, _State}, Step),
+    ?assertMatch(<<"p=tls-server-end-point,,", _/binary>>, client_first(Step)).
+
+a_preferred_binding_the_server_does_not_offer_is_flagged_test() ->
+    Step = minato_auth:step({authentication_sasl, [~"SCRAM-SHA-256"]}, preferring()),
+    ?assertMatch(<<"y,,", _/binary>>, client_first(Step)).
+
+preferring() ->
+    minato_auth:init(#{
+        user => ?USER,
+        password => ?PASSWORD,
+        channel_binding => prefer,
+        channel_binding_data => ~"hash"
+    }).
+
+required(undefined) ->
+    minato_auth:init(#{user => ?USER, password => ?PASSWORD, channel_binding => require});
+required(Hash) ->
+    minato_auth:init(#{
+        user => ?USER,
+        password => ?PASSWORD,
+        channel_binding => require,
+        channel_binding_data => Hash
+    }).
+
+passwordless() ->
+    minato_auth:init(#{
+        user => ?USER, channel_binding => require, channel_binding_data => ~"hash"
+    }).
+
 no_mechanisms_on_offer_is_refused_test() ->
     ?assertError(
         {minato_auth, #{reason := {no_supported_mechanism, []}}},
@@ -175,6 +285,15 @@ authentication_ok_is_accepted_once_the_server_has_proved_itself_test() ->
     {Check, ServerFinal} = exchange_to_final(),
     {continue, Done} = minato_auth:step({authentication_sasl_final, ServerFinal}, Check),
     ?assertEqual(authenticated, minato_auth:step(authentication_ok, Done)).
+
+only_a_finished_exchange_has_a_server_that_proved_itself_test() ->
+    {send, {sasl_initial_response, _Mechanism, _Data}, Started} = offer([~"SCRAM-SHA-256"]),
+    {Check, ServerFinal} = exchange_to_final(),
+    {continue, Done} = minato_auth:step({authentication_sasl_final, ServerFinal}, Check),
+    ?assertEqual(
+        [false, false, true],
+        [minato_auth:proven(State) || State <- [Started, Check, Done]]
+    ).
 
 a_cleartext_demand_part_way_through_a_scram_exchange_is_refused_test() ->
     {send, {sasl_initial_response, _Mechanism, _Data}, Started} = offer([~"SCRAM-SHA-256"]),

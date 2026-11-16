@@ -50,17 +50,6 @@ including the certificate hash SCRAM binds to.
 -export([connect/4, send/2, send/3, recv/3, close/1, controlling_process/2, setopts/2]).
 -export([activate/1, cancel/2, quiet/1, quiet/2]).
 
-%% eqWAlizer reads the eight words of an `inet:ip6_address()` as `integer()` and
-%% the eight of a `socket:in6_addr()` as `0..65535`, so a v6 address that came
-%% from `inet:getaddr/2` cannot be written into a `socket:sockaddr()` without
-%% this. The v4 half of the same function checks.
--eqwalizer({nowarn_function, target/2}).
-
-%% `socket:send/3` answers `{ok, RestData}` where `RestData` is the tail of the
-%% `iodata()` that went in, but its spec says `term()`, so eqWAlizer reads a
-%% list tail as a bare list rather than as an iolist.
--eqwalizer({nowarn_function, sending/3}).
-
 -doc """
 A socket handle.
 
@@ -164,17 +153,13 @@ send(Socket, Data, infinity) ->
 send(Socket, Data, Timeout) ->
     sent(Socket, Data, erlang:monotonic_time(millisecond) + Timeout).
 
--type written() :: ok | {ok, iodata()} | {error, term() | {term(), iodata()}}.
+-type written() :: ok | {ok, binary()} | {error, term()}.
 
-%% `socket:send/3` answers more shapes than its spec narrows to, so the union
-%% this module matches on is stated here rather than inferred. What comes back
-%% as `RestData` is the tail of the `iodata()` that went in, which eqWAlizer
-%% reads as a bare list because the spec says `term()`.
 -spec sending(socket(), iodata(), timeout()) -> written().
 sending(Socket, Data, Timeout) ->
-    case socket:send(Socket, Data, Timeout) of
+    case socket:send(Socket, Data, [], Timeout) of
         ok -> ok;
-        {ok, Rest} when is_binary(Rest); is_list(Rest) -> {ok, Rest};
+        {ok, Rest} -> {ok, Rest};
         {error, Reason} -> {error, Reason}
     end.
 
@@ -530,4 +515,10 @@ resolved(Host, Port, Family, Otherwise) ->
 target({A, B, C, D}, Port) ->
     {inet, #{family => inet, addr => {A, B, C, D}, port => Port}};
 target({A, B, C, D, E, F, G, H}, Port) ->
-    {inet6, #{family => inet6, addr => {A, B, C, D, E, F, G, H}, port => Port}}.
+    {inet6, #{
+        family => inet6,
+        addr => {A, B, C, D, E, F, G, H},
+        port => Port,
+        flowinfo => 0,
+        scope_id => 0
+    }}.

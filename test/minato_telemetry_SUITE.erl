@@ -21,6 +21,7 @@ Skips when no server answers.
 -export([collect/4]).
 -export([
     a_query_is_a_span/1,
+    a_query_on_a_bare_connection_names_no_pool/1,
     a_failed_query_reports_why/1,
     a_connect_is_a_span/1,
     a_failed_connect_reports_why/1,
@@ -30,7 +31,10 @@ Skips when no server answers.
     a_notification_is_counted/1,
     the_statement_is_absent_by_default/1,
     the_statement_is_present_when_asked_for/1,
-    parameters_are_never_in_an_event/1
+    parameters_are_never_in_an_event/1,
+    a_value_the_server_quotes_back_is_not_in_an_event/1,
+    a_value_that_would_not_encode_is_not_in_an_event/1,
+    values_are_in_an_event_when_asked_for/1
 ]).
 
 -define(TIMEOUT, 15000).
@@ -40,6 +44,7 @@ Skips when no server answers.
 all() ->
     [
         a_query_is_a_span,
+        a_query_on_a_bare_connection_names_no_pool,
         a_failed_query_reports_why,
         a_connect_is_a_span,
         a_failed_connect_reports_why,
@@ -49,7 +54,10 @@ all() ->
         a_notification_is_counted,
         the_statement_is_absent_by_default,
         the_statement_is_present_when_asked_for,
-        parameters_are_never_in_an_event
+        parameters_are_never_in_an_event,
+        a_value_the_server_quotes_back_is_not_in_an_event,
+        a_value_that_would_not_encode_is_not_in_an_event,
+        values_are_in_an_event_when_asked_for
     ].
 
 -spec init_per_suite([{atom(), term()}]) -> [{atom(), term()}] | {skip, term()}.
@@ -76,6 +84,7 @@ init_per_testcase(Case, Config) ->
 -spec end_per_testcase(atom(), [{atom(), term()}]) -> ok.
 end_per_testcase(Case, _Config) ->
     ok = application:unset_env(minato, log_statements),
+    ok = application:unset_env(minato, log_values),
     _ = telemetry:detach(handler(Case)),
     ok.
 
@@ -87,7 +96,20 @@ a_query_is_a_span(_Config) ->
     {Stop, StopMeta} = awaited([minato, query, stop], #{telemetry_span_context => Span}),
     ?assertMatch(#{path := cached}, StartMeta),
     ?assertMatch(#{duration := _Duration, monotonic_time := _When}, Stop),
-    ?assertMatch(#{outcome := ok, command := select, num_rows := 1}, StopMeta).
+    ?assertMatch(#{outcome := ok, command := select, num_rows := 1}, StopMeta),
+    #{host := Host, port := Port, database := Database} = connection(),
+    Origin = #{host => Host, port => Port, database => Database, pool => ?POOL, path => cached},
+    ?assertEqual(Origin, maps:with(maps:keys(Origin), StartMeta)),
+    ?assertEqual(Origin, maps:with(maps:keys(Origin), StopMeta)).
+
+-spec a_query_on_a_bare_connection_names_no_pool([{atom(), term()}]) -> ok.
+a_query_on_a_bare_connection_names_no_pool(_Config) ->
+    {ok, Conn} = minato_conn:connect(connection()),
+    {ok, _Result, Ready} = minato_query:query(Conn, ~"SELECT $1::int4", [7]),
+    ok = minato_conn:close(Ready),
+    {_Start, StartMeta} = awaited([minato, query, start], #{path => unnamed}),
+    ?assertMatch(#{database := ~"minato_test", port := _Port, host := _Host}, StartMeta),
+    ?assertNot(maps:is_key(pool, StartMeta)).
 
 -spec a_failed_query_reports_why([{atom(), term()}]) -> ok.
 a_failed_query_reports_why(_Config) ->
@@ -174,6 +196,46 @@ parameters_are_never_in_an_event(_Config) ->
         lists:member(Secret, maps:values(Metadata))
     ]),
     ?assert(length(Events) >= 2).
+
+-spec a_value_the_server_quotes_back_is_not_in_an_event([{atom(), term()}]) -> ok.
+a_value_the_server_quotes_back_is_not_in_an_event(_Config) ->
+    Secret = ~"hunter2",
+    {error, {pgsql_error, Returned}} = minato:query(?POOL, ~"SELECT $1::text::int4", [Secret]),
+    {_Stop, StopMeta} = awaited([minato, query, stop], #{outcome => error}),
+    ?assertMatch(#{message := _Quoting}, Returned),
+    ?assert(holds(Secret, Returned)),
+    ?assertMatch(#{reason := {pgsql_error, #{code := ~"22P02", severity := ~"ERROR"}}}, StopMeta),
+    ?assertNot(holds(Secret, StopMeta)),
+    ?assertNot(holds(Secret, drained())).
+
+-spec a_value_that_would_not_encode_is_not_in_an_event([{atom(), term()}]) -> ok.
+a_value_that_would_not_encode_is_not_in_an_event(_Config) ->
+    Secret = ~"hunter2",
+    ?assertError(
+        {minato_codec, #{type := int4, value := redacted}},
+        minato:query(?POOL, ~"SELECT $1::int4", [Secret])
+    ),
+    {_Exception, Metadata} = awaited([minato, query, exception]),
+    ?assertMatch(#{kind := error, reason := {minato_codec, #{value := redacted}}}, Metadata),
+    ?assertNot(holds(Secret, Metadata)),
+    ?assertNot(holds(Secret, drained())).
+
+-spec values_are_in_an_event_when_asked_for([{atom(), term()}]) -> ok.
+values_are_in_an_event_when_asked_for(_Config) ->
+    ok = application:set_env(minato, log_values, true),
+    Secret = ~"hunter2",
+    {error, _Reason} = minato:query(?POOL, ~"SELECT $1::text::int4", [Secret]),
+    {_Stop, StopMeta} = awaited([minato, query, stop], #{outcome => error}),
+    ?assert(holds(Secret, StopMeta)),
+    ?assertError(
+        {minato_codec, #{type := int4, value := Secret}},
+        minato:query(?POOL, ~"SELECT $1::int4", [Secret])
+    ),
+    {_Exception, Metadata} = awaited([minato, query, exception]),
+    ?assert(holds(Secret, Metadata)).
+
+holds(Secret, Term) ->
+    binary:match(iolist_to_binary(io_lib:format("~0p", [Term])), Secret) =/= nomatch.
 
 %%----------------------------------------------------------------------
 %% Collecting events

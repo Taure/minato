@@ -6,6 +6,8 @@ real server can be made to do without a superuser.
 
 -include_lib("eunit/include/eunit.hrl").
 
+-export([unreadable/1, kept/1]).
+
 -define(POOL, minato_pool_reset_tests).
 
 -define(READY, [
@@ -31,16 +33,16 @@ a_checkout_gives_up_after_the_pool_and_one_more_test_() ->
     {timeout, 30, fun a_checkout_gives_up_after_the_pool_and_one_more/0}.
 
 a_checkout_gives_up_after_the_pool_and_one_more() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([
         ?READY, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET, ?NOT_THE_RESET
     ]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 2, min_size => 2, connection => connection(Server)
     }),
     try
         ?assertEqual(
-            {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 5000)
+            {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 1000)
         ),
         Opened = [Startup || {startup, _} = Startup <- minato_backend_server:received(Server)],
         ?assert(length(Opened) =< 5)
@@ -53,15 +55,15 @@ a_refused_reset_reports_only_its_sqlstate_test_() ->
     {timeout, 30, fun a_refused_reset_reports_only_its_sqlstate/0}.
 
 a_refused_reset_reports_only_its_sqlstate() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([?READY, ?REFUSED, ?REFUSED]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
     }),
     try
         ?assertEqual(
             {error, {session_reset, {pgsql_error, #{code => ~"42501"}}}},
-            minato_pool:checkout(?POOL, 5000)
+            minato_pool:checkout(?POOL, 1000)
         )
     after
         ok = minato:stop_pool(?POOL),
@@ -74,9 +76,9 @@ a_connection_with_no_transaction_is_reset_without_a_rollback_test_() ->
     {timeout, 30, fun a_connection_with_no_transaction_is_reset_without_a_rollback/0}.
 
 a_connection_with_no_transaction_is_reset_without_a_rollback() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     Server = minato_backend_server:start([?READY, ?SHOWN]),
-    {ok, _Pid} = minato:start_pool(?POOL, #{
+    {ok, _Pid} = minato_owned:pool(?POOL, #{
         size => 1, min_size => 1, connection => connection(Server)
     }),
     try
@@ -86,6 +88,67 @@ a_connection_with_no_transaction_is_reset_without_a_rollback() ->
         ok = minato:stop_pool(?POOL),
         minato_backend_server:stop(Server)
     end.
+
+%% The borrower is still alive when the checkout has answered, which is when a
+%% connection lent and never given back would show.
+a_reset_answered_with_bytes_that_are_no_message_costs_the_connection_not_the_slot_test_() ->
+    {timeout, 30, fun() ->
+        ok = ready(),
+        Server = minato_backend_server:start(script({?MODULE, unreadable})),
+        {ok, _Pid} = minato_owned:pool(?POOL, #{
+            size => 1, min_size => 1, connection => connection(Server)
+        }),
+        try
+            ?assertMatch(
+                {error, {session_reset, {minato_protocol, _Why}}},
+                minato_pool:checkout(?POOL, 1000)
+            ),
+            ?assertMatch(#{borrowed := 0}, minato:stats(?POOL))
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%% The reset is given as long as one read of the connection and no longer. That
+%% time is the reset's own, and a borrower who reads the connection by hand has
+%% not been given what was left of it.
+a_borrowed_connection_is_not_held_to_the_time_its_reset_was_given_test_() ->
+    {timeout, 30, fun() ->
+        ok = ready(),
+        Server = minato_backend_server:start(script({?MODULE, kept})),
+        Connection = maps:put(timeout, 300, connection(Server)),
+        {ok, _Pid} = minato_owned:pool(?POOL, #{
+            size => 1, min_size => 1, connection => Connection
+        }),
+        try
+            {ok, Conn} = minato_pool:checkout(?POOL, 1000),
+            timer:sleep(400),
+            ok = minato_conn:send(Conn, {query, ~"SELECT 1"}),
+            ?assertMatch({ok, {command_complete, _Tag}, _Read}, minato_conn:next(Conn, 1000))
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+kept({query, ~"SELECT 1"}) -> ?NOT_THE_RESET;
+kept(Asked) -> minato_pool_growth_tests:answered(Asked).
+
+script(Reply) ->
+    [?READY | lists:duplicate(4, {reply, Reply})].
+
+%% The question is asked of the first connection only, so what a connection is
+%% sent is told apart by what it is, not by where it comes.
+unreadable({query, ~"SHOW max_connections"}) -> ?SHOWN;
+unreadable({query, _Reset}) -> {raw, <<$Z, 5:32, $X>>}.
+
+%% A run that was cut short leaves what it started under the supervisor, and
+%% the next run would find the name taken.
+ready() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    _ = minato:stop_pool(?POOL),
+    ok.
 
 connection(Server) ->
     #{

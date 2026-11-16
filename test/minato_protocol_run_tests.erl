@@ -79,6 +79,31 @@ a_refused_length_is_still_refused_inside_a_run_test() ->
     Buffer = <<$D, 16#7FFFFFFF:32, 0:16>>,
     ?assertError({minato_protocol, _}, minato_protocol:frame(Buffer, opts())).
 
+a_length_is_checked_inside_a_run_as_it_is_outside_one_test_() ->
+    Max = #{max_message_length => 16},
+    Opts = maps:merge(opts(), Max),
+    [
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := {$D, 17, 16}}},
+            minato_protocol:frame(<<$D, 17:32, 0:16>>, Opts)
+        ),
+        ?_assertMatch({[], _Waiting}, minato_protocol:frame(<<$D, 16:32, 0:16>>, Opts)),
+        ?_assertError(
+            {minato_protocol, #{reason := length_below_minimum, data := {$D, 3}}},
+            minato_protocol:frame(<<$D, 3:32, 0:16>>, Opts)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := malformed}},
+            minato_protocol:frame(<<$D, 4:32>>, Opts)
+        )
+    ].
+
+a_run_ends_at_the_command_that_completes_it_test() ->
+    Described = minato_backend_writer:write({row_description, [field()]}),
+    Buffer = <<Described/binary, (stream([row(~"1")]))/binary>>,
+    {Messages, ~""} = minato_protocol:frame(Buffer, #{decode_opts => #{}}),
+    ?assertMatch([{row_description, _Fields}, {rows, [{1}]} | _Rest], Messages).
+
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------

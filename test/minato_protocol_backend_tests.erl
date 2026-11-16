@@ -331,6 +331,103 @@ command_complete_test_() ->
      || {Tag, Expected} <- Cases
     ].
 
+every_tag_postgresql_has_is_read_as_atoms_test_() ->
+    Cases = [
+        {~"ALTER DEFAULT PRIVILEGES", {alter, default_privileges}},
+        {~"ALTER TEXT SEARCH CONFIGURATION", {alter, text_search_configuration}},
+        {~"ALTER SYSTEM", {alter, system}},
+        {~"ANALYZE", {analyze, undefined}},
+        {~"CALL", {call, undefined}},
+        {~"CHECKPOINT", {checkpoint, undefined}},
+        {~"CLOSE CURSOR", {close, cursor}},
+        {~"CLOSE CURSOR ALL", {close, cursor_all}},
+        {~"COMMIT PREPARED", {commit, prepared}},
+        {~"CREATE FOREIGN DATA WRAPPER", {create, foreign_data_wrapper}},
+        {~"CREATE MATERIALIZED VIEW", {create, materialized_view}},
+        {~"CREATE OPERATOR CLASS", {create, operator_class}},
+        {~"CREATE USER MAPPING", {create, user_mapping}},
+        {~"DEALLOCATE", {deallocate, undefined}},
+        {~"DEALLOCATE ALL", {deallocate, all}},
+        {~"DISCARD ALL", {discard, all}},
+        {~"DISCARD PLANS", {discard, plans}},
+        {~"DISCARD SEQUENCES", {discard, sequences}},
+        {~"DISCARD TEMP", {discard, temp}},
+        {~"DO", {do, undefined}},
+        {~"DROP OWNED", {drop, owned}},
+        {~"EXPLAIN", {explain, undefined}},
+        {~"GRANT", {grant, undefined}},
+        {~"GRANT ROLE", {grant, role}},
+        {~"IMPORT FOREIGN SCHEMA", {import, foreign_schema}},
+        {~"LOCK TABLE", {lock, table}},
+        {~"NOTIFY", {notify, undefined}},
+        {~"PREPARE", {prepare, undefined}},
+        {~"PREPARE TRANSACTION", {prepare, transaction}},
+        {~"REASSIGN OWNED", {reassign, owned}},
+        {~"REFRESH MATERIALIZED VIEW", {refresh, materialized_view}},
+        {~"REINDEX", {reindex, undefined}},
+        {~"RELEASE", {release, undefined}},
+        {~"RESET", {reset, undefined}},
+        {~"REVOKE ROLE", {revoke, role}},
+        {~"ROLLBACK PREPARED", {rollback, prepared}},
+        {~"SAVEPOINT", {savepoint, undefined}},
+        {~"SECURITY LABEL", {security, label}},
+        {~"SELECT INTO", {select, into}},
+        {~"SET CONSTRAINTS", {set, constraints}},
+        {~"START TRANSACTION", {start, transaction}},
+        {~"UNLISTEN", {unlisten, undefined}},
+        {~"VACUUM", {vacuum, undefined}}
+    ],
+    [
+        {
+            binary_to_list(Tag),
+            ?_assertEqual({command_complete, Expected}, dec($C, <<Tag/binary, 0>>))
+        }
+     || {Tag, Expected} <- Cases
+    ].
+
+a_word_outside_the_vocabulary_stays_a_binary_test_() ->
+    [
+        ?_assertEqual({command_complete, {~"FROBNICATE", 3}}, dec($C, <<"FROBNICATE 3", 0>>)),
+        ?_assertEqual(
+            {command_complete, {~"FROBNICATE", undefined}}, dec($C, <<"FROBNICATE", 0>>)
+        ),
+        ?_assertEqual(
+            {command_complete, {create, ~"WIDGET FACTORY"}},
+            dec($C, <<"CREATE WIDGET FACTORY", 0>>)
+        ),
+        ?_assertEqual({command_complete, {~"select", ~"x y"}}, dec($C, <<"select x y", 0>>)),
+        ?_assertEqual({command_complete, {select, ~"many"}}, dec($C, <<"SELECT many", 0>>)),
+        ?_assertEqual({command_complete, {insert, ~"some"}}, dec($C, <<"INSERT 0 some", 0>>)),
+        ?_assertEqual({command_complete, {~"", undefined}}, dec($C, <<0>>))
+    ].
+
+no_atom_is_made_from_a_tag_test() ->
+    Tag = fun(N) ->
+        Suffix = integer_to_binary(N),
+        <<"VERB", Suffix/binary, " NOUN", Suffix/binary, " OTHER", Suffix/binary, 0>>
+    end,
+    _ = dec($C, Tag(0)),
+    Before = erlang:system_info(atom_count),
+    _ = [dec($C, Tag(N)) || N <- lists:seq(1, 2000)],
+    ?assertEqual(Before, erlang:system_info(atom_count)).
+
+a_count_too_long_to_be_one_is_not_read_as_a_number_test_() ->
+    Digits = fun(Size) -> binary:copy(~"9", Size) end,
+    [
+        ?_assertEqual(
+            {command_complete, {select, 99999999999999999999}},
+            dec($C, <<"SELECT ", (Digits(20))/binary, 0>>)
+        ),
+        ?_assertEqual(
+            {command_complete, {select, Digits(21)}},
+            dec($C, <<"SELECT ", (Digits(21))/binary, 0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{message := command_complete, reason := tag_word_too_long}},
+            dec($C, <<"SELECT ", (Digits(1000000))/binary, 0>>)
+        )
+    ].
+
 command_complete_rejects_trailing_bytes_test() ->
     ?assertError(
         {minato_protocol, #{message := command_complete, reason := trailing_bytes}},
@@ -526,3 +623,80 @@ columns_of(Columns) ->
          || Column <- Columns
         ]
     ]).
+
+%%----------------------------------------------------------------------
+%% Messages cut short, and messages with something after their end
+%%----------------------------------------------------------------------
+
+authentication_rejects_a_payload_after_a_method_that_has_none_test() ->
+    ?assertError({minato_protocol, #{reason := malformed}}, dec($R, <<3:32, 1>>)).
+
+notification_response_rejects_trailing_bytes_test() ->
+    ?assertError(
+        {minato_protocol, #{message := notification_response, reason := trailing_bytes}},
+        dec($A, <<42:32, "chan", 0, "hello", 0, "extra">>)
+    ).
+
+notification_response_rejects_a_payload_too_short_for_a_process_id_test() ->
+    ?assertError(
+        {minato_protocol, #{message := notification_response, reason := malformed}},
+        dec($A, <<0, 0, 42>>)
+    ).
+
+row_description_with_no_fields_test() ->
+    ?assertEqual({row_description, []}, dec($T, <<0:16>>)).
+
+row_description_rejects_a_payload_too_short_for_a_count_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<0>>}},
+        dec($T, <<0>>)
+    ).
+
+row_description_rejects_a_field_cut_short_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<1, 2>>}},
+        dec($T, <<1:16, "id", 0, 1, 2>>)
+    ).
+
+row_description_rejects_bytes_after_its_last_field_test() ->
+    ?assertError(
+        {minato_protocol, #{message := row_description, reason := malformed, data := <<1>>}},
+        dec($T, <<0:16, 1>>)
+    ).
+
+parameter_description_rejects_a_payload_too_short_for_a_count_test() ->
+    ?assertError(
+        {minato_protocol, #{message := parameter_description, reason := malformed}},
+        dec($t, <<0>>)
+    ).
+
+parameter_description_rejects_bytes_after_its_last_parameter_test() ->
+    ?assertError(
+        {minato_protocol, #{
+            message := parameter_description, reason := malformed, data := <<23:32>>
+        }},
+        dec($t, <<0:16, 23:32>>)
+    ).
+
+a_negative_count_is_not_read_as_a_number_test() ->
+    ?assertEqual({command_complete, {select, ~"-1"}}, dec($C, <<"SELECT -1", 0>>)).
+
+a_word_outside_the_vocabulary_is_kept_up_to_a_length_test_() ->
+    Word = fun(Size) -> binary:copy(~"W", Size) end,
+    [
+        ?_assertEqual(
+            {command_complete, {Word(255), undefined}}, dec($C, <<(Word(255))/binary, 0>>)
+        ),
+        ?_assertError(
+            {minato_protocol, #{
+                message := command_complete, reason := tag_word_too_long, data := 256
+            }},
+            dec($C, <<(Word(256))/binary, 0>>)
+        )
+    ].
+
+a_word_outside_the_vocabulary_has_to_be_text_test() ->
+    ?assertError(
+        {minato_protocol, #{message := command_complete, reason := tag_word_not_utf8}},
+        dec($C, <<"FROB", 255, 0>>)
+    ).

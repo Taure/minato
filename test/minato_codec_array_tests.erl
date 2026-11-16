@@ -177,12 +177,226 @@ multi_dimensional_decodes_to_nested_lists_test_() ->
         )
     ].
 
-encoding_never_nests_test_() ->
+%%----------------------------------------------------------------------
+%% Multi dimensional encoding
+%%----------------------------------------------------------------------
+
+marked_as_an_array_a_list_in_a_list_is_a_row_test_() ->
+    TwoByTwo = <<
+        (header(2, [2, 2], ~""))/binary,
+        4:32/signed,
+        1:32/signed,
+        4:32/signed,
+        2:32/signed,
+        4:32/signed,
+        3:32/signed,
+        4:32/signed,
+        4:32/signed
+    >>,
     [
-        ?_assertError(
-            {minato_codec, #{reason := not_an_integer}}, enc(?INT4_ARRAY, [[1, 2]], binary)
+        ?_assertEqual(TwoByTwo, enc(?INT4_ARRAY, {array, [[1, 2], [3, 4]]}, binary)),
+        ?_assertEqual(~"{{1,2},{3,4}}", enc(?INT4_ARRAY, {array, [[1, 2], [3, 4]]}, text)),
+        ?_assertEqual(
+            ~"{{{1},{2}},{{3},{4}}}",
+            enc(?INT4_ARRAY, {array, [[[1], [2]], [[3], [4]]]}, text)
         ),
-        ?_assertEqual([~"ab"], roundtrip(?TEXT_ARRAY, [[$a, $b]], binary))
+        ?_assertEqual(
+            header(3, [1, 2, 1], <<4:32/signed, 1:32/signed, 4:32/signed, 2:32/signed>>),
+            enc(?INT4_ARRAY, {array, [[[1], [2]]]}, binary)
+        )
+    ].
+
+a_list_in_a_list_is_one_string_where_an_element_can_be_a_list_test_() ->
+    [
+        ?_assertEqual([~"ab"], roundtrip(?TEXT_ARRAY, [[$a, $b]], Format))
+     || Format <- [binary, text]
+    ] ++
+        [
+            ?_assertEqual([~"ab", ~"c"], roundtrip(?TEXT_ARRAY, [[~"a", ~"b"], [~"c"]], Format))
+         || Format <- [binary, text]
+        ] ++
+        [
+            ?_assertEqual([~"ab", ~"cd"], roundtrip(?TEXT_ARRAY, ["ab", "cd"], binary)),
+            ?_assertEqual([<<1, 2>>, <<3>>], roundtrip(1001, [[1, 2], [<<3>>]], binary)),
+            ?_assertEqual(~"{ab,cd}", enc(?TEXT_ARRAY, [[~"a", ~"b"], [~"c", ~"d"]], text))
+        ].
+
+%% 1.1.6 refused a list where an element was wanted, and a string written as
+%% a list is one. Reading it as a row would store its character codes.
+a_list_where_an_element_was_wanted_is_refused_as_it_always_was_test_() ->
+    [
+        {
+            lists:flatten(io_lib:format("~p ~p ~p", [Array, Value, Format])),
+            ?_assertError(
+                {minato_codec, #{type := Type, reason := Reason}}, enc(Array, Value, Format)
+            )
+        }
+     || {Array, Value, Type, Reason} <- [
+            {?INT4_ARRAY, ["12", "34"], int4, not_an_integer},
+            {?INT4_ARRAY, ["12"], int4, not_an_integer},
+            {?INT4_ARRAY, [1, "2"], int4, not_an_integer},
+            {?INT4_ARRAY, [[1, 2]], int4, not_an_integer},
+            {?INT4_ARRAY, [[1, 2], [3, 4]], int4, not_an_integer},
+            {?INT4_ARRAY, [[]], int4, not_an_integer},
+            {1016, ["12"], int8, not_an_integer},
+            {1231, ["1.5"], numeric, not_a_numeric},
+            {1022, ["1.5"], float8, not_a_float},
+            {1115, ["2024"], timestamp, not_a_timestamp},
+            {1182, ["2024"], date, not_a_date},
+            {2951, ["0196f0a9-1c4f-7e21-9b3a-6d2c5e8f1a44"], uuid, not_a_uuid}
+        ],
+        Format <- [binary, text]
+    ].
+
+a_plain_list_never_adds_a_dimension_test_() ->
+    [
+        {atom_to_list(Name), fun() ->
+            Array = minato_oid:oid({array, Name}),
+            Dimensions =
+                try enc(Array, [[]], binary) of
+                    <<Written:32/signed, _/binary>> -> Written
+                catch
+                    error:{minato_codec, _Report} -> refused
+                end,
+            ?assert(Dimensions =:= 1 orelse Dimensions =:= refused)
+        end}
+     || Name <- minato_oid:names()
+    ].
+
+marked_as_an_array_every_list_is_a_dimension_test_() ->
+    Rows = [[~"a", ~"b"], [~"c", ~"d"]],
+    [
+        ?_assertEqual(~"{{a,b},{c,d}}", enc(?TEXT_ARRAY, {array, Rows}, text)),
+        ?_assertEqual(Rows, roundtrip(?TEXT_ARRAY, {array, Rows}, binary)),
+        ?_assertEqual(Rows, roundtrip(?TEXT_ARRAY, {array, Rows}, text)),
+        ?_assertEqual([~"a", ~"b"], roundtrip(?TEXT_ARRAY, {array, [~"a", ~"b"]}, binary)),
+        ?_assertEqual([], roundtrip(?TEXT_ARRAY, {array, []}, binary)),
+        ?_assertEqual(
+            [[1, 2], [3, 4]], roundtrip(?INT4_ARRAY, {array, [[1, 2], [3, 4]]}, binary)
+        ),
+        ?_assertEqual(
+            enc(?INT4_ARRAY, [1, 2], text),
+            enc(?INT4_ARRAY, {array, [1, 2]}, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := {array, ?TEXT_ARRAY}, reason := not_a_list}},
+            enc(?TEXT_ARRAY, {array, ~"a"}, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := {array, ?TEXT_ARRAY}, reason := ragged_array}},
+            enc(?TEXT_ARRAY, {array, ["ab", "c"]}, binary)
+        )
+    ].
+
+every_element_type_round_trips_in_every_shape_test_() ->
+    [
+        {
+            lists:flatten(io_lib:format("~p ~p ~p", [Name, Expected, Format])),
+            ?_assertEqual(Expected, roundtrip(Oid, Value, Format))
+        }
+     || #{kind := array, name := Name, oid := Oid} = Entry <- minato_corpus:types(),
+        #{value := Value, expected := Expected} <- minato_corpus:nested(Entry),
+        Format <- [binary, text]
+    ].
+
+a_null_anywhere_sets_the_flag_test_() ->
+    Flags = fun(Value) ->
+        <<_:32, Flag:32, _/binary>> = enc(?INT4_ARRAY, {array, Value}, binary),
+        Flag
+    end,
+    [
+        ?_assertEqual(0, Flags([[1, 2], [3, 4]])),
+        ?_assertEqual(1, Flags([[1, 2], [3, null]])),
+        ?_assertEqual(1, Flags([[null, 2], [3, 4]])),
+        ?_assertEqual(
+            ~"{{1,NULL},{NULL,4}}", enc(?INT4_ARRAY, {array, [[1, null], [null, 4]]}, text)
+        ),
+        ?_assertEqual(
+            ~"{{a,NULL},{\"NULL\",\"\"}}",
+            enc(?TEXT_ARRAY, {array, [[~"a", null], [~"NULL", ~""]]}, text)
+        )
+    ].
+
+a_ragged_list_is_refused_test_() ->
+    Ragged = [
+        {[[1, 2], [3]], [3]},
+        {[[1], [2, 3]], [2, 3]},
+        {[[1, 2], 3], 3},
+        {[[1, 2], null], null},
+        {[1, [2]], [2]},
+        {[[1, [2]], [3, 4]], [2]},
+        {[[[1], [2]], [[3]]], [[3]]},
+        {[[[1]], [2]], 2},
+        {[[], [1]], [1]}
+    ],
+    [
+        {
+            lists:flatten(io_lib:format("~p ~p", [List, Format])),
+            ?_assertError(
+                {minato_codec, #{
+                    type := {array, ?INT4_ARRAY}, reason := ragged_array, value := Culprit
+                }},
+                enc(?INT4_ARRAY, {array, List}, Format)
+            )
+        }
+     || {List, Culprit} <- Ragged, Format <- [binary, text]
+    ].
+
+an_array_with_no_elements_has_no_dimensions_test_() ->
+    Empty = enc(?INT4_ARRAY, [], binary),
+    [
+        ?_assertEqual(Empty, enc(?INT4_ARRAY, {array, [[]]}, binary)),
+        ?_assertEqual(Empty, enc(?INT4_ARRAY, {array, [[], []]}, binary)),
+        ?_assertEqual(Empty, enc(?INT4_ARRAY, {array, [[[]], [[]]]}, binary)),
+        ?_assertEqual(~"{}", enc(?INT4_ARRAY, {array, [[], []]}, text)),
+        ?_assertEqual(~"{}", enc(?INT4_ARRAY, {array, [[[]]]}, text)),
+        ?_assertEqual(enc(?TEXT_ARRAY, [], binary), enc(?TEXT_ARRAY, {array, [[], []]}, binary)),
+        ?_assertEqual([], roundtrip(?INT4_ARRAY, {array, [[], []]}, binary)),
+        ?_assertEqual([], roundtrip(?INT4_ARRAY, {array, [[], []]}, text))
+    ].
+
+seven_dimensions_are_not_written_test_() ->
+    Six = [[[[[[7, 8]]]]]],
+    [
+        ?_assertEqual(Six, roundtrip(?INT4_ARRAY, {array, Six}, binary)),
+        ?_assertEqual(~"{{{{{{7,8}}}}}}", enc(?INT4_ARRAY, {array, Six}, text)),
+        ?_assertError(
+            {minato_codec, #{type := {array, ?INT4_ARRAY}, reason := dimensions_out_of_range}},
+            enc(?INT4_ARRAY, {array, [Six]}, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := {array, ?INT4_ARRAY}, reason := dimensions_out_of_range}},
+            enc(?INT4_ARRAY, {array, [Six]}, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{type := {array, ?TEXT_ARRAY}, reason := dimensions_out_of_range}},
+            enc(?TEXT_ARRAY, {array, [[[[[[[~"a"]]]]]]]}, binary)
+        )
+    ].
+
+lower_bounds_of_every_dimension_are_passed_over_test_() ->
+    Elements = <<
+        4:32/signed,
+        1:32/signed,
+        4:32/signed,
+        2:32/signed,
+        4:32/signed,
+        3:32/signed,
+        4:32/signed,
+        4:32/signed
+    >>,
+    Wire =
+        <<2:32/signed, 0:32, 23:32, 2:32/signed, 0:32/signed, 2:32/signed, -5:32/signed,
+            Elements/binary>>,
+    [
+        ?_assertEqual([[1, 2], [3, 4]], minato_codec:decode(?INT4_ARRAY, Wire, binary)),
+        ?_assertEqual(
+            [[1, 2], [3, 4]],
+            minato_codec:decode(?INT4_ARRAY, ~"[0:1][-5:-4]={{1,2},{3,4}}", text)
+        ),
+        ?_assertEqual(
+            [[~"a=b"]], minato_codec:decode(?TEXT_ARRAY, ~"[7:7][0:0]={{a=b}}", text)
+        )
     ].
 
 lower_bounds_are_not_represented_test() ->
@@ -220,5 +434,139 @@ binary_rejects_test_() ->
         )
     ].
 
+%%----------------------------------------------------------------------
+%% Bounds
+%%----------------------------------------------------------------------
+
+six_dimensions_is_the_most_there_is_test_() ->
+    Six = header(6, [1, 1, 1, 1, 1, 1], <<4:32/signed, 7:32/signed>>),
+    Seven = header(7, [1, 1, 1, 1, 1, 1, 1], <<4:32/signed, 7:32/signed>>),
+    [
+        ?_assertEqual([[[[[[7]]]]]], minato_codec:decode(?INT4_ARRAY, Six, binary)),
+        ?_assertEqual([[[[[[7]]]]]], minato_codec:decode(?INT4_ARRAY, ~"{{{{{{7}}}}}}", text)),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := 7}},
+            minato_codec:decode(?INT4_ARRAY, Seven, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range}},
+            minato_codec:decode(?INT4_ARRAY, ~"{{{{{{{7}}}}}}}", text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := 16#7FFFFFFF}},
+            minato_codec:decode(?INT4_ARRAY, <<16#7FFFFFFF:32/signed, 0:32, 23:32>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := dimensions_out_of_range, value := -1}},
+            minato_codec:decode(?INT4_ARRAY, <<-1:32/signed, 0:32, 23:32>>, binary)
+        )
+    ].
+
+deep_text_nesting_is_refused_at_the_seventh_brace_test() ->
+    Deep = binary:copy(~"{", 1000000),
+    ?assertError(
+        {minato_codec, #{type := {array, ?INT4_ARRAY}, reason := dimensions_out_of_range}},
+        minato_codec:decode(?INT4_ARRAY, Deep, text)
+    ).
+
+a_dimension_cannot_be_negative_test() ->
+    ?assertError(
+        {minato_codec, #{reason := negative_dimension, value := -2}},
+        minato_codec:decode(?INT4_ARRAY, header(1, [-2], ~""), binary)
+    ).
+
+more_elements_than_the_bytes_could_hold_are_not_read_test_() ->
+    Wide = header(2, [16#7FFFFFFF, 16#7FFFFFFF], <<4:32/signed, 1:32/signed>>),
+    [
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements}},
+            minato_codec:decode(?INT4_ARRAY, Wide, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [2], <<-1:32/signed>>), binary)
+        ),
+        ?_assertEqual(
+            [null, null],
+            minato_codec:decode(
+                ?INT4_ARRAY, header(1, [2], <<-1:32/signed, -1:32/signed>>), binary
+            )
+        ),
+        ?_assertEqual([], minato_codec:decode(?INT4_ARRAY, header(1, [0], ~""), binary))
+    ].
+
+header(NDim, Sizes, Elements) ->
+    <<NDim:32/signed, 0:32, 23:32, <<<<Size:32/signed, 1:32/signed>> || Size <- Sizes>>/binary,
+        Elements/binary>>.
+
 wire(null) -> null;
 wire(IoData) -> iolist_to_binary(IoData).
+
+%%----------------------------------------------------------------------
+%% Edges the cases above leave between them
+%%----------------------------------------------------------------------
+
+a_header_cut_short_is_not_an_empty_array_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := {malformed, binary}}},
+            minato_codec:decode(?INT4_ARRAY, <<0:32/signed, 0:32>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := {malformed, binary}}},
+            minato_codec:decode(?INT4_ARRAY, <<7:32/signed, 0:32>>, binary)
+        )
+    ].
+
+a_dimension_of_minus_one_is_refused_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := negative_dimension, value := -1}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [-1], ~""), binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := truncated_dimensions}},
+            minato_codec:decode(?INT4_ARRAY, <<1:32/signed, 0:32, 23:32, -1:32/signed>>, binary)
+        )
+    ].
+
+elements_are_counted_against_the_bytes_before_any_is_read_test_() ->
+    Refused = fun(Elements) ->
+        ?_assertError(
+            {minato_codec, #{reason := truncated_elements, value := Elements}},
+            minato_codec:decode(?INT4_ARRAY, header(1, [3], Elements), binary)
+        )
+    end,
+    [
+        Refused(<<-1:32/signed, -1:32/signed>>),
+        Refused(<<-1:32/signed, -1:32/signed, 0, 0, 0>>)
+    ].
+
+an_element_longer_than_what_is_left_is_refused_test() ->
+    ?assertError(
+        {minato_codec, #{reason := truncated_elements}},
+        minato_codec:decode(?INT4_ARRAY, header(1, [1], <<8:32/signed, 1, 2>>), binary)
+    ).
+
+an_array_of_a_type_that_has_no_elements_is_refused_test() ->
+    ?assertError(
+        {minato_codec, #{reason := not_an_array_type}},
+        minato_codec_array:decode(23, header(1, [1], <<4:32/signed, 1:32/signed>>), binary, #{})
+    ).
+
+rows_of_one_keep_their_shape_test_() ->
+    Two = <<4:32/signed, 1:32/signed, 4:32/signed, 2:32/signed>>,
+    [
+        ?_assertEqual(
+            [[1], [2]], minato_codec:decode(?INT4_ARRAY, header(2, [2, 1], Two), binary)
+        ),
+        ?_assertEqual(
+            [[[1]], [[2]]], minato_codec:decode(?INT4_ARRAY, header(3, [2, 1, 1], Two), binary)
+        )
+    ].
+
+only_the_whole_word_is_null_test() ->
+    ?assertEqual(
+        [~"nulx", ~"nuxx", ~"nxxx", ~"xull", ~"nxll"],
+        minato_codec:decode(?TEXT_ARRAY, ~"{nulx,nuxx,nxxx,xull,nxll}", text)
+    ).

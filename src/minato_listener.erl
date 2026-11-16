@@ -30,9 +30,18 @@ session where nothing is waiting.
 
 A connection that drops takes its subscriptions with it, and anything the server
 published while it was gone is gone: `NOTIFY` is fire and forget, with no
-replay. This process reconnects with backoff, `LISTEN`s again for every channel
+replay. This process reconnects with backoff, each wait a random time in the
+upper half of what the backoff allows, `LISTEN`s again for every channel
 that still has a subscriber, and then tells each subscriber
 `{minato_listener, Name, resubscribed}`.
+
+A connection is dropped by more than the socket closing. A `LISTEN` or
+`UNLISTEN` that gets no answer, and bytes from the server that are not a
+message, end it the same way: closed, reconnected, resubscribed and announced.
+`listen/2` on a connection lost that way answers `{error, Reason}`, the
+socket's own or `{minato_protocol, Why}`, and the
+caller subscribes again once it is back, as it would after `{error,
+not_connected}`.
 
 That message is the point. A consumer that treats notifications as the only way
 it learns anything will silently stall; one that is told it was disconnected can
@@ -56,7 +65,8 @@ faster - never the only path.
     opts :: minato_conn:opts(),
     conn :: minato_conn:conn() | undefined,
     channels = #{} :: #{binary() => #{pid() => reference()}},
-    backoff = ?MINIMUM_BACKOFF :: pos_integer()
+    backoff = ?MINIMUM_BACKOFF :: pos_integer(),
+    retrying = false :: boolean()
 }).
 
 -doc "How the listener is registered and asked for.".
@@ -71,7 +81,10 @@ What to connect to.
 
 Passed to `minato_conn:connect/1` unchanged. One connection, held for the life
 of the listener. A `connection` that is missing, not a map, or has no `user`
-stops the listener with `invalid_connection`.
+stops the listener with `invalid_connection`, and one with an option
+`minato_conn:validate/1` refuses stops it with `{invalid_option, Key}`, as does
+any key here other than `connection`: `{invalid_option, not_an_atom}` for one
+that is not an atom.
 """.
 -type opts() :: #{connection := minato_conn:opts()}.
 
@@ -80,7 +93,11 @@ What a subscriber receives.
 
 The payload is whatever `NOTIFY` was given, and the pid is the server side
 process that sent it, which is how a subscriber tells its own writes from
-somebody else's.
+somebody else's. Both binaries are copies, so keeping one keeps nothing else.
+
+PostgreSQL asks for no privilege to `NOTIFY`: any role that can connect to the
+database can publish on any channel, with any payload. A payload is input from
+whoever that is, to be checked like any other, and never a statement of fact.
 """.
 -type notification() ::
     {minato_notification, Channel :: binary(), Payload :: binary(), From :: integer()}.
@@ -100,20 +117,43 @@ gets `ok` is registered rather than about to be. A channel already listened to
 costs no round trip.
 
 The name is quoted rather than interpolated, so a channel name from outside is
-a channel name and not a statement.
+a channel name and not a statement. The server cuts a name off at 63 bytes and
+publishes under what is left, so a longer one is subscribed to and never heard
+from.
+
+A name that is not a binary, or that holds a null byte, cannot be a channel:
+`{error, {invalid_channel, not_a_binary}}` and `{error, {invalid_channel,
+null_byte}}`. The listener is not asked, so neither costs it its connection or
+another subscriber a notification.
 """.
 -spec listen(name(), binary()) -> ok | {error, term()}.
 listen(Name, Channel) ->
-    call(Name, {listen, Channel, self()}).
+    case channel(Channel) of
+        ok -> call(Name, {listen, Channel, self()});
+        {error, Reason} -> {error, Reason}
+    end.
 
 -doc """
 Stop the calling process's subscription.
 
-The channel is `UNLISTEN`ed when the last subscriber to it goes.
+The channel is `UNLISTEN`ed when the last subscriber to it goes. A name that
+cannot be a channel is refused as `listen/2` refuses it.
 """.
 -spec unlisten(name(), binary()) -> ok | {error, term()}.
 unlisten(Name, Channel) ->
-    call(Name, {unlisten, Channel, self()}).
+    case channel(Channel) of
+        ok -> call(Name, {unlisten, Channel, self()});
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec channel(term()) -> ok | {error, {invalid_channel, not_a_binary | null_byte}}.
+channel(Channel) when is_binary(Channel) ->
+    case binary:match(Channel, <<0>>) of
+        nomatch -> ok;
+        _Found -> {error, {invalid_channel, null_byte}}
+    end;
+channel(_NotText) ->
+    {error, {invalid_channel, not_a_binary}}.
 
 -doc "Every channel with a subscriber, and how many each has.".
 -spec channels(name()) -> #{binary() => non_neg_integer()}.
@@ -143,10 +183,21 @@ format_status(Status) ->
 
 %% Options can come from the environment, so anything reaches here. The reason
 %% never carries the options: they hold the password.
--spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, invalid_connection}.
-init({Name, #{connection := #{user := _} = Connection}}) ->
-    process_flag(trap_exit, true),
-    {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
+-spec init({name(), dynamic()}) ->
+    {ok, #state{}} | {stop, invalid_connection | {invalid_option, atom()}}.
+init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
+    Others = lists:sort(maps:keys(maps:remove(connection, Opts))),
+    case {Others, minato_conn:validate(Connection)} of
+        {[], ok} ->
+            process_flag(trap_exit, true),
+            {ok, connect(#state{name = Name, opts = minato_secret:connection(Connection)})};
+        {[Key | _Others], _Connection} when is_atom(Key) ->
+            {stop, {invalid_option, Key}};
+        {[_NotAnAtom | _Others], _Connection} ->
+            {stop, {invalid_option, not_an_atom}};
+        {[], {error, Reason}} ->
+            {stop, Reason}
+    end;
 init({_Name, _Opts}) ->
     {stop, invalid_connection}.
 
@@ -177,17 +228,24 @@ handle_cast(_Message, State) ->
     | {tcp_error | ssl_error, term(), term()}.
 
 -spec handle_info(info(), #state{}) -> {noreply, #state{}}.
+handle_info(reconnect, #state{conn = undefined} = State) ->
+    {noreply, connect(State#state{retrying = false})};
 handle_info(reconnect, State) ->
-    {noreply, connect(State)};
+    {noreply, State#state{retrying = false}};
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, reactivated(gone(State, Pid))};
 handle_info(_Message, #state{conn = undefined} = State) ->
     {noreply, State};
+%% Bytes that are not a message leave nothing after them that can be read, so
+%% they are a connection that dropped, not a reason to stop: a listener that
+%% stopped would take every subscription with it and tell nobody.
 handle_info(Message, #state{conn = Conn} = State) ->
-    case minato_conn:handle_message(Conn, Message) of
+    try minato_conn:handle_message(Conn, Message) of
         {messages, Messages, Read} -> {noreply, delivered(State#state{conn = Read}, Messages)};
         {closed, _Reason} -> {noreply, dropped(State)};
         ignore -> {noreply, State}
+    catch
+        error:{minato_protocol, #{reason := _Reason}} -> {noreply, dropped(State)}
     end.
 
 -spec terminate(term(), #state{}) -> ok.
@@ -285,8 +343,10 @@ delivered(State, [_Message | Rest]) ->
     delivered(State, Rest).
 
 -spec notify(#state{}, binary(), binary(), integer()) -> ok.
-notify(#state{name = Name, channels = Channels}, Channel, Payload, From) ->
-    Subscribers = maps:get(Channel, Channels, #{}),
+notify(#state{name = Name, channels = Channels}, Read, Carried, From) ->
+    Subscribers = maps:get(Read, Channels, #{}),
+    Channel = binary:copy(Read),
+    Payload = binary:copy(Carried),
     _ = [Pid ! {minato_notification, Channel, Payload, From} || Pid := _Monitor <- Subscribers],
     minato_telemetry:event(
         [minato, notification, received],
@@ -353,11 +413,18 @@ listening(State, [Channel | Rest]) ->
 -spec statement(#state{}, binary()) -> {ok, #state{}} | {error, term(), #state{}}.
 statement(#state{conn = undefined} = State, _Sql) ->
     {error, not_connected, State};
+%% A statement that comes back without a connection has lost it, to the socket
+%% or to an answer that was not one. Either way the connection is closed and
+%% another is on its way, so the channels still subscribed are listened to
+%% again and their subscribers are told.
 statement(#state{conn = Conn} = State, Sql) ->
-    case reading(Conn, Sql) of
+    try reading(Conn, Sql) of
         {ok, _Results, Ran} -> {ok, State#state{conn = Ran}};
         {error, Reason, Ran} -> {error, Reason, State#state{conn = Ran}};
-        {error, Reason} -> {error, Reason, State#state{conn = undefined}}
+        {error, Reason} -> {error, Reason, dropped(State)}
+    catch
+        error:{minato_protocol, #{reason := Reason}} ->
+            {error, {minato_protocol, Reason}, dropped(State)}
     end.
 
 -spec reading(minato_conn:conn(), binary()) ->
@@ -391,9 +458,11 @@ disconnected(#state{conn = Conn} = State) ->
     State#state{conn = undefined}.
 
 -spec retry(#state{}) -> #state{}.
+retry(#state{retrying = true} = State) ->
+    State;
 retry(#state{backoff = Delay} = State) ->
-    _ = erlang:send_after(Delay, self(), reconnect),
-    State#state{backoff = longer(Delay)}.
+    _ = erlang:send_after(minato_backoff:spread(Delay), self(), reconnect),
+    State#state{backoff = longer(Delay), retrying = true}.
 
 -spec longer(pos_integer()) -> pos_integer().
 longer(Delay) when Delay * 2 >= ?MAXIMUM_BACKOFF ->

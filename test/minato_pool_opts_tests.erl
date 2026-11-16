@@ -44,14 +44,14 @@ options_that_are_not_a_map_are_refused_without_echoing_them_test() ->
     end.
 
 a_refused_pool_under_the_supervisor_returns_only_the_reason_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
-    Result = minato:start_pool(?POOL, sized(0.5)),
+    ok = ready(),
+    Result = minato_owned:pool(?POOL, sized(0.5)),
     ?assertEqual({error, {invalid_size, 0.5}}, Result),
     ?assertEqual(undefined, whereis(?POOL)).
 
 a_running_pool_reports_its_status_without_the_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
-    {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{min_size => 0}),
+    ok = ready(),
+    {ok, _Pid} = minato_owned:pool(?POOL, (sized(1))#{min_size => 0}),
     try
         Status = sys:get_status(?POOL),
         ?assertEqual(nomatch, string:find(io_lib:format("~0p", [Status]), "s3cret"))
@@ -60,8 +60,8 @@ a_running_pool_reports_its_status_without_the_password_test() ->
     end.
 
 a_running_listener_reports_its_status_without_the_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
-    {ok, _Pid} = minato:start_listener(minato_pool_opts_tests_listener, #{
+    ok = ready(),
+    {ok, _Pid} = minato_owned:listener(minato_pool_opts_tests_listener, #{
         connection => connection()
     }),
     try
@@ -89,20 +89,156 @@ a_connection_that_is_not_a_map_is_refused_test() ->
     ).
 
 a_listener_without_a_connection_returns_no_password_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
+    ok = ready(),
     ?assertEqual(
         {error, invalid_connection},
-        minato:start_listener(minato_pool_opts_tests_listener, unnested())
+        minato_owned:listener(minato_pool_opts_tests_listener, unnested())
     ).
 
 zero_and_infinity_timeouts_are_accepted_test() ->
-    {ok, _Started} = application:ensure_all_started(minato),
-    {ok, _Pid} = minato:start_pool(?POOL, (sized(1))#{
+    ok = ready(),
+    {ok, _Pid} = minato_owned:pool(?POOL, (sized(1))#{
         min_size => 0, max_idle => 0, max_age => 0
     }),
     ok = minato:stop_pool(?POOL),
-    {ok, _Pid2} = minato:start_pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
+    {ok, _Pid2} = minato_owned:pool(?POOL, (sized(1))#{min_size => 0, max_idle => infinity}),
     ok = minato:stop_pool(?POOL).
+
+a_pool_whose_connection_could_not_be_secured_as_asked_does_not_start_test_() ->
+    [
+        ?_assertEqual(
+            {error, {invalid_option, Key}},
+            linked(#{size => 2, connection => asking(Key, Value)})
+        )
+     || {Key, Value} <- [
+            {channel_binding, required},
+            {ssl, yes},
+            {auth, [scram]},
+            {ssl_options, [{verify, verify_pear}]},
+            {password, 42},
+            {host, ~"db.example.invalid"},
+            {connect_timeout, "5000"},
+            {timeout, ~"15000"},
+            {timeout, -1},
+            {cancel_timeout, "5000"},
+            {cancel_timeout, 0.5}
+        ]
+    ].
+
+a_listener_whose_connection_could_not_be_secured_as_asked_does_not_start_test() ->
+    ok = ready(),
+    ?assertEqual(
+        {error, {invalid_option, channel_binding}},
+        minato_owned:listener(minato_pool_opts_tests_listener, #{
+            connection => asking(channel_binding, required)
+        })
+    ),
+    ?assertEqual(
+        {error, {invalid_option, host}},
+        minato_owned:listener(minato_pool_opts_tests_listener, #{
+            connection => asking(host, ~"db.example.invalid")
+        })
+    ),
+    ?assertEqual(
+        {error, {invalid_option, auth}},
+        minato_owned:pool(?POOL, #{connection => asking(auth, md5)})
+    ).
+
+a_listener_whose_connection_has_a_time_that_is_not_one_does_not_start_test_() ->
+    [
+        fun() ->
+            ok = ready(),
+            ?assertEqual(
+                {error, {invalid_option, Key}},
+                minato_owned:listener(minato_pool_opts_tests_listener, #{
+                    connection => asking(Key, "5000")
+                })
+            )
+        end
+     || Key <- [connect_timeout, timeout, cancel_timeout]
+    ].
+
+%% A connection that asks for something the type forbids, because what is
+%% checked is that it is refused at run time too.
+-spec asking(term(), term()) -> dynamic().
+asking(ssl_options, Value) ->
+    (connection())#{ssl => true, ssl_options => Value};
+asking(Key, Value) ->
+    (connection())#{Key => Value}.
+
+%% Options with a key the type has no name for, for the same reason.
+-spec unknown(map()) -> dynamic().
+unknown(Opts) ->
+    Opts.
+
+%% A key nobody reads is a setting somebody believes is in force.
+an_option_a_pool_has_no_name_for_is_refused_test_() ->
+    [
+        ?_assertEqual({error, {invalid_option, Key}}, linked(Opts))
+     || {Key, Opts} <- [
+            {pool_size, #{pool_size => 10, connection => connection()}},
+            {max_size, #{size => 2, max_size => 10, connection => connection()}},
+            {ssl, #{size => 2, ssl => true, connection => connection()}},
+            {sslmode, #{size => 2, connection => asking(sslmode, require)}},
+            {ssl_options, #{size => 2, connection => (connection())#{ssl_options => []}}}
+        ]
+    ].
+
+%% Options read from a file of secrets the wrong way round have them as keys,
+%% and a pool's reason for not starting is logged by whatever started it.
+a_key_that_is_not_an_atom_is_refused_without_being_repeated_test_() ->
+    Secret = ~"postgres://minato:s3cret@db.example.invalid/minato",
+    [
+        ?_assertEqual({error, {invalid_option, not_an_atom}}, linked(Opts))
+     || Opts <- [
+            #{~"size" => 2, connection => connection()},
+            #{"size" => 2, connection => connection()},
+            #{Secret => 2, connection => connection()},
+            #{size => 2, connection => asking(Secret, true)},
+            #{size => 2, connection => asking(~"timeout", 5000)}
+        ]
+    ] ++
+        [
+            fun() ->
+                ok = ready(),
+                ?assertEqual(
+                    {error, {invalid_option, not_an_atom}},
+                    minato_owned:listener(minato_pool_opts_tests_listener, Opts)
+                )
+            end
+         || Opts <- [
+                unknown(#{Secret => ~"jobs", connection => connection()}),
+                #{connection => asking(Secret, true)}
+            ]
+        ] ++
+        [
+            fun() ->
+                ok = ready(),
+                ?assertEqual(
+                    {error, {invalid_option, channel}},
+                    minato_owned:listener(
+                        minato_pool_opts_tests_listener,
+                        unknown(#{Secret => 1, channel => ~"jobs", connection => connection()})
+                    )
+                )
+            end
+        ].
+
+an_option_a_listener_has_no_name_for_is_refused_test_() ->
+    [
+        fun() ->
+            ok = ready(),
+            ?assertEqual(
+                {error, {invalid_option, Key}},
+                minato_owned:listener(minato_pool_opts_tests_listener, Opts)
+            )
+        end
+     || {Key, Opts} <- [
+            {channel, unknown(#{channel => ~"jobs", connection => connection()})},
+            {size, unknown(#{size => 1, connection => connection()})},
+            {sslmode, #{connection => asking(sslmode, require)}}
+        ]
+    ].
 
 linked(Opts) ->
     Trapping = process_flag(trap_exit, true),
@@ -131,3 +267,11 @@ sized(Size) ->
 
 connection() ->
     #{host => "127.0.0.1", port => 1, user => ~"u", password => ~"s3cret", database => ~"d"}.
+
+%% A run that was cut short leaves what it started under the supervisor, and
+%% the next run would find the name taken.
+ready() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    _ = minato:stop_pool(?POOL),
+    _ = minato:stop_listener(minato_pool_opts_tests_listener),
+    ok.

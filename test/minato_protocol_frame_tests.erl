@@ -22,10 +22,6 @@ known good stream.
 
 -include_lib("eunit/include/eunit.hrl").
 
-%% eqWAlizer: this one test passes a `max_message_length` the type forbids, on
-%% purpose, because what it checks is that the runtime refuses it too.
--eqwalizer({nowarn_function, a_limit_that_is_not_a_length_is_refused_test/0}).
-
 %%----------------------------------------------------------------------
 %% Truncation
 %%----------------------------------------------------------------------
@@ -117,12 +113,18 @@ the_default_limit_is_reported_test() ->
 a_limit_that_is_not_a_length_is_refused_test() ->
     ?assertError(
         {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
-        minato_protocol:frame(~"", #{max_message_length => infinity})
+        minato_protocol:frame(~"", limited_to(infinity))
     ),
     ?assertError(
         {minato_protocol, #{message := frame_opts, reason := invalid_max_message_length}},
-        minato_protocol:frame(~"", #{max_message_length => 3})
+        minato_protocol:frame(~"", limited_to(3))
     ).
+
+%% A limit the type forbids, because what is checked is that the runtime
+%% refuses it too.
+-spec limited_to(term()) -> dynamic().
+limited_to(Limit) ->
+    #{max_message_length => Limit}.
 
 a_message_under_the_limit_still_frames_test() ->
     Bytes = minato_backend_writer:write({parameter_status, ~"a", ~"b"}),
@@ -389,3 +391,58 @@ columns_of(Columns) ->
          || Column <- Columns
         ]
     ]).
+
+%%----------------------------------------------------------------------
+%% Where the retention decision turns
+%%----------------------------------------------------------------------
+
+%% A message of exactly this many bytes, so a buffer can be built to a size.
+sized(Size) ->
+    <<$S, (Size - 1):32, "a", 0, (binary:copy(~"b", Size - 8))/binary, 0>>.
+
+%% The start of a row that has not all arrived, of exactly this many bytes.
+arriving(Size) ->
+    <<$D, 1000:32, (binary:copy(~"c", Size - 5))/binary>>.
+
+retained(Buffer) ->
+    {[_Message], Rest} = minato_protocol:frame(Buffer),
+    binary:referenced_byte_size(Rest).
+
+%% A remainder of 64 bytes or fewer is a binary of its own whatever the framer
+%% decides, so the decision only shows on one that is larger.
+a_remainder_is_copied_when_it_is_a_quarter_of_the_buffer_or_less_test_() ->
+    [
+        ?_assertEqual(100, retained(<<(sized(300))/binary, (arriving(100))/binary>>)),
+        ?_assertEqual(400, retained(<<(sized(299))/binary, (arriving(101))/binary>>))
+    ].
+
+the_default_limit_is_sixty_four_mebibytes_test_() ->
+    Limit = 64 * 1024 * 1024,
+    AtLimit = <<$D, Limit:32>>,
+    Over = <<$D, (Limit + 1):32>>,
+    Refused = {$D, Limit + 1, Limit},
+    [
+        ?_assertEqual({[], AtLimit}, minato_protocol:frame(AtLimit)),
+        ?_assertEqual(incomplete, minato_protocol:decode(AtLimit)),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := Refused}},
+            minato_protocol:frame(Over)
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := Refused}},
+            minato_protocol:decode(Over)
+        )
+    ].
+
+one_message_is_decoded_under_the_limit_it_is_given_test_() ->
+    [
+        ?_assertEqual(
+            {ok, empty_query_response, <<1>>},
+            minato_protocol:decode(<<$I, 4:32, 1>>, #{max_message_length => 4})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long, data := {$C, 5, 4}}},
+            minato_protocol:decode(<<$C, 5:32, 0>>, #{max_message_length => 4})
+        ),
+        ?_assertEqual(incomplete, minato_protocol:decode(<<$C, 5:32>>, #{}))
+    ].

@@ -144,6 +144,128 @@ rejects_test_() ->
     ].
 
 %%----------------------------------------------------------------------
+%% Bounds
+%%----------------------------------------------------------------------
+
+an_exponent_outside_the_type_is_refused_before_anything_is_built_test_() ->
+    Huge = <<"1e", (binary:copy(~"9", 100000))/binary>>,
+    [
+        {
+            binary_to_list(Format) ++ " " ++ Label,
+            ?_assertError(
+                {minato_codec, #{type := numeric, reason := out_of_range}},
+                enc(Decimal, binary_to_existing_atom(Format))
+            )
+        }
+     || Format <- [~"binary", ~"text"],
+        {Label, Decimal} <- [
+            {"1e99999999999", ~"1e99999999999"},
+            {"1e-99999999999", ~"1e-99999999999"},
+            {"one digit past the integer limit", ~"1e131072"},
+            {"one digit past the scale limit", ~"1e-16384"},
+            {"an exponent too long to read", Huge}
+        ]
+    ].
+
+the_limits_themselves_encode_test_() ->
+    [
+        ?_assertEqual(<<1:16, 32767:16/signed, 0:16, 0:16, 1000:16>>, enc(~"1e131071", binary)),
+        ?_assertEqual(
+            <<1:16, -4096:16/signed, 0:16, 16383:16, 10:16>>, enc(~"1e-16383", binary)
+        ),
+        ?_assertEqual(131072, byte_size(enc(~"1e131071", text))),
+        ?_assertEqual(~"1000", roundtrip(~"1e0000000003", binary))
+    ].
+
+zero_is_zero_whatever_its_exponent_test_() ->
+    [
+        ?_assertEqual(~"0", roundtrip(~"0e99999999999", binary)),
+        ?_assertEqual(~"0", roundtrip(~"0e99999999999", text)),
+        ?_assertEqual(~"0", roundtrip(~"-0.000e99999999999", binary)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(~"0e-99999999999", binary)
+        )
+    ].
+
+the_largest_numeric_round_trips_test_() ->
+    Largest = <<
+        (binary:copy(~"9", 131072))/binary, $., (binary:copy(~"9", 16383))/binary
+    >>,
+    [
+        ?_assertEqual(Largest, roundtrip(Largest, binary)),
+        ?_assertEqual(<<$-, Largest/binary>>, roundtrip(<<$-, Largest/binary>>, binary)),
+        ?_assertEqual(Largest, roundtrip(Largest, text)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(<<$9, Largest/binary>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}}, enc(<<Largest/binary, $9>>, binary)
+        )
+    ].
+
+a_header_no_server_writes_is_refused_test_() ->
+    [
+        ?_assertError(
+            {minato_codec, #{reason := scale_out_of_range}},
+            minato_codec:decode(?NUMERIC, <<0:16, 0:16/signed, 0:16, 16384:16>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range, value := 10000}},
+            minato_codec:decode(?NUMERIC, <<1:16, 0:16/signed, 0:16, 0:16, 10000:16>>, binary)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<2:16, 1:16/signed, 0:16, 0:16, 1:16, 65535:16>>, binary
+            )
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<2:16, 0:16/signed, 0:16, 4:16, 1:16, 10000:16>>, binary
+            )
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, <<1:16, -1:16/signed, 0:16, 2:16, 10000:16>>, binary
+            )
+        )
+    ].
+
+%% The longest text a server writes is a sign, every digit it stores before
+%% the point, the point and every digit after it.
+a_numeric_in_text_is_no_longer_than_a_server_writes_one_test_() ->
+    Longest = <<
+        $-, (binary:copy(~"9", 131072))/binary, $., (binary:copy(~"9", 16383))/binary
+    >>,
+    [
+        ?_assertEqual(Longest, minato_codec:decode(?NUMERIC, Longest, text)),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}},
+            minato_codec:decode(?NUMERIC, <<Longest/binary, $9>>, text)
+        ),
+        ?_assertError(
+            {minato_codec, #{reason := out_of_range}},
+            minato_codec:decode(
+                ?NUMERIC, binary:copy(~"9", 1000000), text, #{numeric_format => float}
+            )
+        )
+    ].
+
+the_widest_header_decodes_to_a_bounded_value_test() ->
+    Wire = <<1:16, 32767:16/signed, 16#4000:16, 16383:16, 9999:16>>,
+    Decoded = minato_codec:decode(?NUMERIC, Wire, binary),
+    ?assertMatch(<<"-9999", _:(131072 - 4 + 1 + 16383)/binary>>, Decoded).
+
+a_numeric_too_large_for_a_float_is_a_codec_failure_test() ->
+    Wire = <<1:16, 100:16/signed, 0:16, 0:16, 1:16>>,
+    ?assertError(
+        {minato_codec, #{type := numeric, reason := not_a_float}},
+        minato_codec_numeric:decode(numeric, Wire, binary, #{numeric_format => float})
+    ).
+
+%%----------------------------------------------------------------------
 %% Values that need implied zero groups on either side of the point
 %%----------------------------------------------------------------------
 
@@ -178,3 +300,81 @@ a_float_form_keeps_the_specials_test() ->
 decoded(Value, Opts) ->
     Wire = iolist_to_binary(minato_codec_numeric:encode(numeric, Value, binary, #{})),
     minato_codec_numeric:decode(numeric, Wire, binary, Opts).
+
+%%----------------------------------------------------------------------
+%% Edges the cases above leave between them
+%%----------------------------------------------------------------------
+
+a_digit_out_of_range_is_named_wherever_it_stands_test_() ->
+    Refused = fun(Wire) ->
+        ?_assertError(
+            {minato_codec, #{reason := digit_out_of_range, value := 10000}},
+            minato_codec:decode(?NUMERIC, Wire, binary)
+        )
+    end,
+    [
+        {"a later group of the whole part",
+            Refused(<<2:16, 1:16/signed, 0:16, 0:16, 1:16, 10000:16>>)},
+        {"a whole group of the fraction",
+            Refused(<<2:16, 0:16/signed, 0:16, 4:16, 1:16, 10000:16>>)},
+        {"the last, partly shown group of the fraction",
+            Refused(<<1:16, -1:16/signed, 0:16, 2:16, 10000:16>>)}
+    ].
+
+the_largest_digit_is_read_wherever_it_stands_test_() ->
+    [
+        ?_assertEqual(
+            ~"19999",
+            minato_codec:decode(?NUMERIC, <<2:16, 1:16/signed, 0:16, 0:16, 1:16, 9999:16>>, binary)
+        ),
+        ?_assertEqual(
+            ~"0.9999",
+            minato_codec:decode(?NUMERIC, <<1:16, -1:16/signed, 0:16, 4:16, 9999:16>>, binary)
+        ),
+        ?_assertEqual(
+            ~"0.99",
+            minato_codec:decode(?NUMERIC, <<1:16, -1:16/signed, 0:16, 2:16, 9999:16>>, binary)
+        )
+    ].
+
+a_negative_sign_on_no_digits_is_zero_test() ->
+    ?assertEqual(
+        ~"0", minato_codec:decode(?NUMERIC, <<0:16, 0:16/signed, 16#4000:16, 0:16>>, binary)
+    ).
+
+an_exponent_of_zero_changes_nothing_test_() ->
+    [
+        {binary_to_list(Written), [
+            ?_assertEqual(enc(~"1", binary), enc(Written, binary)),
+            ?_assertEqual(~"1", roundtrip(Written, binary))
+        ]}
+     || Written <- [~"1e0", ~"1e00", ~"1E-0", ~"1e+0"]
+    ].
+
+zero_to_any_power_is_zero_test_() ->
+    [
+        {binary_to_list(Written), [
+            ?_assertEqual(enc(~"0", binary), enc(Written, binary)),
+            ?_assertEqual(~"0", roundtrip(Written, binary))
+        ]}
+     || Written <- [~"0e1", ~"0e5", ~"00e2"]
+    ].
+
+leading_zeros_are_not_digits_test_() ->
+    [
+        {binary_to_list(Written), ?_assertEqual(Plain, roundtrip(Written, binary))}
+     || {Written, Plain} <- [{~"007", ~"7"}, {~"000", ~"0"}, {~"00.5", ~"0.5"}, {~"0010e1", ~"100"}]
+    ] ++
+        [
+            {binary_to_list(Written), ?_assertEqual(Plain, enc(Written, text))}
+         || {Written, Plain} <- [
+                {~"007", ~"7"},
+                {~"000", ~"0"},
+                {~"00.5", ~"0.5"},
+                {~"0e5", ~"0"},
+                {~"0e1", ~"0"},
+                {~"1e2", ~"100"},
+                {~"1e0", ~"1"},
+                {~"-0.50", ~"-0.50"}
+            ]
+        ].

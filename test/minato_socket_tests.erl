@@ -47,6 +47,44 @@ the_machine_it_runs_on_decides_how_to_ask_test() ->
     ?assertNot(minato_socket:quiet(Client)),
     closed(Client, Server).
 
+a_v6_address_connects_and_carries_bytes_test_() ->
+    case gen_tcp:listen(0, [binary, inet6, {active, false}, {ip, {0, 0, 0, 0, 0, 0, 0, 1}}]) of
+        {ok, Listen} ->
+            [?_test(carried(Listen, {0, 0, 0, 0, 0, 0, 0, 1}))];
+        {error, _No_v6_loopback_here} ->
+            []
+    end.
+
+more_than_one_write_takes_is_all_sent_test_() ->
+    {timeout, 30, fun() ->
+        {Client, Server} = pair(),
+        Sent = binary:copy(~"minato", 2000000),
+        Parent = self(),
+        Reader = spawn_link(fun() ->
+            receive
+                {read, Socket} ->
+                    Parent ! {read, self(), gen_tcp:recv(Socket, byte_size(Sent), 20000)}
+            end
+        end),
+        ok = gen_tcp:controlling_process(Server, Reader),
+        Reader ! {read, Server},
+        ?assertEqual(ok, minato_socket:send(Client, [Sent], 20000)),
+        receive
+            {read, Reader, Read} -> ?assertEqual({ok, Sent}, Read)
+        after 20000 -> error(nothing_read)
+        end,
+        closed(Client, Server)
+    end}.
+
+carried(Listen, Address) ->
+    {ok, Port} = inet:port(Listen),
+    {ok, Client} = minato_socket:connect(Address, Port, [], 5000),
+    {ok, Server} = gen_tcp:accept(Listen, 5000),
+    ok = gen_tcp:close(Listen),
+    ok = minato_socket:send(Client, ~"over v6"),
+    ?assertEqual({ok, ~"over v6"}, gen_tcp:recv(Server, 7, 5000)),
+    closed(Client, Server).
+
 pair() ->
     {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]),
     {ok, Port} = inet:port(Listen),

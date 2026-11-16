@@ -18,9 +18,9 @@ Spans are `telemetry:span/3` shaped - `start`, then `stop` or `exception` - and
 | `[minato, connect, start]` | `system_time`, `monotonic_time` | `host`, `port`, `database`, `user`, `ssl` |
 | `[minato, connect, stop]` | `duration`, `monotonic_time` | the above, plus `outcome`, and `reason` when it failed |
 | `[minato, connect, exception]` | `duration` | the above, plus `kind`, `reason`, `stacktrace` |
-| `[minato, query, start]` | `system_time`, `monotonic_time` | `path` (`simple`, `unnamed` or `cached`), `sql` when enabled |
-| `[minato, query, stop]` | `duration`, `monotonic_time` | `outcome`, and `command` and `num_rows` when it worked, `reason` when it did not |
-| `[minato, query, exception]` | `duration` | `kind`, `reason`, `stacktrace` |
+| `[minato, query, start]` | `system_time`, `monotonic_time` | `host`, `port`, `database`, `pool` when a pool holds the connection, `path` (`simple`, `unnamed`, `cached` or `prepared`), `sql` when enabled |
+| `[minato, query, stop]` | `duration`, `monotonic_time` | `host`, `port`, `database`, `pool`, `path`, `outcome`, and `command` and `num_rows` when it worked, `reason` when it did not |
+| `[minato, query, exception]` | `duration` | what `start` carried, plus `kind`, `reason`, `stacktrace` |
 | `[minato, checkout, start]` | `system_time`, `monotonic_time` | `pool` |
 | `[minato, checkout, stop]` | `duration`, `monotonic_time` | `pool`, `outcome`, `reason` |
 | `[minato, connection, opened]` | `system_time` | `pool` |
@@ -37,8 +37,26 @@ with completely different fixes that look identical in a query latency graph.
 
 ## What is never emitted
 
-- **Parameters.** Not in an event, not in a log, not in any configuration. They
-  are the values themselves: the email address, the token, the amount.
+- **Parameters.** Not in an event and not in a log. They are the values
+  themselves: the email address, the token, the amount. The one way to see one
+  is `log_values` below, and then only one that came back inside a failure.
+- **Values inside a failure, unless you ask.** A failed statement's `reason`
+  keeps the fields of the server's error that name things (`code`,
+  `severity`, `severity_non_localised`, `constraint`, `schema`, `table`,
+  `column`, `data_type`, `routine`) and drops `message`, `detail`, `hint` and
+  the rest, which quote the row that broke a constraint or the input that would
+  not parse. A parameter that would not encode raises `{minato_codec, #{type :=
+  _, reason := _, value := redacted}}`, in the event and to the caller alike,
+  because an uncaught raise ends up in a crash report. Frames in an event's
+  `stacktrace` carry an arity, never arguments. The caller is still returned
+  the whole `{error, {pgsql_error, Fields}}`. To have all of it in events and
+  raises, on a development node or during an incident:
+
+  ```erlang
+  {minato, [{log_values, true}]}
+  ```
+
+  Read per call, like `log_statements`.
 - **Passwords.** They are used during authentication and never stored on the
   connection, so there is nothing to leak later. A password given as a
   `fun(() -> binary())` is called once per attempt and the result is not kept.
@@ -78,11 +96,11 @@ otherwise see:
 
 | level | event | why it is worth a line |
 | --- | --- | --- |
-| warning | `connect_failed` | a pool could not open a connection; carries `reason` and `retry_in_ms` |
+| warning | `connect_failed` | a pool could not open a connection; carries `retry_in_ms` and a `reason` that names the refusal: a server's error by the fields that name things, as in `[minato, query, stop]`, and an authentication failure by its kind, without the text or the list the server sent with it |
 | warning | `session_reset_failed` | a checkout closed a connection whose reset did not answer as sent: `reason` is `unread_answer` when the last borrower gave it back with answers unread, `sql_prepared_statement` when it left a statement prepared with SQL `PREPARE`, `in_transaction` or `failed` when the reset ended inside a transaction, otherwise the server's refusal by SQLSTATE `code` |
 | warning | `listener_resubscribed` | a listener reconnected, which means notifications were missed - `NOTIFY` has no replay |
-| info | `cached_plan_invalidated` | a schema change made PostgreSQL refuse a cached statement; minato recovered, but somebody ran a migration |
-| info | `cached_statement_deallocated` | something on the session ran a SQL `DEALLOCATE` of a statement minato had cached; outside a transaction minato parsed it again |
+| info | `cached_plan_invalidated` | a schema change left a cached statement with a result or parameters the table no longer has; minato parsed it again, but somebody ran a migration |
+| info | `cached_statement_deallocated` | the server no longer had a statement minato had cached, because something on the session ran a SQL `DEALLOCATE` or a pooler handed the client another backend; outside a transaction minato parsed it again |
 
 Failures a caller can act on are **returned, not logged**. A statement with a
 syntax error comes back as `{error, {pgsql_error, _}}` and stays out of the log,
@@ -108,23 +126,149 @@ counted separately because one is a problem and the other is the pool working.
 
 ## Traces
 
-The spans above are already the shape OpenTelemetry wants, so a bridge is a few
-lines rather than a package:
+The spans above are already the shape OpenTelemetry wants, so a bridge is one
+module rather than a package. `opentelemetry_telemetry` keeps the span that a
+`start` opened under the `telemetry_span_context` every event of the span
+carries, and hands it back at `stop` or `exception`.
+
+This is `test/minato_traces.erl` from the repository, whole. It is there, and
+not in `src`, so that minato does not depend on OpenTelemetry; it is compiled
+with the tests and `minato_traces_SUITE` runs it against the OpenTelemetry SDK
+and a real server, and a test fails if this page and that file differ. Copy it
+into your application under a name of your own:
 
 ```erlang
-%% needs opentelemetry_telemetry
-Spans = [[minato, connect], [minato, query], [minato, checkout]],
-_ = [
-    otel_telemetry:handle_span(Span, #{tracer_id => minato})
- || Span <- Spans
-].
+-module(minato_traces).
+-moduledoc """
+minato's `telemetry` spans as OpenTelemetry spans.
+
+`attach/0` once, after `opentelemetry` has started. A statement, the checkout
+it waited on and the connect behind a new connection each become a span, named
+and described as the OpenTelemetry conventions for a database client ask. A
+statement and its checkout run in the caller's process, so they are children
+of whatever span the caller has open.
+
+Needs `opentelemetry_api` and `opentelemetry_telemetry`.
+""".
+
+-export([attach/0, detach/0, handle/4]).
+
+-include_lib("opentelemetry_api/include/opentelemetry.hrl").
+
+-define(HANDLER, ~"minato-traces").
+-define(ATTRIBUTES, [
+    {database, 'db.namespace'},
+    {port, 'server.port'},
+    {pool, 'db.client.connection.pool.name'},
+    {sql, 'db.query.text'}
+]).
+
+-spec attach() -> ok | {error, already_exists}.
+attach() ->
+    telemetry:attach_many(
+        ?HANDLER,
+        [
+            [minato, Span, Stage]
+         || Span <- [connect, query, checkout], Stage <- [start, stop, exception]
+        ],
+        fun ?MODULE:handle/4,
+        undefined
+    ).
+
+-spec detach() -> ok | {error, not_found}.
+detach() ->
+    telemetry:detach(?HANDLER).
+
+-spec handle([atom()], map(), map(), term()) -> ok.
+handle([minato, Span, start], _Measurements, Metadata, _Config) ->
+    _ = otel_telemetry:start_telemetry_span(?MODULE, name(Span, Metadata), Metadata, #{
+        kind => kind(Span), attributes => attributes(Metadata)
+    }),
+    ok;
+handle([minato, _Span, _Ended], _Measurements, Metadata, _Config) ->
+    Ctx = otel_telemetry:set_current_telemetry_span(?MODULE, Metadata),
+    _ = ended(Ctx, Metadata),
+    otel_telemetry:end_telemetry_span(?MODULE, Metadata).
+
+%% The statement is not known to be a SELECT until it has been answered, so a
+%% query span starts under the name of its database and is renamed here.
+ended(Ctx, #{outcome := ok, command := Command, database := Database}) ->
+    Operation = iolist_to_binary(string:uppercase(operation(Command))),
+    _ = otel_span:update_name(Ctx, <<Operation/binary, " ", Database/binary>>),
+    otel_span:set_attributes(Ctx, #{'db.operation.name' => Operation});
+ended(Ctx, #{reason := Reason}) ->
+    _ = otel_span:set_attributes(Ctx, failure(Reason)),
+    otel_span:set_status(Ctx, ?OTEL_STATUS_ERROR);
+ended(_Ctx, _Metadata) ->
+    true.
+
+name(query, #{database := Database}) -> Database;
+name(connect, _Metadata) -> ~"minato connect";
+name(checkout, _Metadata) -> ~"minato checkout".
+
+kind(checkout) -> ?SPAN_KIND_INTERNAL;
+kind(_Span) -> ?SPAN_KIND_CLIENT.
+
+attributes(Metadata) ->
+    Named =
+        #{Name => Value || {Key, Name} <- ?ATTRIBUTES, {ok, Value} <- [maps:find(Key, Metadata)]},
+    addressed(Named#{'db.system.name' => ~"postgresql"}, Metadata).
+
+addressed(Attributes, #{host := {local, _Path}}) ->
+    Attributes;
+addressed(Attributes, #{host := Host}) when is_tuple(Host) ->
+    case inet:ntoa(Host) of
+        {error, einval} -> Attributes;
+        Address -> Attributes#{'server.address' => list_to_binary(Address)}
+    end;
+addressed(Attributes, #{host := Host}) when is_atom(Host) ->
+    Attributes#{'server.address' => atom_to_binary(Host)};
+addressed(Attributes, #{host := Host}) ->
+    Attributes#{'server.address' => unicode:characters_to_binary(Host)};
+addressed(Attributes, _Metadata) ->
+    Attributes.
+
+operation(Command) when is_atom(Command) -> atom_to_binary(Command);
+operation(Command) when is_binary(Command) -> Command.
+
+%% A server's refusal is known by its SQLSTATE. Anything else is known by what
+%% kind of thing it is, never by its text, which can quote a value.
+failure({pgsql_error, #{code := Code}}) ->
+    #{'db.response.status_code' => Code, 'error.type' => Code};
+failure({Kind, _Detail}) when is_atom(Kind) ->
+    #{'error.type' => Kind};
+failure(Reason) when is_atom(Reason) ->
+    #{'error.type' => Reason};
+failure(_Reason) ->
+    #{'error.type' => '_OTHER'}.
 ```
+
+What comes out, per statement:
+
+| | |
+| --- | --- |
+| name | `SELECT minato_test`: the command and the database, once the statement has been answered; the database alone for one that failed |
+| kind | `client`; `internal` for `minato checkout` |
+| parent | the span open in the calling process, for a statement and its checkout |
+| `db.system.name` | `postgresql` |
+| `db.namespace` | the database |
+| `db.operation.name` | `SELECT`, `INSERT` and so on, when it was answered |
+| `server.address`, `server.port` | as the connection was asked to connect |
+| `db.client.connection.pool.name` | the pool, when one holds the connection |
+| `db.query.text` | the statement, only under `log_statements` |
+| `db.response.status_code`, `error.type` | the SQLSTATE of a statement the server refused, with the span's status set to error |
+| `error.type` | for anything else that failed, what kind of failure: `socket`, `minato_codec` |
+
+No parameter and no row is in a span, and neither is the text of an error,
+for the reasons under [What is never emitted](#what-is-never-emitted).
 
 A `[minato, query]` span nested inside an application span is the picture worth
 having: the request, the checkout it waited on, and the statement it ran, with
 the gap between them visible. `[minato, checkout]` is what makes that picture
 useful, because a request that spent 40 ms waiting for a connection and 2 ms
-querying looks exactly like the reverse until the two are separate spans.
+querying looks exactly like the reverse until the two are separate spans. A
+`minato connect` span is made in the pool's process, where no request is, so
+it starts a trace of its own unless the application connects itself.
 
 ## Health
 

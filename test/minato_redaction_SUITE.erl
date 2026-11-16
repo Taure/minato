@@ -1,14 +1,16 @@
 -module(minato_redaction_SUITE).
 -moduledoc """
-A password given as a binary, and a private key in `ssl_options`, against a real
+A password given as a binary, and secrets in `ssl_options`, against a real
 PostgreSQL that accepts the password.
 
 `minato_secret_tests` covers what the supervisor prints for a pool that never
 connects. This covers the processes that hold live connections: a connected
 pool and listener, a borrower that crashes holding a connection, a pool killed
 while its connections are open, and a pool and listener that reconnect after a
-hot upgrade of the module that sealed their secrets. The connections are plain,
-so the key is carried in the options without being used.
+hot upgrade of the module that sealed their secrets. The connections are TLS,
+because `ssl_options` without it are refused, and the secrets in them are ones
+the handshake carries and never uses: the password of a key file there is
+none of, and an SRP identity for a suite that is not offered.
 
 The role is created here with a password nothing else uses, so a match in any
 report can only be the leak under test. Skips when no server answers.
@@ -28,7 +30,7 @@ report can only be the leak under test. Skips when no server answers.
 
 -define(TIMEOUT, 10000).
 -define(PROBE, ~"s3cr3t-minato-probe").
--define(KEY, ~"s3cr3t-minato-key-der").
+-define(KEY, ~"s3cr3t-minato-srp-identity").
 -define(ROLE, ~"minato_redaction_probe").
 -define(POOL, minato_redaction_pool).
 -define(LISTENER, minato_redaction_listener).
@@ -263,7 +265,21 @@ drained(Logged) ->
     end.
 
 leaking(Logged) ->
-    [Event || Event <- Logged, holds(Event) orelse holds(formatted(Event))].
+    [
+        Event
+     || Event <- Logged, not from_tls(Event), holds(Event) orelse holds(formatted(Event))
+    ].
+
+%% What `ssl` reports about a connection it was asked for is not minato's to
+%% keep quiet. On OTP 28 the supervisor of a TLS connection prints the options
+%% the connection was started with, an `srp_identity` among them.
+from_tls(#{msg := {report, #{label := {supervisor, progress}, report := Report}}}) ->
+    case lists:keyfind(supervisor, 1, Report) of
+        {supervisor, {_Pid, tls_dyn_connection_sup}} -> true;
+        _Other -> false
+    end;
+from_tls(_Event) ->
+    false.
 
 formatted(Event) ->
     logger_formatter:format(Event, #{single_line => true, max_size => unlimited, depth => unlimited}).
@@ -295,18 +311,36 @@ connection() ->
     (admin())#{
         user => ?ROLE,
         password => ?PROBE,
-        ssl_options => [{key, {'RSAPrivateKey', ?KEY}}, {password, ?PROBE}]
+        ssl_options => [
+            {srp_identity, {"minato", binary_to_list(?KEY)}}, {password, ?PROBE} | trusted()
+        ]
     }.
 
 admin() ->
     #{
-        host => env("MINATO_PG_HOST", "127.0.0.1"),
-        port => list_to_integer(env("MINATO_PG_PORT", "55432")),
+        host => env("MINATO_TLS_HOST", "localhost"),
+        port => list_to_integer(env("MINATO_TLS_PORT", "55433")),
         user => list_to_binary(env("MINATO_PG_USER", "minato")),
         password => list_to_binary(env("MINATO_PG_PASSWORD", "minato")),
         database => list_to_binary(env("MINATO_PG_DATABASE", "minato_test")),
+        ssl => true,
+        ssl_options => trusted(),
         timeout => ?TIMEOUT
     }.
+
+trusted() ->
+    Directory = code:lib_dir(minato),
+    case file:read_file(filename:join([directory(Directory), "test", "certs", "ca.crt"])) of
+        {ok, Pem} ->
+            [{cacerts, [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)]}];
+        {error, _Missing} ->
+            []
+    end.
+
+directory({error, Reason}) ->
+    error({no_application_directory, Reason});
+directory(Directory) ->
+    Directory.
 
 env(Name, Default) ->
     case os:getenv(Name) of

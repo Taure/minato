@@ -37,6 +37,53 @@ startup_carries_every_parameter_test() ->
         minato_frontend_reader:read(enc({startup, Parameters}))
     ).
 
+a_startup_parameter_cannot_end_early_test_() ->
+    Smuggled = <<"minato", 0, "options", 0, "-c session_preload_libraries=x">>,
+    [
+        ?_assertError(
+            {minato_protocol, #{
+                message := startup, reason := null_byte_in_parameter, data := ~"user"
+            }},
+            minato_protocol:encode({startup, #{~"user" => Smuggled}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := null_byte_in_parameter, data := ~"database"}},
+            minato_protocol:encode({startup, #{~"user" => ~"minato", ~"database" => <<0>>}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := null_byte_in_parameter}},
+            minato_protocol:encode({startup, #{<<"us", 0, "er">> => ~"minato"}})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := empty_parameter_name}},
+            minato_protocol:encode({startup, #{~"" => ~"minato"}})
+        )
+    ].
+
+a_name_or_a_statement_cannot_end_early_test_() ->
+    Cut = <<"SELECT 1", 0, "; DROP TABLE t">>,
+    [
+        ?_assertError(
+            {minato_protocol, #{message := Message, reason := null_byte, data := Field}},
+            minato_protocol:encode(Sent)
+        )
+     || {Message, Field, Sent} <- [
+            {query, query, {query, Cut}},
+            {query, query, {query, [~"SELECT ", [<<0>>], ~"1"]}},
+            {parse, name, {parse, <<"s", 0>>, ~"SELECT 1", []}},
+            {parse, query, {parse, ~"s", Cut, []}},
+            {bind, portal, {bind, <<0, "p">>, ~"s", [], [], []}},
+            {bind, statement, {bind, ~"", <<"s", 0, "t">>, [], [], []}},
+            {describe, name, {describe, statement, <<"s", 0>>}},
+            {execute, portal, {execute, <<"p", 0>>, 0}},
+            {close, name, {close, portal, <<0>>}}
+        ]
+    ].
+
+a_null_byte_in_a_parameter_value_is_only_a_byte_test() ->
+    Bind = {bind, ~"", ~"s", [binary], [<<1, 0, 2>>], [binary]},
+    ?assertEqual(Bind, minato_frontend_reader:read(enc(Bind))).
+
 ssl_request_test() ->
     ?assertEqual(<<0, 0, 0, 8, 4, 210, 22, 47>>, enc(ssl_request)).
 
@@ -205,4 +252,74 @@ samples() ->
         {close, statement, ~"s1"},
         {close, portal, ~"p1"},
         terminate
+    ].
+
+%%----------------------------------------------------------------------
+%% Lengths and counts that do not fit their field
+%%----------------------------------------------------------------------
+
+%% The same 16 MiB binary many times over is iodata of any size that costs 16 MiB
+%% to hold, and an encoder that only measures it never builds the whole.
+sized(Bytes) ->
+    Chunk = binary:copy(~"a", 16#1000000),
+    [lists:duplicate(Bytes div 16#1000000, Chunk), binary:part(Chunk, 0, Bytes rem 16#1000000)].
+
+the_longest_message_postgresql_accepts_is_encoded_test() ->
+    [Header | _Payload] = minato_protocol:encode({query, sized(16#3FFFFFFF - 5)}),
+    ?assertEqual(<<$Q, 16#3FFFFFFF:32>>, Header).
+
+a_message_one_byte_longer_is_refused_test() ->
+    ?assertError(
+        {minato_protocol, #{
+            message := frontend,
+            reason := message_too_long,
+            data := {$Q, 16#40000000, 16#3FFFFFFF}
+        }},
+        minato_protocol:encode({query, sized(16#3FFFFFFF - 4)})
+    ).
+
+a_parameter_that_would_wrap_its_length_is_refused_test_() ->
+    Wrapping = sized(16#100000000 + 5),
+    [
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({bind, ~"", ~"", [binary], [Wrapping], [binary]})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({bind, ~"", ~"", [binary], [~"a", Wrapping, null], []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({parse, ~"", Wrapping, []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({password, Wrapping})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := message_too_long}},
+            minato_protocol:encode({sasl_initial_response, ~"SCRAM-SHA-256", Wrapping})
+        )
+    ].
+
+a_count_that_would_wrap_is_refused_test_() ->
+    Most = [null || _ <- lists:seq(1, 65535)],
+    [
+        ?_assertMatch(
+            <<$B, _:32, 0, 0, 0:16, 65535:16, _/binary>>,
+            enc({bind, ~"", ~"", [], Most, []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values, data := {65536, 65535}}},
+            minato_protocol:encode({bind, ~"", ~"", [], [null | Most], []})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values}},
+            minato_protocol:encode({parse, ~"", ~"SELECT 1", [23 || _ <- lists:seq(1, 65536)]})
+        ),
+        ?_assertError(
+            {minato_protocol, #{reason := too_many_values}},
+            minato_protocol:encode({bind, ~"", ~"", [], [], [binary || _ <- lists:seq(1, 65536)]})
+        )
     ].

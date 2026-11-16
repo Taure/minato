@@ -134,10 +134,12 @@ them without decoding.
 a map keyed by column name. `column_name_as_atom` defaults to `false` and only
 affects those map keys.
 
-`column_name_as_atom` is off by default because a column name is not always
-something the application wrote. A query built at run time can alias a column
-after a value, and every distinct alias would then make an atom that is never
-collected. Turn it on for queries whose column names you chose.
+`column_name_as_atom` never makes an atom. The server chooses the names in a
+row description, and an atom is never collected, so a key is an atom only for
+a name that is one already on this node, and the binary the server sent for
+any other. The names a caller matches on are atoms because the calling module
+mentions them. A column aliased at run time, or one the code never names, comes
+back under a binary key.
 
 `uuid_format`, `datetime_format` and `numeric_format` are passed through to
 `m:minato_codec` unchanged.
@@ -285,8 +287,12 @@ The second element is a row count for the tags that carry one, and an atom
 otherwise: `undefined` where there is nothing to count, as in `{'begin',
 undefined}`, and the object acted on for a tag that names one, as in `{create,
 table}`.
+
+Every atom comes from a table of PostgreSQL's own tag words. A word that is not
+in it is left as the binary the server sent, so a server with tags of its own
+answers `{~"FROBNICATE", 3}` rather than making an atom.
 """.
--type tag() :: {atom(), non_neg_integer() | atom()}.
+-type tag() :: {atom() | binary(), non_neg_integer() | atom() | binary()}.
 
 -doc "A row returned under `return_rows_as_maps`, keyed by column name.".
 -type row_map() :: #{atom() | binary() => minato_codec:value()}.
@@ -297,11 +303,16 @@ table}`.
 -doc "One decoded row, a tuple by default and a `t:row_map/0` under `return_rows_as_maps`.".
 -type row() :: tuple() | row_map().
 
--doc "Everything a completed query produced.".
+-doc """
+Everything a completed query produced.
+
+`command` and `num_rows` are the two halves of `t:tag/0`, so `command` is an
+atom for every tag PostgreSQL has and a binary for one it does not.
+""".
 -type result() :: #{
-    command := atom(),
+    command := atom() | binary(),
     rows := [row()],
-    num_rows := non_neg_integer() | atom()
+    num_rows := non_neg_integer() | atom() | binary()
 }.
 
 -doc "Decode-time options. See the module documentation.".
@@ -364,6 +375,10 @@ Encoding is total for every well formed message and raises `function_clause` on
 anything else, because a frontend message is built by minato itself and a term
 that does not fit is a mistake in the calling code rather than something the
 network did.
+
+A message too long for its length field, or with more values than its count
+field holds, raises `error({minato_protocol, t:report/0})` instead of being
+written with the field wrapped. See `m:minato_protocol_frontend`.
 """.
 -spec encode(frontend()) -> iodata().
 encode(Message) ->
@@ -582,7 +597,7 @@ raw(Remaining, <<-1:32/signed, Rest/binary>>) when Remaining > 0 ->
 raw(Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0, Length >= 0 ->
     {Value, Tail} = cut(Length, Rest),
     [Value | raw(Remaining - 1, Tail)];
-raw(_Remaining, <<Length:32/signed, _Rest/binary>>) ->
+raw(Remaining, <<Length:32/signed, _Rest/binary>>) when Remaining > 0, Length < -1 ->
     bad(data_row, {negative_column_length, Length}, Length);
 raw(_Remaining, Payload) ->
     bad(data_row, malformed, Payload).
@@ -609,10 +624,12 @@ decoded_tuple(
 ->
     [minato_codec:decode(Decoder, Value) | decoded_tuple(Columns, Remaining - 1, Rest)];
 decoded_tuple(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>) when
-    Remaining > 0, Length < 0
+    Remaining > 0, Length < -1
 ->
     bad(data_row, {negative_column_length, Length}, Length);
-decoded_tuple(_Columns, Remaining, <<Length:32/signed, Rest/binary>>) when Remaining > 0 ->
+decoded_tuple([_Column | _Columns], Remaining, <<Length:32/signed, Rest/binary>>) when
+    Remaining > 0
+->
     bad(data_row, column_longer_than_the_message, {Length, byte_size(Rest)});
 decoded_tuple(Columns, Remaining, _Payload) ->
     bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
@@ -636,10 +653,12 @@ decoded_map(
 ->
     decoded_map(Columns, Remaining - 1, Rest, Row#{Key => minato_codec:decode(Decoder, Value)});
 decoded_map(_Columns, Remaining, <<Length:32/signed, _Rest/binary>>, _Row) when
-    Remaining > 0, Length < 0
+    Remaining > 0, Length < -1
 ->
     bad(data_row, {negative_column_length, Length}, Length);
-decoded_map(_Columns, Remaining, <<Length:32/signed, Rest/binary>>, _Row) when Remaining > 0 ->
+decoded_map([_Column | _Columns], Remaining, <<Length:32/signed, Rest/binary>>, _Row) when
+    Remaining > 0
+->
     bad(data_row, column_longer_than_the_message, {Length, byte_size(Rest)});
 decoded_map(Columns, Remaining, _Payload, _Row) ->
     bad(data_row, column_count_mismatch, {length(Columns), Remaining}).
@@ -769,10 +788,18 @@ remainder(Rest, BufferSize) when
 remainder(Rest, _BufferSize) ->
     Rest.
 
+%% The server chooses the names in a `RowDescription`, so none of them is made
+%% an atom here: a name that is one already is found, and any other stays the
+%% binary it arrived as.
 -spec key(field(), boolean()) -> atom() | binary().
-% elp:ignore W0023 - opt in, and the caller is told what it costs
-key(#{name := Name}, true) -> binary_to_atom(Name, utf8);
-key(#{name := Name}, false) -> Name.
+key(#{name := Name}, true) ->
+    try
+        binary_to_existing_atom(Name, utf8)
+    catch
+        error:badarg -> Name
+    end;
+key(#{name := Name}, false) ->
+    Name.
 
 -spec codec_opts(opts()) -> minato_codec:opts().
 codec_opts(Opts) ->

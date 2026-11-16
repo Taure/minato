@@ -28,6 +28,9 @@ time, where every one of these numbers converges on the network.
   `pgo` has no simple path.
 - `unnamed` - the extended protocol with nothing kept: parse, describe, bind,
   execute, sync, every time. `pgo` caches statements and cannot be asked not to.
+- `first_use` - `minato_query:cached/4` on a statement the connection has not
+  seen, a different one each time: what keeping a statement costs before it
+  pays. Two round trips. minato only.
 - `cached` - the same statement kept per connection, which is what every client
   here does by default. **This is the comparison that matters**, and every row
   below it is run the same way.

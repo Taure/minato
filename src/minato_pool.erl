@@ -24,8 +24,15 @@ what that will replace, and it is honest in the meantime.
 
 Connecting happens in the background and is retried with exponential backoff, so
 a pool started before its database is a pool that fills up when the database
-arrives rather than a supervisor that gives up. `checkout/2` waits for that
+arrives rather than a supervisor that gives up. Each wait is a random time in
+the upper half of what the backoff allows, so the pools of many nodes do not
+return to a restarted database at the same instant. `checkout/2` waits for that
 exactly as it waits for a busy connection.
+
+Nothing is opened during a wait, whoever asks: a caller that arrives then is
+queued and served by the connect the wait ends in. While connects are failing
+there is one in flight at a time, so a database that is down, or coming back,
+is asked as often as the backoff says and not as often as callers arrive.
 
 A borrower that dies takes the socket with it, because the socket belongs to the
 process that holds it: the pool notices through its monitor and starts a
@@ -84,8 +91,8 @@ followed by `Sync` are sent ahead of the reset, so the reset's own `Sync` can
 commit them. Discard a connection given back like that.
 
 The pool writes the reset itself, and `minato_conn:close/1` writes `Terminate`.
-Both wait as long as the connection's `send_timeout` allows, which is forever by
-default, so set it when a server may stop reading.
+Both wait as long as the connection's `send_timeout` allows, which is the
+connection's `timeout` unless `socket_options` says otherwise.
 """.
 
 -behaviour(gen_server).
@@ -101,6 +108,7 @@ default, so set it when a server may stop reading.
     stats/1
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
+-export([limit/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -111,8 +119,10 @@ default, so set it when a server may stop reading.
 -define(DEFAULT_DISCONNECTED, fail).
 -define(IS_TIMEOUT(T), (T =:= infinity orelse (is_integer(T) andalso T >= 0))).
 -define(CROWDED_SHARE, 4).
+-define(LONGEST_LIMIT, 10).
 -define(SWEEP_INTERVAL, 5000).
 -define(DEFAULT_CHECKOUT_TIMEOUT, 5000).
+-define(OPTIONS, [connection, disconnected, max_age, max_idle, min_size, size]).
 -define(MINIMUM_BACKOFF, 100).
 -define(MAXIMUM_BACKOFF, 30000).
 -define(RESET,
@@ -156,6 +166,7 @@ default, so set it when a server may stop reading.
     connecting = 0 :: non_neg_integer(),
     connectors = #{} :: #{reference() => pid()},
     backoff = ?MINIMUM_BACKOFF :: pos_integer(),
+    retry = undefined :: reference() | undefined,
     counters :: counters:counters_ref()
 }).
 
@@ -180,6 +191,11 @@ with twenty pools does not want a hundred connections the moment it boots, while
 a pool that cannot connect at all still says so at start up rather than at the
 first query. `0` opens nothing until asked.
 
+Every caller waiting has a connection on its way while the pool is below
+`size`: one is opened for each, side by side, and never more than `size` allows.
+While the last attempt to connect failed there is one attempt at a time however
+many are waiting, so a server that is down is not asked `size` times over.
+
 A `size` that is not a positive integer, or a `min_size` that is not a
 non-negative integer, stops the pool before it connects, and `start_link/2`
 returns `{error, {invalid_size, Size}}` or `{error, {invalid_min_size, MinSize}}`.
@@ -188,7 +204,14 @@ A `min_size` above `size` is lowered to `size`. `max_idle` and `max_age` must be
 pool stops the same way with `{invalid_max_idle, _}`, `{invalid_max_age, _}` or
 `{invalid_disconnected, _}`. A `connection` that is missing, not a map, or has no
 `user` stops it with `invalid_connection`, and options that are not a map with
-`invalid_opts`. None of these reasons carries the options.
+`invalid_opts`. A `connection` whose `channel_binding`, `ssl`, `auth`,
+`ssl_options` or `password` is not something minato knows, or whose
+`connect_timeout`, `timeout` or `cancel_timeout` is not a time, stops it with
+`{invalid_option, Key}`, as `minato_conn:validate/1` answers, so a pool that
+could not be secured as asked does not start and retry. So does a key that is
+not an option at all, here or in `connection`. None of these reasons carries
+the options, and a key that is not an atom is not named in one:
+`{invalid_option, not_an_atom}`.
 
 The options are also the pool's child spec under `minato_sup`, and a supervisor
 prints its child specs: in its progress report when the pool starts, when a
@@ -277,6 +300,7 @@ separate because one of them is a problem and the other is the pool working.
 
 -type info() ::
     {connected, minato_conn:conn()}
+    | {server_limit, non_neg_integer() | unknown}
     | {connect_failed, term()}
     | retry
     | sweep
@@ -325,10 +349,22 @@ checked_out(Name, Deadline) ->
 checked_out(Name, Deadline, Left) ->
     case waited(Name, Deadline) of
         {ok, Conn, Expected, Size} ->
-            Answer = cleared(Conn, read_timeout(Conn, Deadline), Expected, false),
+            Answer = answered(Conn, read_timeout(Conn, Deadline), Expected),
             ready(Name, Deadline, attempts(Left, Size), Conn, Answer);
         {error, Reason} ->
             {error, Reason}
+    end.
+
+%% The pool has lent the connection by now and is watching the caller, so a
+%% raise here would leave it lent for as long as a caller that caught the raise
+%% lived. Bytes that are not a message are a connection that is gone.
+-spec answered(minato_conn:conn(), timeout(), [expected()]) -> cleared().
+answered(Conn, Timeout, Expected) ->
+    try cleared(minato_conn:giving_up_after(Conn, Timeout), Timeout, Expected, false) of
+        {ok, Reset} -> {ok, minato_conn:deadline(Reset, infinity)};
+        Unusable -> Unusable
+    catch
+        error:{minato_protocol, #{reason := Why}} -> {lost, {minato_protocol, Why}}
     end.
 
 %% Every connection in the pool may have been left dirty or have died while it
@@ -425,7 +461,8 @@ narrowed(Reported) ->
     {pgsql_error, maps:with([code], Reported)}.
 
 %% The reset answers in one round trip, so it gets no longer than any other read
-%% on the connection, whatever the checkout allows.
+%% on the connection, whatever the checkout allows, and gets it once: for the
+%% whole answer, not for each read of one that does not end.
 -spec read_timeout(minato_conn:conn(), integer() | infinity) -> timeout().
 read_timeout(Conn, Deadline) ->
     case {remaining(Deadline), minato_conn:timeout(Conn)} of
@@ -587,7 +624,8 @@ call(Name, Message, Timeout) ->
     | {invalid_min_size, term()}
     | {invalid_max_idle, term()}
     | {invalid_max_age, term()}
-    | {invalid_disconnected, term()}.
+    | {invalid_disconnected, term()}
+    | {invalid_option, atom()}.
 
 -type settings() :: {pos_integer(), non_neg_integer(), timeout(), timeout(), fail | wait}.
 
@@ -595,9 +633,10 @@ call(Name, Message, Timeout) ->
 %% carries the options themselves: they hold the password.
 -spec init({name(), dynamic()}) -> {ok, #state{}} | {stop, refused()}.
 init({Name, #{connection := #{user := _} = Connection} = Opts}) ->
-    case checked(Opts) of
-        {ok, Settings} -> started(Name, Connection, Settings);
-        {refused, Reason} -> {stop, Reason}
+    case {checked(Opts), minato_conn:validate(Connection)} of
+        {{ok, Settings}, ok} -> started(Name, Connection, Settings);
+        {{refused, Reason}, _Connection} -> {stop, Reason};
+        {_Settings, {error, Reason}} -> {stop, Reason}
     end;
 init({_Name, Opts}) when is_map(Opts) ->
     {stop, invalid_connection};
@@ -606,6 +645,14 @@ init({_Name, _Opts}) ->
 
 -spec checked(opts()) -> {ok, settings()} | {refused, refused()}.
 checked(Opts) ->
+    case lists:sort(maps:keys(Opts)) -- ?OPTIONS of
+        [] -> settings(Opts);
+        [Key | _Others] when is_atom(Key) -> {refused, {invalid_option, Key}};
+        [_NotAnAtom | _Others] -> {refused, {invalid_option, not_an_atom}}
+    end.
+
+-spec settings(opts()) -> {ok, settings()} | {refused, refused()}.
+settings(Opts) ->
     Settings = {
         maps:get(size, Opts, ?DEFAULT_SIZE),
         maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
@@ -641,8 +688,21 @@ started(Name, Connection, {Size, MinSize, MaxIdle, MaxAge, Disconnected}) ->
         max_age = MaxAge,
         counters = counters:new(?COUNTERS, [write_concurrency])
     },
+    ok = unencrypted(Name, minato_conn:in_the_clear(Connection)),
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, fill(State)}.
+
+%% Once per start. `ssl => false` written out is a decision and is not second
+%% guessed; `ssl` left out towards another machine is more often an omission.
+-spec unencrypted(name(), {true, inet:socket_address() | inet:hostname()} | false) -> ok.
+unencrypted(Name, {true, Host}) ->
+    _ = ?LOG_WARNING(
+        #{event => unencrypted_connection, pool => Name, host => Host},
+        #{domain => [minato]}
+    ),
+    ok;
+unencrypted(_Name, false) ->
+    ok.
 
 -doc false.
 -spec format_status(gen_server:format_status()) -> gen_server:format_status().
@@ -707,24 +767,22 @@ handle_info({connected, Conn}, #state{connecting = Connecting} = State) ->
     Ready = State#state{
         connecting = fewer(Connecting), backoff = ?MINIMUM_BACKOFF, failures = 0
     },
-    {noreply, hand_out(measured(Ready, Conn), Conn)};
+    {noreply, replenished(hand_out(Ready, Conn))};
+handle_info({server_limit, unknown}, State) ->
+    {noreply, State#state{measured = true}};
+handle_info({server_limit, Limit}, #state{measured = false, size = Size, name = Name} = State) when
+    is_integer(Limit)
+->
+    ok = crowded(Name, Size, Limit),
+    {noreply, State#state{measured = true}};
+handle_info({server_limit, _Limit}, State) ->
+    {noreply, State};
 handle_info({connect_failed, Reason}, #state{connecting = Connecting} = State0) ->
-    State = State0#state{failures = State0#state.failures + 1},
+    State = State0#state{failures = State0#state.failures + 1, connecting = fewer(Connecting)},
     ok = counters:add(State#state.counters, ?DISCONNECTS, 1),
-    Delay = State#state.backoff,
-    ?LOG_WARNING(
-        #{
-            event => connect_failed,
-            pool => State#state.name,
-            reason => Reason,
-            retry_in_ms => Delay
-        },
-        #{domain => [minato]}
-    ),
-    _ = erlang:send_after(Delay, self(), retry),
-    {noreply, State#state{connecting = fewer(Connecting), backoff = longer(Delay)}};
+    {noreply, backed_off(State, Reason)};
 handle_info(retry, State) ->
-    {noreply, replenished(State)};
+    {noreply, replenished(State#state{retry = undefined})};
 handle_info(sweep, State) ->
     _ = erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, swept(State)};
@@ -740,6 +798,48 @@ handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     {noreply, lost(State, Pid)};
 handle_info(_Message, State) ->
     {noreply, State}.
+
+%% One wait at a time, and nothing is opened until it is over: not for a
+%% caller that arrives, and not for a connection that is given up meanwhile.
+%% A connect that fails during the wait was started before it and changes
+%% nothing about when the next one is.
+-spec backed_off(#state{}, term()) -> #state{}.
+backed_off(#state{retry = undefined, backoff = Backoff} = State, Reason) ->
+    Delay = minato_backoff:spread(Backoff),
+    ok = failed(State, Reason, Delay),
+    Timer = erlang:send_after(Delay, self(), retry),
+    State#state{backoff = longer(Backoff), retry = Timer};
+backed_off(#state{retry = Timer} = State, Reason) ->
+    ok = failed(State, Reason, left(erlang:read_timer(Timer))),
+    State.
+
+-spec left(non_neg_integer() | false) -> non_neg_integer().
+left(false) -> 0;
+left(Milliseconds) -> Milliseconds.
+
+-spec failed(#state{}, term(), non_neg_integer()) -> ok.
+failed(#state{name = Name}, Reason, Delay) ->
+    ?LOG_WARNING(
+        #{event => connect_failed, pool => Name, reason => named(Reason), retry_in_ms => Delay},
+        #{domain => [minato]}
+    ),
+    ok.
+
+%% Written once for every try, and what a server refuses with is the server's
+%% to make as long as it likes: a refusal is logged by what it was, without
+%% the list or the text that came with it.
+-spec named(term()) -> term().
+named({Module, Why}) when
+    Module =:= minato_auth; Module =:= minato_scram; Module =:= minato_conn
+->
+    {Module, kind(Why)};
+named(Reason) ->
+    minato_telemetry:reason(Reason).
+
+-spec kind(term()) -> atom().
+kind(Why) when is_atom(Why) -> Why;
+kind(Why) when is_tuple(Why), tuple_size(Why) > 0 -> kind(element(1, Why));
+kind(_Why) -> unnamed.
 
 %% A crash reason can carry a stacktrace, and its frames the options, so only an
 %% atom such as `killed` is kept.
@@ -782,31 +882,19 @@ lending(State, Conn, Expected, Pid) ->
     end.
 
 -doc """
-Check the connection budget once, on the first connection this pool opens.
+Say something, once, if one pool alone wants a quarter of what the server allows.
 
 `size` connections per pool, times the pools on this node, times the nodes, is
 the number PostgreSQL compares with `max_connections`, and it is the number
-nobody works out until the server starts refusing. The pool asks the server what
-its limit is while it holds a connection nobody is using yet, and says something
-if one pool alone wants a quarter of it.
+nobody works out until the server starts refusing. A connector asks the server
+for its limit before it hands its connection over, see `limit/1`, and the pool
+compares.
 
 Once, not per connection: the answer does not change, and a warning that repeats
 is a warning people filter.
 """.
--spec measured(#state{}, minato_conn:conn()) -> #state{}.
-measured(#state{measured = true} = State, _Conn) ->
-    State;
-measured(#state{size = Size, name = Name} = State, Conn) ->
-    case minato_query:simple(Conn, ~"SHOW max_connections") of
-        {ok, [#{rows := [{Limit}]}], _Read} -> crowded(Name, Size, Limit);
-        _Unknown -> ok
-    end,
-    State#state{measured = true}.
-
--spec crowded(name(), pos_integer(), term()) -> ok.
-crowded(Name, Size, Limit) when is_binary(Limit) ->
-    crowded(Name, Size, binary_to_integer(Limit));
-crowded(Name, Size, Limit) when is_integer(Limit), Size * ?CROWDED_SHARE > Limit ->
+-spec crowded(name(), pos_integer(), non_neg_integer()) -> ok.
+crowded(Name, Size, Limit) when Size * ?CROWDED_SHARE > Limit ->
     _ = ?LOG_WARNING(
         #{
             event => connection_budget,
@@ -840,14 +928,24 @@ unreachable(#state{disconnected = wait}) ->
 unreachable(#state{failures = Failures, idle = Idle, borrowed = Borrowed}) ->
     Failures > 0 andalso Idle =:= [] andalso holders(Borrowed) =:= 0.
 
+%% Everybody waiting has a connection on its way, as far as the size allows: a
+%% caller that arrives behind a connect already in flight is not served by it,
+%% because whoever arrived first is. A server that refused the last connect is
+%% asked one at a time until it stops refusing, however many are waiting, and
+%% not at all until the wait after that refusal is over.
 -spec grown(#state{}) -> #state{}.
-grown(#state{size = Size, connecting = Connecting} = State) ->
-    case held(State) < Size andalso Connecting =:= 0 of
-        true ->
-            connect(State);
-        false ->
-            State
+grown(#state{retry = Timer} = State) when is_reference(Timer) ->
+    State;
+grown(#state{size = Size, connecting = Connecting, waiting = Waiting} = State) ->
+    Room = Size - held(State),
+    case wanted(queue:len(Waiting), State#state.failures) - Connecting of
+        Missing when Missing > 0, Room > 0 -> connects(State, min(Missing, Room));
+        _Covered -> State
     end.
+
+-spec wanted(integer(), non_neg_integer()) -> integer().
+wanted(Waiting, 0) -> Waiting;
+wanted(Waiting, _Failures) -> min(Waiting, 1).
 
 -spec held(#state{}) -> non_neg_integer().
 held(#state{idle = Idle, borrowed = Borrowed, connecting = Connecting}) ->
@@ -1045,16 +1143,14 @@ expired(Deadline) -> erlang:monotonic_time(millisecond) >= Deadline.
 %% connection nobody is going to open.
 -spec replenished(#state{}) -> #state{}.
 replenished(State) ->
-    Filled = fill(State),
-    case queue:is_empty(Filled#state.waiting) of
-        true -> Filled;
-        false -> grown(Filled)
-    end.
+    grown(fill(State)).
 
 -doc false.
 -spec fill(#state{}) -> #state{}.
-fill(#state{min_size = Floor} = State) ->
-    case Floor - held(State) of
+fill(#state{retry = Timer} = State) when is_reference(Timer) ->
+    State;
+fill(#state{min_size = Floor, connecting = Connecting, failures = Failures} = State) ->
+    case wanted(Floor - held(State) + Connecting, Failures) - Connecting of
         Missing when Missing > 0 -> connects(State, Missing);
         _Enough -> State
     end.
@@ -1071,15 +1167,58 @@ connects(State, Count) ->
 -spec connect(#state{}) -> #state{}.
 connect(#state{opts = Opts, connectors = Connectors, connecting = Connecting} = State) ->
     Pool = self(),
-    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Opts) end),
+    Name = State#state.name,
+    Measured = State#state.measured,
+    {Pid, Ref} = spawn_monitor(fun() -> connected(Pool, Name, Opts, Measured) end),
     State#state{connectors = Connectors#{Ref => Pid}, connecting = Connecting + 1}.
 
--spec connected(pid(), minato_conn:opts()) -> ok.
-connected(Pool, Opts) ->
+-spec connected(pid(), name(), minato_conn:opts(), boolean()) -> ok.
+connected(Pool, Name, Opts, Measured) ->
     case minato_conn:attempt(Opts) of
-        {ok, Conn} -> handed(Pool, Conn);
+        {ok, Conn} when Measured -> handed(Pool, minato_conn:pooled(Conn, Name));
+        {ok, Conn} -> asked_its_limit(Pool, minato_conn:pooled(Conn, Name));
         {error, Reason} -> refused(Pool, Reason)
     end.
+
+%% The connector asks, not the pool: the answer is the server's to delay or to
+%% get wrong, and the pool is the one process every caller is waiting on. A
+%% server that refuses the question still has a connection worth keeping, and
+%% one that answers out of protocol does not. An answer with no limit in it is
+%% an answer all the same, and the pool is told so that nobody asks again.
+-spec asked_its_limit(pid(), minato_conn:conn()) -> ok.
+asked_its_limit(Pool, Conn) ->
+    try minato_query:simple(Conn, ~"SHOW max_connections") of
+        {ok, Results, Read} ->
+            ok = told(Pool, limit(Results)),
+            handed(Pool, Read);
+        {error, _Refused, Read} ->
+            ok = told(Pool, unknown),
+            handed(Pool, Read);
+        {error, Reason} ->
+            ok = minato_conn:close(Conn),
+            refused(Pool, Reason)
+    catch
+        error:{Module, #{reason := Reason}} when is_atom(Module) ->
+            ok = minato_conn:close(Conn),
+            refused(Pool, {Module, Reason})
+    end.
+
+-spec told(pid(), non_neg_integer() | unknown) -> ok.
+told(Pool, Limit) ->
+    Pool ! {server_limit, Limit},
+    ok.
+
+%% Exported for its tests. Anything but a short run of digits is `unknown`: the
+%% text is the server's, and a long one is an integer worth megabytes.
+-doc false.
+-spec limit([minato_protocol:result()]) -> non_neg_integer() | unknown.
+limit([#{rows := [{Text}]}]) when is_binary(Text), byte_size(Text) =< ?LONGEST_LIMIT ->
+    case string:to_integer(Text) of
+        {Limit, ~""} when is_integer(Limit), Limit >= 0 -> Limit;
+        _Other -> unknown
+    end;
+limit(_Results) ->
+    unknown.
 
 -spec handed(pid(), minato_conn:conn()) -> ok.
 handed(Pool, Conn) ->

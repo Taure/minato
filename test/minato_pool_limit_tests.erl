@@ -1,0 +1,492 @@
+-module(minato_pool_limit_tests).
+-moduledoc """
+What a pool makes of the limit it asks its first connection for, against a
+server that answers the question with whatever each case needs.
+""".
+
+-include_lib("eunit/include/eunit.hrl").
+
+-export([log/2, asked/4]).
+
+-define(POOL, minato_pool_limit_tests).
+
+-define(READY, [
+    authentication_ok,
+    {parameter_status, ~"server_version", ~"17.4"},
+    {backend_key_data, 4242, 777},
+    {ready_for_query, idle}
+]).
+
+-define(NOT_THE_RESET, [{command_complete, ~"SELECT 1"}, {ready_for_query, idle}]).
+
+%%----------------------------------------------------------------------
+%% The limit a pool asks its first connection for
+%%----------------------------------------------------------------------
+
+a_limit_is_read_from_a_short_run_of_digits_and_nothing_else_test_() ->
+    [
+        ?_assertEqual(Expected, minato_pool:limit(Results))
+     || {Expected, Results} <- [
+            {100, [answered([{~"100"}])]},
+            {0, [answered([{~"0"}])]},
+            {1234567890, [answered([{~"1234567890"}])]},
+            {unknown, [answered([{~"plenty"}])]},
+            {unknown, [answered([{~"100 or so"}])]},
+            {unknown, [answered([{~"-1"}])]},
+            {unknown, [answered([{~""}])]},
+            {unknown, [answered([{binary:copy(~"9", 11)}])]},
+            {unknown, [answered([{null}])]},
+            {unknown, [answered([{~"100"}, {~"200"}])]},
+            {unknown, [answered([{~"100", ~"200"}])]},
+            {unknown, [answered([])]},
+            {unknown, []}
+        ]
+    ].
+
+-spec answered([minato_protocol:row()]) -> minato_protocol:result().
+answered(Rows) ->
+    #{command => show, num_rows => length(Rows), rows => Rows}.
+
+a_pool_outlives_whatever_answers_its_question_test_() ->
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                ok = ready(),
+                Server = minato_backend_server:start([?READY, Answer]),
+                Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
+                {ok, Pool} = minato_owned:pool(?POOL, #{
+                    size => 1, min_size => 1, connection => Connection
+                }),
+                try
+                    ok = asked_for_the_limit(Server, 10),
+                    timer:sleep(300),
+                    ?assertEqual(Pool, whereis(?POOL)),
+                    ?assertMatch(#{size := 1}, minato:stats(?POOL))
+                after
+                    ok = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Answer} <- [
+            {"a limit that is not a number", shown(~"plenty")},
+            {"a limit of a megabyte of digits", shown(binary:copy(~"9", 1 bsl 20))},
+            {"a row with no columns", [{data_row, <<0:16>>}, {ready_for_query, idle}]},
+            {"a message that is not one", [{unsupported, $D, ~"x"}, {ready_for_query, idle}]},
+            {"a refusal", [
+                {error_response, #{
+                    severity => ~"ERROR", code => ~"42501", message => ~"permission denied"
+                }},
+                {ready_for_query, idle}
+            ]}
+        ]
+    ].
+
+a_pool_still_answers_while_its_question_goes_unanswered_test_() ->
+    {timeout, 30, fun() ->
+        ok = ready(),
+        Server = minato_backend_server:start([?READY]),
+        Connection = opts(minato_backend_server:port(Server), #{timeout => 1000}),
+        {ok, _Pool} = minato_owned:pool(?POOL, #{
+            size => 1, min_size => 1, connection => Connection
+        }),
+        try
+            ok = asked_for_the_limit(Server, 10),
+            {Microseconds, Stats} = timer:tc(fun() -> minato:stats(?POOL) end),
+            ?assertMatch(#{size := 1, idle := 0}, Stats),
+            ?assert(Microseconds < 1000000)
+        after
+            ok = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+shown(Limit) ->
+    [
+        {row_description, [
+            #{
+                name => ~"max_connections",
+                table_oid => 0,
+                column => 0,
+                type_oid => 25,
+                type_size => -1,
+                type_modifier => -1,
+                format => text
+            }
+        ]},
+        {data_row, [Limit]},
+        {command_complete, ~"SHOW"},
+        {ready_for_query, idle}
+    ].
+
+asked_for_the_limit(_Server, 0) ->
+    error(never_asked);
+asked_for_the_limit(Server, Tries) ->
+    case
+        [Sql || {query, ~"SHOW max_connections" = Sql} <- minato_backend_server:received(Server)]
+    of
+        [] -> asked_for_the_limit(Server, Tries - 1);
+        _Asked -> ok
+    end.
+
+%%----------------------------------------------------------------------
+%% What the pool does with the answer
+%%----------------------------------------------------------------------
+
+a_pool_that_wants_more_than_a_quarter_of_the_limit_says_so_once_test_() ->
+    {timeout, 30, fun() ->
+        ?assertMatch(
+            [#{size := 26, server_max_connections := 100}], budgets(26)
+        )
+    end}.
+
+a_pool_that_wants_a_quarter_of_the_limit_says_nothing_test_() ->
+    {timeout, 30, fun() -> ?assertEqual([], budgets(25)) end}.
+
+%% Two connections are opened before either has its answer, so both ask.
+budgets(Size) ->
+    Warnings = warnings(fun() ->
+        Server = minato_backend_server:start([?READY, shown(~"100")]),
+        try
+            ok = pooled(Server, #{size => Size, min_size => 2}),
+            Read = read(Server, fun(Seen) -> limits(Seen) >= 2 end),
+            ?assertEqual(2, limits(Read)),
+            timer:sleep(100),
+            ?assertMatch(#{disconnects := 0}, minato:stats(?POOL))
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end),
+    [Warning || #{event := connection_budget} = Warning <- Warnings].
+
+%% No connection here answers the reset, so a checkout goes through more than
+%% one, and the pool has its answer from the first.
+a_connection_opened_after_the_answer_is_not_asked_again_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start([?READY, shown(~"100"), ?NOT_THE_RESET]),
+        try
+            ok = pooled(Server, #{size => 1, min_size => 1}),
+            ?assertEqual(
+                {error, {session_reset, unread_answer}}, minato_pool:checkout(?POOL, 1000)
+            ),
+            Read = read(Server, fun(Seen) -> resets(Seen) >= 2 end),
+            ?assert(resets(Read) >= 2),
+            ?assertEqual(1, limits(Read))
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%% An answer that names no limit is still the server's answer, and the next
+%% connection would only be given it again.
+an_answer_with_no_limit_in_it_is_not_asked_for_again_test_() ->
+    Refusal = [
+        {error_response, #{severity => ~"ERROR", code => ~"42501", message => ~"denied"}},
+        {ready_for_query, idle}
+    ],
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                Server = minato_backend_server:start([?READY, Answer, ?NOT_THE_RESET]),
+                try
+                    ok = pooled(Server, #{size => 1, min_size => 1}),
+                    ?assertEqual(
+                        {error, {session_reset, unread_answer}},
+                        minato_pool:checkout(?POOL, 1000)
+                    ),
+                    Read = read(Server, fun(Seen) -> resets(Seen) >= 2 end),
+                    ?assert(resets(Read) >= 2),
+                    ?assertEqual(1, limits(Read))
+                after
+                    _ = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Answer} <- [{"not a number", shown(~"plenty")}, {"a refusal", Refusal}]
+    ].
+
+%% The question is a statement like any other, and its event says whose it is.
+the_question_is_an_event_that_names_the_pool_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start([?READY, shown(~"100")]),
+        Handler = {?MODULE, asked},
+        _ = telemetry:detach(Handler),
+        ok = telemetry:attach(Handler, [minato, query, stop], fun ?MODULE:asked/4, self()),
+        try
+            ok = pooled(Server, #{size => 1, min_size => 1}),
+            receive
+                {asked, Metadata} -> ?assertMatch(#{pool := ?POOL}, Metadata)
+            after 1000 -> error(never_asked)
+            end
+        after
+            telemetry:detach(Handler),
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+asked(_Event, _Measurements, Metadata, Test) ->
+    Test ! {asked, Metadata}.
+
+a_question_that_is_never_answered_costs_the_connection_test_() ->
+    {timeout, 30, fun() ->
+        Server = minato_backend_server:start([?READY]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 1, min_size => 1}, #{timeout => 200}),
+                Read = read(Server, fun(Seen) -> limits(Seen) >= 2 end),
+                ?assert(limits(Read) >= 2),
+                ?assert(lists:member(terminate, Read)),
+                ?assertMatch(#{disconnects := Lost} when Lost >= 1, minato:stats(?POOL))
+            end),
+            ?assertMatch([#{reason := {socket, timeout}} | _Later], Failed)
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+an_answer_that_is_not_a_message_costs_the_connection_test_() ->
+    {timeout, 30, fun() ->
+        NotOne = [{unsupported, $D, ~"x"}, {ready_for_query, idle}],
+        Server = minato_backend_server:start([?READY, NotOne]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 1, min_size => 1}),
+                Read = read(Server, fun(Seen) -> limits(Seen) >= 2 end),
+                ?assert(limits(Read) >= 2),
+                ?assert(lists:member(terminate, Read))
+            end),
+            ?assertMatch([#{reason := {minato_protocol, _Why}} | _Later], Failed)
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%%----------------------------------------------------------------------
+%% Trying again
+%%----------------------------------------------------------------------
+
+%% Every pool that lost the same server would otherwise ask for it again at
+%% the same instants, each time the wait doubled.
+a_pool_that_cannot_connect_waits_a_time_of_its_own_test_() ->
+    {timeout, 30, fun() ->
+        Refused =
+            {error_response, #{
+                severity => ~"FATAL",
+                code => ~"57P03",
+                message => ~"the database system is starting up"
+            }},
+        Server = minato_backend_server:start([[Refused]]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 1, min_size => 1}),
+                read(Server, fun(Seen) -> startups(Seen) >= 4 end)
+            end),
+            Waits = [Wait || #{retry_in_ms := Wait} <- lists:sublist(Failed, 4)],
+            Longest = [100, 200, 400, 800],
+            ?assertEqual(4, length(Waits)),
+            ?assertEqual([], outside(Waits, Longest), Waits),
+            ?assertNotEqual(Longest, Waits)
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%% A pool below its floor opens what is missing at once, so the first refusal
+%% starts the wait and the others arrive during it.
+a_connect_that_fails_during_the_wait_is_warned_of_as_well_test_() ->
+    {timeout, 30, fun() ->
+        Refused =
+            {error_response, #{
+                severity => ~"FATAL",
+                code => ~"57P03",
+                message => ~"the database system is starting up"
+            }},
+        Server = minato_backend_server:start([[Refused]]),
+        try
+            Failed = failures(fun() ->
+                ok = pooled(Server, #{size => 5, min_size => 5}),
+                Read = read(Server, fun(Seen) -> startups(Seen) >= 5 end),
+                ?assert(startups(Read) >= 5)
+            end),
+            Waits = [Wait || #{retry_in_ms := Wait} <- Failed],
+            ?assert(length(Waits) >= 5, Waits),
+            ?assertEqual([], [Wait || Wait <- Waits, not (is_integer(Wait) andalso Wait >= 0)])
+        after
+            _ = minato:stop_pool(?POOL),
+            minato_backend_server:stop(Server)
+        end
+    end}.
+
+%%----------------------------------------------------------------------
+%% A pool that would send everything in the clear
+%%----------------------------------------------------------------------
+
+a_pool_without_tls_to_another_host_says_so_once_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Host])), fun() ->
+            ?assertEqual(
+                [#{event => unencrypted_connection, pool => ?POOL, host => Host}],
+                unencrypted(#{host => Host})
+            )
+        end}
+     || Host <- [
+            "db.example.invalid", "10.0.0.5", {10, 0, 0, 5}, {8193, 3512, 0, 0, 0, 0, 0, 1}, 'db'
+        ]
+    ].
+
+a_pool_on_this_machine_or_one_that_said_how_says_nothing_test_() ->
+    [
+        {lists:flatten(io_lib:format("~p", [Connection])), fun() ->
+            ?assertEqual([], unencrypted(Connection))
+        end}
+     || Connection <- [
+            #{host => "db.example.invalid", ssl => false},
+            #{host => "db.example.invalid", ssl => true},
+            #{},
+            #{host => "localhost"},
+            #{host => localhost},
+            #{host => loopback},
+            #{host => "127.0.0.1"},
+            #{host => "127.8.9.10"},
+            #{host => {127, 0, 0, 1}},
+            #{host => "::1"},
+            #{host => {0, 0, 0, 0, 0, 0, 0, 1}},
+            #{host => {local, "/var/run/postgresql/.s.PGSQL.5432"}}
+        ]
+    ].
+
+%% Nothing is opened: the floor is zero and nobody asks.
+unencrypted(Connection) ->
+    Warnings = warnings(fun() ->
+        ok = ready(),
+        {ok, _Pool} = minato_owned:pool(?POOL, #{
+            size => 1, min_size => 0, connection => Connection#{user => ~"minato"}
+        }),
+        ok = minato:stop_pool(?POOL)
+    end),
+    [Warning || #{event := unencrypted_connection} = Warning <- Warnings].
+
+%%----------------------------------------------------------------------
+%% What a failed connect is logged with
+%%----------------------------------------------------------------------
+
+%% The warning is written once for every try, and what the server refused with
+%% is the server's to make as long as it likes.
+a_refusal_is_logged_by_its_name_and_not_in_the_servers_words_test_() ->
+    Long = binary:copy(~"x", 100000),
+    Refused =
+        {error_response, #{severity => ~"FATAL", code => ~"28P01", message => Long}},
+    [
+        {timeout, 30,
+            {Label, fun() ->
+                Server = minato_backend_server:start([Answer]),
+                try
+                    [#{reason := Reason} | _Later] = failures(fun() ->
+                        ok = pooled(Server, #{size => 1, min_size => 1}, #{password => ~"pencil"}),
+                        read(Server, fun(Seen) -> startups(Seen) >= 1 end)
+                    end),
+                    ?assertEqual(Expected, Reason)
+                after
+                    _ = minato:stop_pool(?POOL),
+                    minato_backend_server:stop(Server)
+                end
+            end}}
+     || {Label, Expected, Answer} <- [
+            {"an error", {pgsql_error, #{severity => ~"FATAL", code => ~"28P01"}}, [Refused]},
+            {"mechanisms it made up", {minato_auth, no_supported_mechanism}, [
+                {authentication_sasl, [Long]}
+            ]},
+            {"a second request in one exchange", {minato_auth, method_changed_mid_exchange}, [
+                {authentication_sasl, [~"SCRAM-SHA-256"]}, {authentication_sasl, [Long]}
+            ]}
+        ]
+    ].
+
+%%----------------------------------------------------------------------
+%% Helpers
+%%----------------------------------------------------------------------
+
+%% A run that was cut short leaves its pool under the supervisor, and the next
+%% run would find the name taken.
+ready() ->
+    {ok, _Started} = application:ensure_all_started(minato),
+    _ = minato:stop_pool(?POOL),
+    ok.
+
+pooled(Server, Sizes) ->
+    pooled(Server, Sizes, #{}).
+
+pooled(Server, Sizes, Opts) ->
+    ok = ready(),
+    Connection = opts(minato_backend_server:port(Server), Opts),
+    {ok, _Pool} = minato_owned:pool(?POOL, Sizes#{connection => Connection}),
+    ok.
+
+opts(Port, Opts) ->
+    maps:merge(
+        #{host => "127.0.0.1", port => Port, user => ~"minato", timeout => 1000},
+        Opts
+    ).
+
+%% Everything the server has read, once that is enough or it has been asked
+%% often enough. The server hands over what it read only once, so it is kept.
+read(Server, Enough) ->
+    read(Server, Enough, 10, []).
+
+read(Server, Enough, Tries, Before) ->
+    Read = Before ++ minato_backend_server:received(Server),
+    case Tries =:= 0 orelse Enough(Read) of
+        true -> Read;
+        false -> read(Server, Enough, Tries - 1, Read)
+    end.
+
+limits(Read) ->
+    length([Sql || {query, ~"SHOW max_connections" = Sql} <- Read]).
+
+%% The waits that are not in the upper half of the longest each could be.
+outside(Waits, Longest) ->
+    [Wait || {Wait, Most} <- lists:zip(Waits, Longest), Wait < Most div 2 orelse Wait > Most].
+
+startups(Read) ->
+    length([Startup || {startup, _Parameters} = Startup <- Read]).
+
+resets(Read) ->
+    length([Sql || {query, <<"CLOSE ALL; ", _/binary>> = Sql} <- Read]).
+
+failures(Fun) ->
+    [Warning || #{event := connect_failed} = Warning <- warnings(Fun)].
+
+%% What this pool warned of while `Fun` ran. A run that was killed in here
+%% never took its handler away, and the name would be taken.
+%%
+%% Every capture has a reference of its own. The pool is still failing when
+%% one ends, so it can warn once more before the handler is gone, and the
+%% tests of a module share a process: without the reference that warning was
+%% the first thing the next test heard.
+warnings(Fun) ->
+    Handler = minato_pool_limit_tests_capture,
+    Capture = make_ref(),
+    _ = logger:remove_handler(Handler),
+    ok = logger:add_handler(Handler, ?MODULE, #{config => {self(), Capture}}),
+    try
+        _ = Fun(),
+        heard(Capture)
+    after
+        logger:remove_handler(Handler)
+    end.
+
+log(#{level := warning, msg := {report, #{pool := ?POOL} = Report}}, #{config := {Test, Capture}}) ->
+    Test ! {warned, Capture, Report};
+log(_Event, _Config) ->
+    ok.
+
+heard(Capture) ->
+    receive
+        {warned, Capture, Report} -> [Report | heard(Capture)]
+    after 100 -> []
+    end.

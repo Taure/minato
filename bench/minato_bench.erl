@@ -31,6 +31,9 @@ The workloads are chosen to separate those costs:
   execute, sync, every time. `pgo` caches statements itself and cannot be asked
   not to, so it has no number here either. This row is what a client costs when
   the caller avoids its cache.
+- `first_use` is `minato_query:cached/4` on a statement the connection has not
+  seen, a different one every time: what keeping a statement costs before it
+  pays. minato only.
 - `cached` is the same statement kept per connection, which is what all three
   do by default: `minato_query:cached/4`, pgo's own cache, and `prepared_query`
   in epgsql. This is the comparison that matters, and every row below it is run
@@ -65,6 +68,7 @@ clients on the same run, and a difference under about ten percent is noise.
 
 -define(DEFAULT_ITERATIONS, 2000).
 -define(DEFAULT_WARMUP, 200).
+-define(FIRST_USE_BATCH, 500).
 -define(POOL_SIZE, 8).
 -define(WORKERS, 8).
 
@@ -95,7 +99,7 @@ started(Client) ->
     parsed(Client, Setup).
 
 workloads() ->
-    [simple, unnamed, cached, rows_1000, rows_5000, wide_row, insert, concurrent].
+    [simple, unnamed, first_use, cached, rows_1000, rows_5000, wide_row, insert, concurrent].
 
 %%----------------------------------------------------------------------
 %% Measuring
@@ -145,6 +149,16 @@ runner(minato, simple, _Setup) ->
     stateful(fun(C) -> minato_query:simple(C, ~"SELECT 1") end);
 runner(minato, unnamed, _Setup) ->
     stateful(fun(C) -> minato_query:query(C, ~"SELECT $1::int4", [42]) end);
+runner(minato, first_use, _Setup) ->
+    fun() ->
+        {Turn, Conn} = first_use(),
+        Sql = <<"SELECT $1::int4 /* ", (integer_to_binary(Turn))/binary, " */">>,
+        {ok, _Result, Next} = minato_query:cached(Conn, Sql, [42]),
+        put({?MODULE, first_use}, {Turn + 1, Next}),
+        ok
+    end;
+runner(_Other, first_use, _Setup) ->
+    unsupported;
 runner(minato, cached, _Setup) ->
     stateful(fun(C) -> minato_query:cached(C, ~"SELECT $1::int4", [42]) end);
 runner(minato, rows_1000, _Setup) ->
@@ -206,6 +220,26 @@ stateful(Fun) ->
                 error({minato_bench, Other})
         end
     end.
+
+%% A connection of its own, with room to keep every statement it is given, so
+%% that each call is the first use of a statement and never the unnamed path.
+%% It is replaced every 500 statements: kept for the whole run, the server and
+%% the client would both hold more with every call, and a later sample would
+%% cost more than an earlier one for that alone.
+first_use() ->
+    case get({?MODULE, first_use}) of
+        undefined ->
+            {0, first_use_connection()};
+        {Turn, Conn} when Turn rem ?FIRST_USE_BATCH =:= 0 ->
+            ok = minato_conn:close(Conn),
+            {Turn, first_use_connection()};
+        Held ->
+            Held
+    end.
+
+first_use_connection() ->
+    {ok, Conn} = minato_conn:connect((connection())#{prepared_statements => ?FIRST_USE_BATCH}),
+    Conn.
 
 held() ->
     get({?MODULE, conn}).
@@ -298,16 +332,18 @@ parsed(epgsql, #{conn := Conn} = Setup) ->
         {wide_row, "bench_wide", binary_to_list(wide_sql())},
         {insert, "bench_insert", binary_to_list(insert_sql())}
     ],
-    Statements = #{
-        Key => element(2, epgsql:parse(Conn, Name, Sql, []))
-     || {Key, Name, Sql} <- Named
-    },
+    Statements =
+        #{
+            Key => element(2, epgsql:parse(Conn, Name, Sql, []))
+         || {Key, Name, Sql} <- Named
+        },
     Setup#{statements => Statements};
 parsed(_Client, Setup) ->
     Setup.
 
 teardown(minato, _Setup) ->
     ok = minato_conn:close(held()),
+    ok = minato_conn:close(element(2, first_use())),
     _ = minato:stop_pool(bench_pool),
     ok;
 teardown(pgo, _Setup) ->

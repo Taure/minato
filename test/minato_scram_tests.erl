@@ -64,6 +64,9 @@ generated_nonce_is_thirty_two_printable_characters_test() ->
     ?assertEqual(32, byte_size(Nonce)),
     ?assert(lists:all(fun printable/1, binary_to_list(Nonce))).
 
+generated_nonce_is_twenty_four_random_bytes_test() ->
+    ?assertEqual(24, byte_size(base64:decode(generated_nonce()))).
+
 generated_nonce_differs_every_time_test() ->
     Nonces = [generated_nonce() || _ <- lists:seq(1, 64)],
     ?assertEqual(64, length(lists:usort(Nonces))).
@@ -244,6 +247,13 @@ an_iteration_count_of_twenty_digits_is_still_read_test() ->
         answer(<<"r=", (?NONCE)/binary, ",s=", (?SALT)/binary, ",i=", Digits/binary>>)
     ).
 
+an_iteration_count_of_twenty_one_digits_is_not_read_test() ->
+    Digits = binary:copy(~"9", 21),
+    ?assertError(
+        {minato_scram, #{reason := {iteration_count_too_long, 21}}},
+        answer(<<"r=", (?NONCE)/binary, ",s=", (?SALT)/binary, ",i=", Digits/binary>>)
+    ).
+
 empty_iteration_count_is_rejected_test() ->
     ?assertError(
         {minato_scram, #{reason := {iteration_count_not_a_number, ~""}}},
@@ -336,6 +346,14 @@ truncated_server_signature_is_rejected_test() ->
     ?assertError(
         {minato_scram, #{reason := server_signature_mismatch}},
         minato_scram:server_final(<<"v=", Short/binary>>, vector_check())
+    ).
+
+a_rejected_server_signature_is_reported_by_its_size_test() ->
+    Short = base64:encode(crypto:strong_rand_bytes(16)),
+    ServerFinal = <<"v=", Short/binary>>,
+    ?assertError(
+        {minato_scram, #{reason := server_signature_mismatch, data := {16, ServerFinal}}},
+        minato_scram:server_final(ServerFinal, vector_check())
     ).
 
 empty_server_signature_is_rejected_test() ->

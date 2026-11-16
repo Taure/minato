@@ -12,20 +12,66 @@ directly.
 | `user` | required | the role to authenticate as |
 | `password` | none | a binary or a string, or a fun of no arguments returning one, called once per attempt and never stored; prefer a named `fun my_app:db_password/0` |
 | `database` | the user | as PostgreSQL itself defaults |
-| `host` | `"localhost"` | |
+| `host` | `"localhost"` | a name as a string or an atom, an address as a tuple, or `{local, Path}` for a Unix socket; a binary is refused |
 | `port` | `5432` | |
 | `parameters` | see below | added to the `StartupMessage` |
 | `ssl` | `false` | |
 | `ssl_options` | verify against the OS trust store | each option replaces one default |
-| `channel_binding` | `prefer` under TLS, `disable` without | `require` refuses to connect without it |
-| `auth` | every method | `[scram_sha_256]` to accept nothing else |
-| `connect_timeout` | `5000` | covers the TCP connect and the TLS handshake |
-| `timeout` | `15000` | the per read timeout, and the default statement deadline |
-| `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second |
+| `channel_binding` | `prefer` under TLS, `disable` without | `require` accepts `SCRAM-SHA-256-PLUS` and refuses every other method, including a server that asks for no password |
+| `auth` | every method | the methods a server may ask for, as libpq's `require_auth`; `[scram_sha_256]` to accept nothing else |
+| `connect_timeout` | `5000` | covers the TCP connect, the answer to the TLS request and the TLS handshake together; `infinity` to wait |
+| `timeout` | `15000` | the per read timeout, the default statement deadline, and how long the opening exchange may take from the startup message to `ReadyForQuery`; `infinity` to wait, which also takes away the only bound on how long one call goes on reading: rows that keep arriving are read for as long as they come |
+| `cancel_timeout` | `5000` | how long a cancelled statement has to acknowledge; on Windows also how long closing a TLS connection waits for the server to close first, never more than a second; `infinity` takes away the same bound as `timeout => infinity` does |
 | `prepared_statements` | `64` | how many statements a connection keeps parsed; `0` disables |
-| `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}` | each replaces one default |
+| `socket_options` | `binary`, `{active,false}`, `{packet,raw}`, `{nodelay,true}`, `{send_timeout, Timeout}`, `{send_timeout_close,true}` | each replaces one default; `Timeout` is the connection's `timeout` |
 | `transport` | `socket` | `inet` goes back to the driver every BEAM program uses |
 | `frame_opts` | `#{max_message_length => 67108864}` | raise it only for a single value near PostgreSQL's 1 GB limit |
+
+The defaults connect to any PostgreSQL there is. The setting for a network
+anybody else is on is this, in every connection's options:
+
+```erlang
+#{ssl => true,
+  auth => [scram_sha_256],
+  channel_binding => require}
+```
+
+Without `ssl => true` nothing is encrypted and an MD5 or SCRAM exchange can be
+relayed by anybody on the path. With it and the default `auth`, whoever holds a
+certificate the client accepts can ask for the password and is given it, and
+`channel_binding => prefer` binds only when the server offers to. The three
+together close all of that; the
+[security guide](security.md) has the reasoning. They are not the defaults
+because a client cannot know how a server it has not met is configured, and
+changing them would stop 1.x deployments from connecting.
+
+A pool whose options leave `ssl` out, towards a `host` that is not this
+machine, logs one warning when it starts: `#{event => unencrypted_connection,
+pool => Name, host => Host}`. `localhost`, a loopback address and a Unix socket
+are this machine; a name is not resolved to find out. `ssl => false` written
+out is taken as a decision and logs nothing.
+
+`channel_binding`, `ssl`, `auth`, `ssl_options` and `password` are checked
+before a socket is opened, because a value minato does not know cannot be read
+as the default: the default is the weaker setting. `channel_binding =>
+required`, `ssl => ~"true"` or `auth => scram_sha_256` makes
+`minato_conn:connect/1` raise `{minato_conn, #{message := options, reason :=
+{invalid_option, Key}}}`, and a pool or a listener given one does not start:
+`{error, {invalid_option, Key}}`. `minato_conn:validate/1` answers the same
+question for a configuration that has not been used yet.
+
+`connect_timeout`, `timeout` and `cancel_timeout` are checked with them. Each
+is a number of milliseconds, an integer that is not negative, or `infinity`,
+and anything else is `{invalid_option, Key}`: `"5000"` as an environment
+variable hands it over is not `5000`.
+
+A key that is not in the table above is refused in the same way, whatever its
+value, and so is a key a pool or a listener has no option by: `sslmode`,
+`pool_size` or a misspelt `channel_binding` would otherwise be passed over and
+the default left in force. `ssl_options` are refused without `ssl => true`.
+Such a key is named in the reason when it is an atom. One that is not, a
+binary or a string, is `{invalid_option, not_an_atom}`, so that a map with
+secrets for keys does not put one in an error.
 
 Two startup parameters are sent unless `parameters` overrides them:
 `client_encoding` is `UTF8`, because the codecs decode text as UTF-8 and a
@@ -56,6 +102,26 @@ to. `nodelay`, `keepalive`, `recbuf`, `sndbuf`, `priority`, `reuseaddr`, `tos`,
 `exit_on_close` and `show_econnreset` are accepted and ignored, because this
 transport already does them or configures a port's send queue that is not there.
 
+`send_timeout` defaults to the connection's `timeout` and `send_timeout_close`
+to `true`: a server that stops reading costs one timeout and the connection,
+`{error, {socket, timeout}}`, and a statement deadline, which is spent on reads,
+is no longer the only bound. It bounds a whole write, so a single value of
+hundreds of megabytes over a slow link needs it raised, or `infinity`. A TLS
+session on the socket transport is written by `ssl`, which takes no deadline of
+its own, so there the socket under the session is shut down when the time runs
+out and the connection is closed whatever `send_timeout_close` says. With the
+`minato` application running that costs a timer; without it the bound still
+holds, and costs a process per write.
+
+On Windows that shutdown does not end a write `ssl` has already started, so a
+TLS write on the socket transport to a server that stopped reading is not
+bounded there, and a close that finds such a write in its way waits behind it.
+With `transport => inet` the driver bounds both, on Windows as elsewhere.
+
+Closing is bounded as well. `minato_conn:close/1` gives `Terminate` the shorter
+of `send_timeout` and one second, writes nothing behind bytes the server has
+not taken, and does not raise.
+
 Anything else is refused at connect rather than silently dropped. If you hit
 that with an option the driver takes, it is a gap in the list rather than a
 decision - the list is meant to be what callers pass.
@@ -81,6 +147,14 @@ connections the moment it boots, and one is still enough for the pool to prove
 it can connect and complain at start up rather than at the first query. The rest
 open when a caller finds none free. Set it to `size` for a pool that must be
 warm on the first request, and to `0` for one that may never be used at all.
+
+Each caller waiting gets a connection opened for it, side by side with the
+others, until the pool is at `size`. So the most connects a pool has in flight
+is `size`, which is also the most a restart of the server costs it at once.
+While the last attempt failed there is one attempt at a time, with the backoff
+between them, however many callers are waiting. The backoff doubles from 100 ms
+to 30 s, and each wait is a random time in its upper half, so many nodes that
+lost the same server do not all return to it at once.
 
 `max_idle` is the other half of `min_size`. A pool that grew to meet a busy hour
 would otherwise hold that hour's connections until the process died, which is a
@@ -128,6 +202,63 @@ per module; use `min_size => 1` and a small `size`, since tests are rarely
 concurrent enough to need more; and stop the pool when the suite ends -
 `minato:stop_pool/1` closes every connection it holds.
 
+## PgBouncer and connection poolers
+
+A pooler in transaction mode lends a client a server connection for one
+transaction and takes it back when that ends, so two statements from one
+minato connection can be answered by two backends. minato runs behind one,
+and the suite runs against PgBouncer 1.26 in transaction mode with both
+settings below, but what a session holds does not follow the client.
+
+| | through the pooler |
+| --- | --- |
+| `minato:simple/2`, `minato_query:query/3` | work: one statement is one exchange and stays on one backend |
+| `minato:transaction/2`, `minato_txn` | work: the backend is kept from `BEGIN` to the end |
+| a statement deadline and its cancel | work: the pooler passes the cancel on |
+| `minato:query/3`, `minato_query:cached/3` | need the pooler to follow named statements, or `prepared_statements => 0` |
+| `minato_query:prepare/3` | the same |
+| `minato:start_listener/2` | does not work: connect a listener to the server itself |
+
+`minato:query/3` keeps statements parsed by name, and a name parsed on one
+backend means nothing to the next. PgBouncer follows them from 1.21 when its
+`max_prepared_statements` is above zero, and then nothing needs changing. With
+it at zero, or behind a pooler that does not do this, set
+`prepared_statements => 0` in the connection: every statement is then parsed
+unnamed inside the exchange that runs it. Left at the default, the first use
+of a statement works, because it is parsed and run in one exchange, and a
+later one fails with `26000`, `prepared statement does not exist`, whenever
+the pooler has moved the client to a backend that never parsed it. minato
+parses it again once, which lasts until the next move, or fails with `42P05`
+on a backend that already has the name.
+
+Behind a PgBouncer that follows statements, a migration needs one step more
+than it does on a direct connection. PgBouncer keeps a statement by its SQL
+text and prepares that on every backend it uses, so a statement the server
+refuses after a table changed (`0A000`, or `42883` when a parameter's type
+changed) stays refused, for new clients as well, until `RECONNECT` on
+PgBouncer's admin console gives it new backends. minato returns that error
+once and does not run the statement a third time. After the `RECONNECT`, a
+minato connection still holds the column and parameter types it was told
+before the migration, and PgBouncer has prepared the statement again without
+telling it. A different number of columns is noticed and parsed again; a
+column whose type changed in place is read as the type it used to be. So when
+a migration changes the type of a column, recycle the minato pools as well
+(`minato:stop_pool/1` and start, or a `max_age`), or run with
+`prepared_statements => 0`.
+
+A notification is sent to the backend that ran `LISTEN`, and the pooler has by
+then taken that backend back, so it has nobody to hand the notification to and
+drops it. Nothing fails: the listener subscribes, and hears nothing.
+
+Three smaller things. `channel_binding` and the SCRAM exchange are with the
+pooler, which authenticates to the server on its own. The limit a pool reads
+for its `connection_budget` warning is the server's `max_connections`, not
+what the pooler will accept. And anything set on the session outside a
+transaction, with `SET` or an advisory lock, lands on a backend the next client
+inherits; the reset a minato pool sends between borrowers runs on whichever
+backend it is given, so it is not the defence here that it is on a direct
+connection.
+
 ## A listener
 
 ```erlang
@@ -143,16 +274,63 @@ Options to `minato:query/4`, `minato:simple/3` and the `minato_query` functions:
 
 | option | default | |
 | --- | --- | --- |
-| `timeout` | the connection's `timeout` | deadline for the statement; on expiry it is cancelled on the server, not abandoned |
+| `timeout` | the connection's `timeout` | deadline for the statement, in milliseconds or `infinity`; on expiry it is cancelled on the server, not abandoned. Anything else raises `{minato_query, #{reason := {invalid_option, timeout}}}` before the statement is sent |
 | `return_rows_as_maps` | `false` | a map per row instead of a tuple |
-| `column_name_as_atom` | `false` | atom keys in those maps |
+| `column_name_as_atom` | `false` | atom keys in those maps, for names that are atoms already |
 | `uuid_format` | `string` | `binary` for the raw 16 bytes |
 | `datetime_format` | `datetime` | `microseconds` for lossless integers |
 
-`column_name_as_atom` is off because a column name is not always something you
-wrote: a query built at run time can alias a column after a value, and every
-distinct alias would make an atom that is never collected. Turn it on for
-queries whose column names you chose.
+`column_name_as_atom` never makes an atom: the server chooses the names of the
+columns it describes, and an atom is never collected. A key is an atom when the
+name is one already on this node, which the names your code matches on are, and
+the binary the server sent otherwise. A column aliased at run time, or one no
+loaded module mentions, comes back under a binary key.
+
+### A deadline bounds time, not memory
+
+A result is read whole before it is returned, and the deadline is on how long
+that takes, not on how much arrives. What one call can make its caller hold is
+what the server sends before the deadline and for `cancel_timeout` after it:
+at the defaults, twenty seconds of rows at whatever rate the link carries,
+which on a fast network is gigabytes. minato has no limit on the size of a
+result.
+
+`timeout => infinity`, on the connection or on a statement, takes the bound
+away altogether, and so does `cancel_timeout => infinity`: rows that keep
+arriving are read for as long as they come. Use `infinity` for a statement
+that is known to be slow and small, on a server that is trusted over TLS, and
+not as a connection's default.
+
+For a result that may be large, keep both finite and read it in parts. minato
+has no cursor or streaming call of its own, and needs none: a cursor is SQL.
+Each `FETCH` is a statement with a deadline of its own and a size the caller
+chose, and each part is dealt with before the next is asked for:
+
+```erlang
+in_parts(Pool, Handle) ->
+    minato:transaction(Pool, fun(Conn) ->
+        Declare = ~"DECLARE big CURSOR FOR SELECT id, payload FROM events",
+        {ok, _Declared, Open} = minato_query:simple(Conn, Declare),
+        fetched(Open, Handle)
+    end).
+
+fetched(Conn, Handle) ->
+    case minato_query:query(Conn, ~"FETCH 1000 FROM big", [], #{timeout => 5000}) of
+        {ok, #{rows := []}, Read} ->
+            {ok, done, Read};
+        {ok, #{rows := Rows}, Read} ->
+            ok = Handle(Rows),
+            fetched(Read, Handle);
+        {error, Reason, Read} ->
+            {rollback, Reason, Read};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+```
+
+Paging by key, `WHERE id > $1 ORDER BY id LIMIT 1000`, does the same without a
+transaction held open. A result that used to arrive and now takes longer than
+`timeout` to do so needs `timeout` raised for that call, to a number.
 
 ## The application environment
 
@@ -160,12 +338,19 @@ queries whose column names you chose.
 {minato, [
     {pools, #{main => #{size => 10, connection => #{user => ~"minato"}}}},
     {listeners, #{events => #{connection => #{user => ~"minato"}}}},
-    {log_statements, false}
+    {log_statements, false},
+    {log_values, false}
 ]}.
 ```
 
 `pools` and `listeners` are started by minato's supervisor, so they come up with
-the application rather than after it. `log_statements` puts the SQL in events
+the application rather than after it. `minato_overdue` and `minato_sup` are
+minato's own processes and not names for either: declared, the application does
+not start, and `minato:start_pool/2` answers `{error, {reserved_name, Name}}`.
+`log_statements` puts the SQL in events
 and logs; it is read per call, so it can be turned on while something is
-happening and off again afterwards. See [Security](security.md) for why it is
-off by default.
+happening and off again afterwards. `log_values` leaves the values a failure
+quotes in query events and in the error a parameter that would not encode
+raises; without it an event keeps the server error's code and the names it
+gives, and the raise says `redacted`. It is read per call too. See
+[Security](security.md) for why both are off by default.
