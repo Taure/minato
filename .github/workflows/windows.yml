@@ -41,7 +41,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: erlef/setup-beam@0a75ccf1c18916f948584bdc83392d72e26f58f7 # v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: '28'
           rebar3-version: '3'
