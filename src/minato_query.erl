@@ -935,7 +935,7 @@ drain(Conn) ->
 -spec unbound_answer(minato_protocol:backend()) -> no_return().
 unbound_answer(Message) when is_atom(Message) ->
     bad(execute, unexpected_message, Message);
-unbound_answer(Message) ->
+unbound_answer(Message) when is_tuple(Message) ->
     bad(execute, unexpected_message, element(1, Message)).
 
 -spec unexpected(minato_protocol:backend(), atom()) -> no_return().
